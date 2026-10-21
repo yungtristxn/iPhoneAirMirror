@@ -26,8 +26,11 @@ Updated: 2026-10-21
   FFmpeg AAC/avcodec/avutil with no FDK. Default packaging still selects FDK.
   The optional `decoder-lab` feature separately blocks receiver startup.
 - The local candidate retains the known `994 2160` display-aspect preference.
-  It has not been launched for phone mirroring or substituted for the accepted app.
-  Close the accepted receiver before manually launching the candidate.
+  At the user's request, the accepted receiver was stopped and the candidate was
+  opened for manual phone testing. Its log confirms listener/discovery readiness;
+  phone connection and physical A/V acceptance remain pending. Both fallback
+  hashes were verified unchanged. Launch evidence: `local/ffmpeg-phone-test/launch.json`.
+  Candidate build/source remains `70dff1d`; no sound tests or Computer Use were run.
 
 ## Silent verification
 - 75 Rust tests pass on both backends; strict Clippy and formatting pass.
