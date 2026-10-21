@@ -62,6 +62,7 @@ unsafe extern "C" {
     fn am_worker_start() -> *mut c_void;
     fn am_worker_provision() -> i32;
     fn am_worker_close(worker: *mut c_void);
+    fn am_worker_metrics(worker: *mut c_void, private_bytes: *mut u64, cpu_ms: *mut f64) -> i32;
     fn am_worker_call(
         worker: *mut c_void,
         op: u32,
@@ -71,6 +72,9 @@ unsafe extern "C" {
         cap: u32,
     ) -> i32;
     fn am_aac_open(codec: u32) -> *mut c_void;
+    fn am_aac_backend() -> *const c_char;
+    fn am_aac_last_error(decoder: *mut c_void) -> *const c_char;
+    fn am_aac_delay(decoder: *mut c_void) -> i32;
     fn am_aac_close(decoder: *mut c_void);
     fn am_aac_decode(
         decoder: *mut c_void,
@@ -330,6 +334,11 @@ pub fn provision_worker() -> Result<()> {
     }
     Ok(())
 }
+pub fn aac_backend() -> String {
+    unsafe { CStr::from_ptr(am_aac_backend()) }
+        .to_string_lossy()
+        .into_owned()
+}
 impl Worker {
     pub fn start() -> Result<Self> {
         NonNull::new(unsafe { am_worker_start() })
@@ -371,6 +380,37 @@ impl Worker {
             "AAC decoder initialization failed"
         );
         Ok(())
+    }
+    fn metrics(&self) -> Result<(u64, f64)> {
+        let (mut bytes, mut cpu) = (0, 0.0);
+        ensure!(
+            unsafe { am_worker_metrics(self.handle.as_ptr(), &mut bytes, &mut cpu) } != 0,
+            "could not sample worker metrics"
+        );
+        Ok((bytes, cpu))
+    }
+    pub fn private_bytes(&self) -> Result<u64> {
+        Ok(self.metrics()?.0)
+    }
+    pub fn cpu_time_ms(&self) -> Result<f64> {
+        Ok(self.metrics()?.1)
+    }
+    pub fn decoder_error(&mut self) -> Result<String> {
+        let reply = self.call(6, &[])?;
+        ensure!(reply.len() <= 256, "decoder diagnostic budget");
+        Ok(std::str::from_utf8(reply)?.to_owned())
+    }
+    pub fn decoder_delay(&mut self) -> Result<Option<u32>> {
+        let bytes: [u8; 4] = self
+            .call(7, &[])?
+            .try_into()
+            .context("decoder delay diagnostic size")?;
+        let delay = i32::from_le_bytes(bytes);
+        ensure!(
+            (-1..=88200).contains(&delay),
+            "decoder delay diagnostic budget"
+        );
+        Ok((delay >= 0).then_some(delay as u32))
     }
     pub fn decode(&mut self, packet: &[u8]) -> Result<Vec<i16>> {
         let out = self.call(3, packet)?;
@@ -490,6 +530,21 @@ pub fn worker_main() -> Result<()> {
                 reply[..2].copy_from_slice(&[file_denied.into(), network_denied.into()]);
                 2
             }
+            6 => {
+                ensure!(len == 0, "decoder diagnostic request length");
+                let text = unsafe { CStr::from_ptr(am_aac_last_error(decoder.0)) }.to_bytes();
+                ensure!(text.len() <= 256, "decoder diagnostic length");
+                reply[..text.len()].copy_from_slice(text);
+                text.len()
+            }
+            7 => {
+                ensure!(
+                    len == 0 && !decoder.0.is_null(),
+                    "decoder delay diagnostic state"
+                );
+                reply[..4].copy_from_slice(&unsafe { am_aac_delay(decoder.0) }.to_le_bytes());
+                4
+            }
             _ => bail!("unsupported worker operation"),
         };
         output.write_all(&(reply_len as u32).to_le_bytes())?;
@@ -498,7 +553,7 @@ pub fn worker_main() -> Result<()> {
     }
 }
 
-fn checked_worker() -> Result<Worker> {
+pub(crate) fn checked_worker() -> Result<Worker> {
     use std::io::Write;
     struct Canary(std::path::PathBuf);
     impl Drop for Canary {

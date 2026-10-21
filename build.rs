@@ -53,6 +53,113 @@ fn compiler_provenance(build: &cc::Build) -> String {
     )
 }
 
+fn ffmpeg_codec() -> String {
+    println!("cargo:rerun-if-env-changed=AIRMIRROR_FFMPEG_PREFIX");
+    let prefix = std::env::var_os("AIRMIRROR_FFMPEG_PREFIX")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| Path::new("work/ffmpeg-aac-msvc").to_path_buf());
+    let prefix = prefix
+        .canonicalize()
+        .expect("run scripts/Build-FFmpeg.ps1 before enabling ffmpeg-aac");
+    // MSVC's include search does not accept Rust's extended-length path prefix.
+    let prefix = std::path::PathBuf::from(prefix.to_string_lossy().trim_start_matches(r"\\?\"));
+    println!("cargo:rerun-if-changed=scripts/Verify-FFmpeg.ps1");
+    println!("cargo:rerun-if-changed=scripts/ffmpeg-pins.json");
+    let verified = std::process::Command::new("pwsh.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            "scripts/Verify-FFmpeg.ps1",
+            "-Prefix",
+        ])
+        .arg(&prefix)
+        .output()
+        .expect("PowerShell 7 is required to verify the optional FFmpeg experiment build");
+    assert!(
+        verified.status.success(),
+        "FFmpeg dependency verification failed: {}{}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    let manifest_path = prefix.join("airmirror-ffmpeg.json");
+    let config_path = prefix.join("config/config.h");
+    let components_path = prefix.join("config/config_components.h");
+    for path in [&manifest_path, &config_path, &components_path] {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    let manifest = fs::read_to_string(manifest_path).expect("pinned FFmpeg build provenance");
+    let config = fs::read_to_string(config_path).expect("FFmpeg configuration");
+    let components = fs::read_to_string(components_path).expect("FFmpeg components");
+    let definitions: std::collections::BTreeMap<_, _> = config
+        .lines()
+        .chain(components.lines())
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            (words.next()? == "#define").then_some((words.next()?, words.next()?))
+        })
+        .collect();
+    assert_eq!(
+        definitions.get("CONFIG_AAC_DECODER"),
+        Some(&"1"),
+        "native float AAC decoder required"
+    );
+    for (key, value) in &definitions {
+        if *value != "1" {
+            continue;
+        }
+        let forbidden = (key.ends_with("_DECODER") && *key != "CONFIG_AAC_DECODER")
+            || key.ends_with("_ENCODER")
+            || key.ends_with("_DEMUXER")
+            || key.ends_with("_MUXER")
+            || key.ends_with("_PROTOCOL")
+            || key.ends_with("_FILTER")
+            || key.ends_with("_HWACCEL")
+            || key.ends_with("_PARSER")
+            || key.ends_with("_BSF")
+            || matches!(
+                *key,
+                "CONFIG_NETWORK"
+                    | "CONFIG_NONFREE"
+                    | "CONFIG_LIBFDK_AAC"
+                    | "CONFIG_FFMPEG"
+                    | "CONFIG_FFPLAY"
+                    | "CONFIG_FFPROBE"
+            );
+        assert!(!forbidden, "unexpected FFmpeg capability: {key}");
+    }
+    println!(
+        "cargo:rustc-link-search=native={}",
+        prefix.join("lib").display()
+    );
+    for library in ["avcodec", "avutil"] {
+        let file = prefix.join("lib").join(format!("{library}.lib"));
+        assert!(
+            file.is_file(),
+            "missing static FFmpeg library {}",
+            file.display()
+        );
+        println!("cargo:rerun-if-changed={}", file.display());
+    }
+    let mut codec = cc::Build::new();
+    codec
+        .cpp(true)
+        .std("c++17")
+        .flag("/EHsc")
+        .flag("/W4")
+        .define("NOMINMAX", None)
+        .include(prefix.join("include"))
+        .file("native/codec_ffmpeg.cpp")
+        .compile("aac_decoder");
+    println!("cargo:rustc-link-lib=static=avcodec");
+    println!("cargo:rustc-link-lib=static=avutil");
+    format!(
+        "{{\"backend\":\"ffmpeg-native-aac-experiment\",\"bridge\":{},\"upstream\":{}}}",
+        compiler_provenance(&codec),
+        manifest.trim_start_matches('\u{feff}').trim()
+    )
+}
+
 fn main() {
     assert_eq!(
         std::env::var("TARGET").as_deref(),
@@ -91,31 +198,36 @@ fn main() {
         .opt_level(2);
     sources(&mut fairplay, "vendor/playfair", "c");
     fairplay.compile("playfair");
-    let parts = [
-        "libAACdec",
-        "libSBRdec",
-        "libMpegTPDec",
-        "libPCMutils",
-        "libFDK",
-        "libSYS",
-        "libArithCoding",
-        "libDRCdec",
-        "libSACdec",
-    ];
-    let mut aac = cc::Build::new();
-    aac.cpp(true)
-        .warnings(false)
-        .opt_level(2)
-        .define("FDK_AAC_STATIC", None)
-        .define("NOMINMAX", None);
-    for part in parts {
-        let dir = format!("vendor/fdk-aac/{part}");
-        if Path::new(&dir).exists() {
-            aac.include(format!("{dir}/include"));
-            sources(&mut aac, &format!("{dir}/src"), "cpp");
+    let aac_provenance = if std::env::var_os("CARGO_FEATURE_FFMPEG_AAC").is_some() {
+        ffmpeg_codec()
+    } else {
+        let parts = [
+            "libAACdec",
+            "libSBRdec",
+            "libMpegTPDec",
+            "libPCMutils",
+            "libFDK",
+            "libSYS",
+            "libArithCoding",
+            "libDRCdec",
+            "libSACdec",
+        ];
+        let mut aac = cc::Build::new();
+        aac.cpp(true)
+            .warnings(false)
+            .opt_level(2)
+            .define("FDK_AAC_STATIC", None)
+            .define("NOMINMAX", None);
+        for part in parts {
+            let dir = format!("vendor/fdk-aac/{part}");
+            if Path::new(&dir).exists() {
+                aac.include(format!("{dir}/include"));
+                sources(&mut aac, &format!("{dir}/src"), "cpp");
+            }
         }
-    }
-    aac.file("native/codec.cpp").compile("aac_decoder");
+        aac.file("native/codec.cpp").compile("aac_decoder");
+        compiler_provenance(&aac)
+    };
     let mut bridge = cc::Build::new();
     bridge
         .cpp(true)
@@ -134,7 +246,7 @@ fn main() {
         "{{\"target\":\"x86_64-pc-windows-msvc\",\"resourceCompiler\":{},\"resourceFlags\":[\"/nologo\",\"/fo <OUT_DIR>/app.res\",\"app.rc\"],\"playfair\":{},\"aac\":{},\"bridge\":{}}}",
         json_string(&rc.to_string_lossy()),
         compiler_provenance(&fairplay),
-        compiler_provenance(&aac),
+        aac_provenance,
         compiler_provenance(&bridge)
     );
     fs::write(

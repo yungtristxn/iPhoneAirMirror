@@ -866,6 +866,15 @@ void* am_worker_start() {
     return w.release();
 }
 void am_worker_close(void* p) { delete static_cast<Worker*>(p); }
+int am_worker_metrics(void* p,unsigned long long* private_bytes,double* cpu_ms) {
+    if(!p||!private_bytes||!cpu_ms)return 0;
+    const auto worker=static_cast<Worker*>(p);PROCESS_MEMORY_COUNTERS_EX counters{};
+    counters.cb=sizeof(counters);FILETIME created{},exited{},kernel{},user{};
+    if(!GetProcessMemoryInfo(worker->process.h,reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),sizeof(counters))
+        ||!GetProcessTimes(worker->process.h,&created,&exited,&kernel,&user))return 0;
+    auto ticks=[](FILETIME value){return (uint64_t(value.dwHighDateTime)<<32)|value.dwLowDateTime;};
+    *private_bytes=counters.PrivateUsage;*cpu_ms=double(ticks(kernel)+ticks(user))/10000.0;return 1;
+}
 int am_worker_call(void* p, unsigned op, const uint8_t* input, unsigned len, uint8_t* output, unsigned cap) {
     auto w = static_cast<Worker*>(p); if (len > 8192 || cap > 16384) return -1;
     uint32_t header[2] = {op, len};ULONGLONG deadline = GetTickCount64()+2000;

@@ -11,3 +11,4 @@
 *.dmp
 .vs/
 .idea/
+__pycache__/

@@ -2,7 +2,15 @@
 #include <aacdecoder_lib.h>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 extern "C" {
+const char* am_aac_backend() { return "fdk-aac-c41c3c7516ea8d0d78a53b96b30bed3a29745cc6"; }
+const char* am_aac_last_error(void*) { return "FDK rejected the AAC packet or decoder state"; }
+int am_aac_delay(void* h) {
+    auto info = h ? aacDecoder_GetStreamInfo(static_cast<HANDLE_AACDECODER>(h)) : nullptr;
+    if (!info || info->outputDelay > static_cast<unsigned>(std::numeric_limits<int>::max())) return -1;
+    return static_cast<int>(info->outputDelay);
+}
 void* am_aac_open(unsigned codec) {
     auto h = aacDecoder_Open(TT_MP4_RAW, 1);
     if (!h) return nullptr;

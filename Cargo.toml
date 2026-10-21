@@ -6,6 +6,12 @@ publish = false
 description = "Minimal Windows AirPlay screen and audio receiver"
 build = "build.rs"
 
+[features]
+default = []
+# Opt-in experiment. The accepted receiver and default build continue using FDK.
+decoder-lab = []
+ffmpeg-aac = ["decoder-lab"]
+
 [dependencies]
 aes = "=0.8.4"
 cbc = "=0.1.2"

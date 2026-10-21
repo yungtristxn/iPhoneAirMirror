@@ -33,3 +33,12 @@ None of these tests captures a phone, screen, microphone, or private media.
 - `fairplay-known-answers.bin`: all 20 public vectors from the same source as
   the single-vector fixture; see `FAIRPLAY_NOTICE.txt`. Used by the separate
   shift-UB instrumentation test, with a deliberately invalid positive control.
+
+- `noise-44100-stereo-{eld,lc}-experiment.frames`: two synthetic nonperiodic
+  fixtures for comparing decoder delay. Each has 120 packets, independent seeded
+  low-pass integer noise in the two channels, silence at onset/tail and envelope
+  gaps. The third fixture-generator argument `experiment` selects this source;
+  the original sine/triangle fixtures are unchanged. ELD packet-file SHA-256:
+  `ea06b654cddc5e4a3a7efcfba2d40cfdadca26bf1029664710822113adf7ac37`;
+  LC: `132787375f60649f48b1bd5c4d96a78a4519e3aee9547790c35c940aa0e46d4d`.
+  See `tests/decoder-experiment/README.md` and `docs/DECODER_EXPERIMENT.md`.

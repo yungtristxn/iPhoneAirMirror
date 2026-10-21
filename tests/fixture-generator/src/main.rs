@@ -1,6 +1,6 @@
 use std::ffi::CString;
 unsafe extern "C" {
-    fn generate(path: *const std::ffi::c_char, codec: u32) -> i32;
+    fn generate(path: *const std::ffi::c_char, codec: u32, experiment: u32) -> i32;
 }
 fn main() {
     let path = CString::new(std::env::args().nth(1).expect("output path")).unwrap();
@@ -9,6 +9,11 @@ fn main() {
         Some("lc") => 4,
         _ => panic!("codec must be eld or lc"),
     };
-    let result = unsafe { generate(path.as_ptr(), codec) };
+    let experiment = match std::env::args().nth(3).as_deref() {
+        None => 0,
+        Some("experiment") => 1,
+        _ => panic!("optional signal must be experiment"),
+    };
+    let result = unsafe { generate(path.as_ptr(), codec, experiment) };
     assert_eq!(result, 0, "fixture generation failed");
 }

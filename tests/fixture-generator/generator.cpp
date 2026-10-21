@@ -4,18 +4,34 @@
 #include <cstdio>
 #include <cstdint>
 #include <array>
-extern "C" int generate(const char* path,unsigned codec){
-    if(codec!=4&&codec!=8)return 1;
+extern "C" int generate(const char* path,unsigned codec,unsigned experiment){
+    if((codec!=4&&codec!=8)||experiment>1)return 1;
     const unsigned samples=codec==8?480:1024;
     HANDLE_AACENCODER enc=nullptr;if(aacEncOpen(&enc,0,2)!=AACENC_OK)return 1;
     struct Guard{HANDLE_AACENCODER* p;~Guard(){aacEncClose(p);}}guard{&enc};
     for(auto p: {std::pair<AACENC_PARAM,UINT>{AACENC_AOT,codec==8?39u:2u},{AACENC_SAMPLERATE,44100},{AACENC_CHANNELMODE,MODE_2},{AACENC_BITRATE,128000},{AACENC_TRANSMUX,0},{AACENC_GRANULE_LENGTH,samples}}){if(aacEncoder_SetParam(enc,p.first,p.second)!=AACENC_OK)return 2;}
     if(aacEncEncode(enc,nullptr,nullptr,nullptr,nullptr)!=AACENC_OK)return 3;
     FILE* file=nullptr;if(fopen_s(&file,path,"wb")||!file)return 4;
+    uint32_t random[2]={0x1234abcdu,0x91e10da5u};
+    int filtered[2]{},filtered_twice[2]{};
     for(int frame=0;frame<120;++frame){
         std::array<int16_t,2048> pcm{};
         for(unsigned i=0;i<samples;++i){
-            if(codec==8){double t=double(frame*samples+i)/44100;int16_t v=int16_t(1000*sin(t*440*6.283185307179586));pcm[i*2]=pcm[i*2+1]=v;}
+            if(experiment){
+                // Distinct seeded low-pass noise with silent onset/tail and
+                // irregular envelope gaps gives unambiguous temporal alignment.
+                // Unsigned LCG wrapping and integer division are deterministic.
+                const unsigned position=frame*samples+i;
+                const bool silent=position<2048||position>=120*samples-4096||(position/997)%7==0;
+                for(unsigned channel=0;channel<2;++channel){
+                    random[channel]=random[channel]*1664525u+1013904223u;
+                    const int raw=(int(random[channel]>>16)-32768)/8;
+                    filtered[channel]+=(raw-filtered[channel])/4;
+                    filtered_twice[channel]+=(filtered[channel]-filtered_twice[channel])/4;
+                    pcm[i*2+channel]=silent?0:int16_t(filtered_twice[channel]);
+                }
+            }
+            else if(codec==8){double t=double(frame*samples+i)/44100;int16_t v=int16_t(1000*sin(t*440*6.283185307179586));pcm[i*2]=pcm[i*2+1]=v;}
             else for(unsigned channel=0;channel<2;++channel){
                 // Integer-only, distinct 440/660 Hz triangles make LC source
                 // reproducible and provide a channel/content control.

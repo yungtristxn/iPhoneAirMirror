@@ -6,6 +6,10 @@ A minimal Windows receiver for iPhone AirPlay **screen mirroring with synchroniz
 
 ## Run
 
+An optional, silent FFmpeg decoder experiment is documented in
+[DECODER_EXPERIMENT.md](docs/DECODER_EXPERIMENT.md). It has a separate guarded
+build and has not replaced the working receiver: AAC-LC timing differs from FDK.
+
 Build with `./scripts/Build.ps1 -Fetch -Test`, then `./scripts/Package.ps1`.
 Launch `dist/AirMirrorLite/AirMirrorLite.exe`, select **AirMirrorLite** in iPhone
 Control Center → Screen Mirroring, and play a local non-DRM video with sound.

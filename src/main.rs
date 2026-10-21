@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod decoder_experiment;
 mod native;
 mod protocol;
 mod runtime;
@@ -11,7 +12,12 @@ fn main() {
         if !std::env::args().any(|a| {
             matches!(
                 a.as_str(),
-                "--hidden" | "--self-test" | "--ui-test" | "--codec-worker" | "--provision-worker"
+                "--hidden"
+                    | "--self-test"
+                    | "--ui-test"
+                    | "--codec-worker"
+                    | "--provision-worker"
+                    | "--decoder-experiment"
             )
         }) {
             native::show_error(&format!("{e:#}"));
@@ -24,6 +30,12 @@ fn run() -> Result<()> {
     if args == ["--codec-worker"] {
         return native::worker_main();
     }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--decoder-experiment")
+    {
+        return decoder_experiment::run(&args[1..]);
+    }
     if args == ["--provision-worker"] {
         native::provision_worker()
             .context("provision isolated worker access for this executable")?;
@@ -33,11 +45,20 @@ fn run() -> Result<()> {
         return Ok(());
     }
     if args.iter().any(|s| s == "--help") {
+        if cfg!(feature = "decoder-lab") {
+            println!(
+                "AirMirrorLite decoder experiment\n  --provision-worker\n  --decoder-experiment --experiment-out <new directory under local/> --experiment-sessions <1..50>\nDecode-only synthetic tests; this build does not advertise or receive mirroring."
+            );
+            return Ok(());
+        }
         println!(
             "AirMirrorLite\n  --provision-worker provision restricted worker access for this EXE, then exit\n  --ui-test           silent native UI and GPU tests\n  --self-test         full media tests, including an audible test tone\n  --ui-test-dir PATH  with --ui-test or --self-test, render idle/control artwork diagnostics\n  --ui-preview        synthetic video preview; no discovery or network\n  --no-discovery      run without DNS-SD (local integration tests)\n  --fps N            request 30 or 60 fps (default: 60)\n  --latency-ms N     advertised output latency, 60..250 ms (default: 80)\n  --resolution N     request 1080, 1440 or 2160 lines (default: highest native support)\n  --display-width N  display width hint override, even pixels\n  --bind IP           bind a specific local IPv4 address (default: 0.0.0.0)\n  --port PORT         control port (default: 7000)\n  --seconds N         stop after N seconds (validation)\n  --data-dir PATH     receiver data (default: writable EXE/local, otherwise LOCALAPPDATA/AirMirrorLite)\n  --hidden            hide window during automated validation\n\nWindow: drag to move; bottom-right resize; 0 default size; C hide/show controls; M mute; Up/Down volume; F11 fullscreen; D disconnect; Escape leaves fullscreen/disconnects; close exits."
         );
         return Ok(());
     }
+    // The experiment is not a receiver replacement until its codec timing and
+    // real-device acceptance gates pass. Never advertise an unqualified backend.
+    ensure_experimental_launch_allowed()?;
     let mut bind: IpAddr = "0.0.0.0".parse()?;
     let mut port = 7000;
     let mut resolution = None;
@@ -231,6 +252,13 @@ fn run() -> Result<()> {
         data.join("receiver.log").display()
     );
     receiver.run(&app, seconds)
+}
+fn ensure_experimental_launch_allowed() -> Result<()> {
+    anyhow::ensure!(
+        !cfg!(feature = "decoder-lab"),
+        "This build is a decode-only experiment. Use --decoder-experiment, or run the preserved working AirMirrorLite receiver."
+    );
+    Ok(())
 }
 fn writable_directory(path: &std::path::Path) -> bool {
     if std::fs::create_dir_all(path).is_err() {
