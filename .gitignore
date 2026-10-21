@@ -1,0 +1,13 @@
+/target/
+/dist/
+/work/
+/local/
+.env
+.env.*
+!.env.example
+/identity.key
+*.pfx
+*.p12
+*.dmp
+.vs/
+.idea/

@@ -1,0 +1,12 @@
+[package]
+name = "airmirror-lite"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Minimal Windows AirPlay screen and audio receiver"
+
+[dependencies]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
