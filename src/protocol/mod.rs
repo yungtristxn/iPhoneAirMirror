@@ -51,9 +51,14 @@ impl VideoProfile {
         Ok(Self {
             width,
             height,
-            fps: if height == 1080 { 60 } else { 30 },
+            fps: 60,
             hevc: height > 1080,
         })
+    }
+    pub fn with_fps(mut self, fps: u32) -> Result<Self> {
+        ensure!(matches!(fps, 30 | 60), "fps must be 30 or 60");
+        self.fps = fps;
+        Ok(self)
     }
     pub fn features(self) -> u64 {
         FEATURES | if self.hevc { 1u64 << 42 } else { 0 }
@@ -83,6 +88,9 @@ impl Session {
                 .is_ok(),
             "receiver busy"
         );
+        self.shared
+            .owner_started
+            .store(native::now().to_bits(), Ordering::Release);
         self.claimed = true;
         self.shared.status("Connecting iPhone");
         Ok(())
@@ -114,7 +122,10 @@ fn info(s: &Shared) -> Value {
             ("type", number(kind)),
             ("audioType", Value::String("default".into())),
             ("inputLatencyMicros", number(0)),
-            ("outputLatencyMicros", number(120000)),
+            (
+                "outputLatencyMicros",
+                number(u64::from(s.playout_ms) * 1000),
+            ),
         ])
     };
     dict([
@@ -311,7 +322,7 @@ pub fn serve(mut socket: TcpStream, shared: Arc<Shared>) -> Result<()> {
                     }
                     shared.status("Connected — waiting for picture and sound");Ok((plist::encode(&Value::Dictionary(response))?,"application/x-apple-binary-plist",format!("Session: {id}\r\n"),false))
                 }
-                ("RECORD",_)=>{ensure!(session.streams.is_some(),"RECORD before SETUP");shared.log("RECORD");Ok((Vec::new(),"text/plain",format!("Audio-Latency: 5292\r\nSession: {id}\r\n"),false))},
+                ("RECORD",_)=>{ensure!(session.streams.is_some(),"RECORD before SETUP");shared.log("RECORD");Ok((Vec::new(),"text/plain",format!("Audio-Latency: {}\r\nSession: {id}\r\n",u64::from(shared.playout_ms)*44100/1000),false))},
                 ("GET_PARAMETER",_)=>{ensure!(session.streams.is_some(),"parameter before SETUP");let db=f32::from_bits(shared.volume_db.load(Ordering::Relaxed));Ok((format!("volume: {db:.6}\r\n").into_bytes(),"text/parameters",String::new(),false))},
                 ("SET_PARAMETER",_)=>{ensure!(session.streams.is_some(),"parameter before SETUP");ensure!(req.body.len()<=1024,"parameter budget");
                     if req.headers.get("content-type").is_some_and(|s|s=="text/parameters") {for line in std::str::from_utf8(&req.body)?.lines(){if let Some(v)=line.strip_prefix("volume:"){let db=v.trim().parse::<f32>()?;ensure!(db.is_finite()&&(-144.0..=0.0).contains(&db),"volume range");shared.volume_db.store(db.to_bits(),Ordering::Relaxed);}}}
@@ -387,9 +398,11 @@ mod tests {
         assert!(VideoProfile::new(1440, false).is_err());
         assert!(VideoProfile::new(4320, true).is_err());
         let high = VideoProfile::new(2160, true).unwrap();
-        assert_eq!((high.width, high.height, high.fps), (3840, 2160, 30));
+        assert_eq!((high.width, high.height, high.fps), (3840, 2160, 60));
         assert_eq!(high.features() >> 32, 0x400);
         assert!(high.features_text().ends_with(",0x400"));
+        assert_eq!(high.with_fps(30).unwrap().fps, 30);
+        assert!(high.with_fps(0).is_err());
         let legacy = VideoProfile::new(1080, true).unwrap();
         assert_eq!((legacy.width, legacy.height, legacy.fps), (1920, 1080, 60));
         assert_eq!(legacy.features(), FEATURES);

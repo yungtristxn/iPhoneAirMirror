@@ -183,3 +183,35 @@ Final parser guards also reject embedded Annex-B delimiters inside length-delimi
 NALs and invalid SPS emulation-prevention sequences, so a nested unvalidated
 parameter set cannot bypass the dimension checks before native decoding. These
 negative tests pass for both H.264 and HEVC. They were added after the live run.
+
+## Connection startup and responsiveness (2026-10-21)
+
+A fresh-process listener benchmark with existing OS caches measured old
+1939.1 / 1904.4 / 1908.9 ms and new 357.3 / 392.8 / 397.5 ms. Median readiness
+fell from 1908.9 to 392.8 ms. This is process launch to a successful local OPTIONS
+response, not iPhone tap-to-picture or discovery visibility. The new independent
+registration phase completed in 783.2 / 785.0 / 813.3 ms after the listener was
+ready; all three registered and shut down successfully. No media was sent.
+
+Run `python scripts/Measure-Startup.py --exe <absolute-exe> --label <name>
+--discovery --address <private-PC-IPv4>` only when the normal receiver is closed.
+It temporarily advertises the receiver during three hidden, silent runs.
+A separate immediate-close run while registration was pending exited successfully
+in about 398 ms; the final native regression also checks that readiness polling
+cannot consume the manual-reset callback completion signal.
+
+New regressions cover delayed initial clock synchronization, reordered and
+replayed timing replies, clock-wait cancellation/timeout, idle video without
+false partial-record timeout, strict partial/header-plus-payload deadlines,
+truncated EOF, first-keyframe retention across a stale owner snapshot, and
+common audio/video timing at 60/80/120/250 ms. Old-epoch/old-flush samples are
+not retained indefinitely. Stream queues stay bounded; one pending item per
+media channel handles the owner transition.
+
+Native tests reuse only two decoder instances across H.264 and HEVC format
+changes. Disconnect flushes and clears media types/surfaces; only the transform
+objects remain cached. Configuration prepares the selected decoder ahead of the
+first picture. If a transform refuses reset, that cached instance is discarded.
+The 80 ms default removes 40 ms from the former configured playout target, and
+all resolutions now request up to 60 fps. These are not numeric glass-to-glass
+latency results. All tests remain silent; physical A/V sync is not re-tested.

@@ -46,11 +46,15 @@ no administrator rights, Bonjour service, account or cloud connection.
   AAC test tone. Do not run it unless the user explicitly requests audible testing.
 
 By default, a compatible native HEVC decoder/GPU requests **3840×2160 at up to
-30 fps**. iPhone chooses the actual dimensions for its screen aspect ratio; the
+60 fps**. iPhone chooses the actual dimensions for its screen aspect ratio; the
 verified portrait result is 994×2160. To choose a different request when starting
-AirMirrorLite, use `--resolution 1440` (2560×1440 / 30 fps) or
+AirMirrorLite, use `--resolution 1440` (2560×1440 / up to 60 fps) or
 `--resolution 1080` (H.264 compatibility / 60 fps). A new mirroring connection is
-needed after changing the request. Hosts without native HEVC support default to
+needed after changing the request. `--fps 30` restores the lower-bandwidth frame
+rate. The shared audio/video playout buffer now defaults to 80 ms; use
+`--latency-ms 120` for the previous buffer on a jittery network (allowed: 60–250).
+These are scheduling settings, not measured phone-to-screen latency.
+Hosts without native HEVC support default to
 1080; explicitly selecting a higher mode requires native HEVC and GPU support.
 
 The executable includes its own multi-size icon for Explorer, the taskbar and
@@ -75,7 +79,7 @@ This package is for local development/device acceptance. See
 - [Current state](docs/STATE.md)
 
 ## Intended experience
-Open the app, select AirMirrorLite in iPhone Control Center > Screen Mirroring, and see/hear the phone. One active sender; resize, rotation, fullscreen, disconnect. Closing the window fully stops the receiver.
+Open the app, select AirMirrorLite in iPhone Control Center > Screen Mirroring, and see/hear the phone. One active sender; resize, rotation, fullscreen, disconnect. Closing the window fully stops the receiver. Discovery registration runs asynchronously; decoder objects are retained across connections while stream state and surfaces are cleared.
 
 Preferred stack: Rust + Win32, native Windows DNS-SD, Media Foundation H.264 + Direct3D 11, and a narrowly selected audio decoder feeding WASAPI. Architecture assumptions must be verified on a real iPhone and the target GPU.
 

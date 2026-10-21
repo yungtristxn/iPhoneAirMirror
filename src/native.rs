@@ -19,6 +19,9 @@ unsafe extern "C" {
     fn am_flush_audio(app: *mut c_void);
     fn am_title(app: *mut c_void, title: *const c_char);
     fn am_pump(app: *mut c_void, wait_ms: u32) -> i32;
+    fn am_prepare_video(app: *mut c_void, codec: u32, width: u32, height: u32, fps: u32) -> i32;
+    fn am_presented(app: *mut c_void) -> u64;
+    fn am_discovery_status(discovery: *mut c_void) -> i32;
     fn am_hevc_available(app: *mut c_void) -> i32;
     fn am_video(
         app: *mut c_void,
@@ -113,6 +116,15 @@ impl App {
         }
         Ok(())
     }
+    pub fn prepare_video(&self, codec: u32, width: u32, height: u32, fps: u32) -> Result<()> {
+        if unsafe { am_prepare_video(self.0.as_ptr(), codec, width, height, fps) } == 0 {
+            return Err(error());
+        }
+        Ok(())
+    }
+    pub fn presented(&self) -> u64 {
+        unsafe { am_presented(self.0.as_ptr()) }
+    }
     pub fn hevc_available(&self) -> bool {
         unsafe { am_hevc_available(self.0.as_ptr()) != 0 }
     }
@@ -204,6 +216,13 @@ impl Drop for App {
 }
 pub struct Discovery(NonNull<c_void>);
 impl Discovery {
+    pub fn ready(&self) -> Result<bool> {
+        match unsafe { am_discovery_status(self.0.as_ptr()) } {
+            1 => Ok(true),
+            0 => Ok(false),
+            _ => Err(error()),
+        }
+    }
     pub fn register(
         name: &str,
         host: &str,

@@ -153,3 +153,26 @@ assets/app-icon.svg and scripts/Generate-Icon.py. Windows SDK rc.exe embeds the
 icon/version resource, and the UI loads DPI-appropriate small/large icons.
 Native tests load 16, 32, 48 and 256-pixel resource variants and check dimensions.
 No third-party artwork, font, runtime library or icon installer was added.
+
+## Connection startup and scheduling
+
+[DnsServiceRegister](https://learn.microsoft.com/en-us/windows/win32/api/windns/nf-windns-dnsserviceregister)
+is asynchronous. Start the two registrations without serial waits, retain their
+request data, and allow the listener/media loop to run while registration
+completes. A manual-reset completion event remains observable across polls.
+[Cancellation](https://learn.microsoft.com/en-us/windows/win32/api/windns/nf-windns-dnsserviceregistercancel)
+keeps callback context alive until completion; on an OS timeout at shutdown, at
+most two contexts remain process-owned rather than risking a freed callback.
+
+[Media Foundation stream messages](https://learn.microsoft.com/en-us/windows/win32/api/mftransform/nf-mftransform-imftransform-processmessage)
+permit flushing/ending a stream while retaining the transform object. Clear the
+media types and surfaces between sessions, reuse the initialized H.264/HEVC
+objects, and prepare types on the codec-configuration packet. Keep a fresh-object
+fallback if a transform refuses reset. Never retain sender reference frames.
+
+Receiver playout is now configurable at 60–250 ms, default 80 ms. NTP mapping,
+/info latency and RECORD audio-latency samples use the same target. Initial video
+waits briefly for a valid clock rather than failing a first-reply race. An idle
+video socket is not a partially received record: the ten-second deadline starts
+with the first byte and covers header plus payload; control/timing still own
+connection liveness.

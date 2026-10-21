@@ -1,5 +1,5 @@
 use anyhow::{Result, ensure};
-pub const PLAYOUT_DELAY: f64 = 0.120;
+pub const DEFAULT_PLAYOUT_MS: u32 = 80;
 const NTP_EPOCH: u64 = 2_208_988_800u64 << 32;
 pub fn ntp(seconds: f64) -> u64 {
     (seconds * 4294967296.0) as u64
@@ -7,14 +7,32 @@ pub fn ntp(seconds: f64) -> u64 {
 pub fn difference(a: u64, b: u64) -> f64 {
     a.wrapping_sub(b) as i64 as f64 / 4294967296.0
 }
-#[derive(Default)]
 pub struct Clock {
     reference: Option<(u64, f64)>,
     audio: Option<(u32, u64)>,
     best_rtt: f64,
     pub updates: u64,
+    playout: f64,
+}
+impl Default for Clock {
+    fn default() -> Self {
+        Self::new(DEFAULT_PLAYOUT_MS).expect("default playout bounds")
+    }
 }
 impl Clock {
+    pub fn new(playout_ms: u32) -> Result<Self> {
+        ensure!(
+            (60..=250).contains(&playout_ms),
+            "playout delay must be 60..250 ms"
+        );
+        Ok(Self {
+            reference: None,
+            audio: None,
+            best_rtt: 0.0,
+            updates: 0,
+            playout: f64::from(playout_ms) / 1000.0,
+        })
+    }
     pub fn observe(&mut self, remote: u64, local: f64, rtt: f64) -> Result<()> {
         ensure!(
             rtt.is_finite() && (0.0..0.5).contains(&rtt),
@@ -37,7 +55,7 @@ impl Clock {
     }
     pub fn map(&self, remote: u64) -> Option<f64> {
         self.reference
-            .map(|(r, l)| l + difference(remote, r) + PLAYOUT_DELAY)
+            .map(|(r, l)| l + difference(remote, r) + self.playout)
     }
     pub fn video(&self, remote: u64) -> Option<f64> {
         self.map(remote.wrapping_add(NTP_EPOCH))
@@ -63,15 +81,28 @@ mod tests {
         let remote = NTP_EPOCH.wrapping_add(ntp(1000.0));
         c.observe(remote, 20.0, 0.002).unwrap();
         c.sync_audio(u32::MAX - 479, remote);
-        assert!((c.video(ntp(1000.0)).unwrap() - 20.12).abs() < 1e-6);
-        assert!((c.audio(0).unwrap() - 20.12 - 480.0 / 44100.0).abs() < 1e-6);
+        assert!((c.video(ntp(1000.0)).unwrap() - 20.08).abs() < 1e-6);
+        assert!((c.audio(0).unwrap() - 20.08 - 480.0 / 44100.0).abs() < 1e-6);
     }
     #[test]
     fn bounded_drift_correction() {
         let mut c = Clock::default();
         c.observe(ntp(100.0), 20.0, 0.01).unwrap();
         c.observe(ntp(101.0), 21.1, 0.01).unwrap();
-        assert!((c.map(ntp(101.0)).unwrap() - 21.121).abs() < 0.00001);
+        assert!((c.map(ntp(101.0)).unwrap() - 21.081).abs() < 0.00001);
         assert!(c.observe(ntp(102.0), 50.0, 0.01).is_err());
+    }
+    #[test]
+    fn configurable_playout_keeps_common_clock() {
+        for delay in [60, 80, 120, 250] {
+            let mut c = Clock::new(delay).unwrap();
+            let n = NTP_EPOCH.wrapping_add(ntp(1000.0));
+            c.observe(n, 20.0, 0.002).unwrap();
+            c.sync_audio(123, n);
+            assert!((c.video(ntp(1000.0)).unwrap() - c.audio(123).unwrap()).abs() < 1e-6);
+            assert!((c.audio(123).unwrap() - 20.0 - f64::from(delay) / 1000.0).abs() < 1e-6);
+        }
+        assert!(Clock::new(0).is_err());
+        assert!(Clock::new(251).is_err());
     }
 }

@@ -9,7 +9,7 @@ root = pathlib.Path(__file__).resolve().parent.parent
 exe = root / "target/release/airmirror-lite.exe"
 data = root / "local/profile-test"
 data.mkdir(parents=True, exist_ok=True)
-for height, width, fps, high in [(1080, 1920, 60, False), (1440, 2560, 30, True), (2160, 3840, 30, True)]:
+for height, width, fps, high in [(1080, 1920, 60, False), (1440, 2560, 60, True), (2160, 3840, 60, True)]:
     with (data / f"{height}-out.txt").open("w") as out, (data / f"{height}-err.txt").open("w") as err:
         process = subprocess.Popen([str(exe), "--hidden", "--no-discovery", "--bind", "127.0.0.1",
                                     "--port", "17003", "--seconds", "3", "--resolution", str(height),
@@ -43,6 +43,7 @@ for height, width, fps, high in [(1080, 1920, 60, False), (1440, 2560, 30, True)
                 info = plistlib.loads(stream.read(length))
                 display = info["displays"][0]
                 assert (display["width"], display["height"], display["maxFPS"]) == (width, height, fps)
+                assert all(v["outputLatencyMicros"]==80000 for v in info["audioLatencies"])
                 assert bool(info["features"] & (1 << 42)) == high
             assert process.wait(timeout=10) == 0
             print(f"PASS: /info {width}x{height} at {fps} fps; HEVC={high}; clean silent exit")

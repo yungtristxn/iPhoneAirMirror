@@ -15,6 +15,12 @@ use std::{
     time::{Duration, Instant},
 };
 pub enum Media {
+    VideoConfig {
+        epoch: u64,
+        codec: u32,
+        width: u32,
+        height: u32,
+    },
     Video {
         epoch: u64,
         codec: u32,
@@ -30,12 +36,38 @@ pub enum Media {
         pts: f64,
     },
 }
+impl Media {
+    fn epoch(&self) -> u64 {
+        match self {
+            Self::Video { epoch, .. }
+            | Self::VideoConfig { epoch, .. }
+            | Self::Audio { epoch, .. } => *epoch,
+        }
+    }
+}
+// A queue item from a newly claimed epoch must survive a stale main-loop owner
+// snapshot; otherwise the sender's first keyframe can be lost before decoding.
+fn defer_new_owner(
+    message: Media,
+    observed_owner: u64,
+    live_owner: u64,
+    pending: &mut Option<Media>,
+) -> bool {
+    if live_owner != 0 && message.epoch() != observed_owner && message.epoch() == live_owner {
+        *pending = Some(message);
+        true
+    } else {
+        false
+    }
+}
 pub struct Shared {
     pub shutdown: AtomicBool,
     pub disconnect: AtomicU64,
     pub flush: AtomicU64,
     pub volume_db: AtomicU32,
     pub owner: AtomicU64,
+    pub owner_started: AtomicU64,
+    pub playout_ms: u32,
     pub next: AtomicU64,
     pub connections: AtomicUsize,
     pub identity: SigningKey,
@@ -139,7 +171,9 @@ impl ReceiverApp {
         advertise: bool,
         wake: native::Wake,
         video_profile: protocol::VideoProfile,
+        playout_ms: u32,
     ) -> Result<Self> {
+        protocol::clock::Clock::new(playout_ms)?;
         let lan = if advertise {
             Some(native::lan_ipv4()?)
         } else {
@@ -190,6 +224,8 @@ impl ReceiverApp {
             flush: AtomicU64::new(0),
             volume_db: AtomicU32::new(0.0f32.to_bits()),
             owner: AtomicU64::new(0),
+            owner_started: AtomicU64::new(0),
+            playout_ms,
             next: AtomicU64::new(1),
             connections: AtomicUsize::new(0),
             identity,
@@ -203,8 +239,12 @@ impl ReceiverApp {
             wake,
         });
         shared.log(&format!(
-            "requested_video={}x{} fps={} hevc={}",
-            video_profile.width, video_profile.height, video_profile.fps, video_profile.hevc
+            "requested_video={}x{} fps={} hevc={} playout_ms={}",
+            video_profile.width,
+            video_profile.height,
+            video_profile.fps,
+            video_profile.hevc,
+            playout_ms
         ));
         let listener = TcpListener::bind((bind, port))?;
         listener.set_nonblocking(true)?;
@@ -289,9 +329,26 @@ impl ReceiverApp {
         let mut flush = self.shared.flush.load(Ordering::Acquire);
         let mut last_stats = Instant::now();
         let mut last_title = String::new();
+        let mut discovery_ready = self.discovery.is_empty();
+        let (mut pending_audio, mut pending_video) = (None, None);
+        let mut presented_base = app.presented();
+        let mut first_picture = false;
         loop {
             if seconds.is_some_and(|s| start.elapsed() >= Duration::from_secs(s)) {
                 break;
+            }
+            if !discovery_ready {
+                let mut ready = true;
+                for service in &self.discovery {
+                    ready &= service.ready()?;
+                }
+                if ready {
+                    discovery_ready = true;
+                    self.shared.log(&format!(
+                        "discovery ready elapsed_ms={:.1}",
+                        start.elapsed().as_secs_f64() * 1000.0
+                    ));
+                }
             }
             let owner = self.shared.owner.load(Ordering::Acquire);
             let next_flush = self.shared.flush.load(Ordering::Acquire);
@@ -302,6 +359,8 @@ impl ReceiverApp {
             if owner != active {
                 app.reset()?;
                 active = owner;
+                presented_base = app.presented();
+                first_picture = false;
                 got_video = false;
                 got_audio = false;
                 reported = false;
@@ -313,8 +372,12 @@ impl ReceiverApp {
                 ));
                 last_title = status;
             }
-            for _ in 0..32 {
-                match self.audio.try_recv() {
+            for _ in 0..(if owner == 0 { 33 } else { 32 }) {
+                match pending_audio
+                    .take()
+                    .map(Ok)
+                    .unwrap_or_else(|| self.audio.try_recv())
+                {
                     Ok(Media::Audio {
                         epoch,
                         serial,
@@ -339,15 +402,49 @@ impl ReceiverApp {
                             got_audio = true;
                         }
                     }
-                    Ok(_) => {}
+                    Ok(message) => {
+                        if defer_new_owner(
+                            message,
+                            owner,
+                            self.shared.owner.load(Ordering::Acquire),
+                            &mut pending_audio,
+                        ) {
+                            break;
+                        }
+                    }
                     Err(_) => break,
                 }
             }
-            for _ in 0..2 {
-                if !app.video_ready() {
+            for _ in 0..(if owner == 0 { 9 } else { 2 }) {
+                if owner != 0 && !app.video_ready() {
                     break;
                 }
-                match self.video.try_recv() {
+                match pending_video
+                    .take()
+                    .map(Ok)
+                    .unwrap_or_else(|| self.video.try_recv())
+                {
+                    Ok(Media::VideoConfig {
+                        epoch,
+                        codec,
+                        width,
+                        height,
+                    }) if epoch == owner && owner != 0 => {
+                        let begin = Instant::now();
+                        if let Err(e) =
+                            app.prepare_video(codec, width, height, self.shared.video_profile.fps)
+                        {
+                            self.shared.status(&e.to_string());
+                            self.shared.disconnect.fetch_add(1, Ordering::AcqRel);
+                            break;
+                        }
+                        if !got_video {
+                            self.shared.log(&format!(
+                                "decoder prepared codec={codec} elapsed_ms={:.1}",
+                                begin.elapsed().as_secs_f64() * 1000.0
+                            ));
+                        }
+                    }
                     Ok(Media::Video {
                         epoch,
                         data,
@@ -363,7 +460,16 @@ impl ReceiverApp {
                             got_video = true;
                         }
                     }
-                    Ok(_) => {}
+                    Ok(message) => {
+                        if defer_new_owner(
+                            message,
+                            owner,
+                            self.shared.owner.load(Ordering::Acquire),
+                            &mut pending_video,
+                        ) {
+                            break;
+                        }
+                    }
                     Err(_) => break,
                 }
             }
@@ -371,12 +477,26 @@ impl ReceiverApp {
                 self.shared.status("Mirroring — picture and sound");
                 reported = true;
             }
-            match app.pump(if owner == 0 { 1000 } else { 10 })? {
+            match app.pump(if !discovery_ready {
+                25
+            } else if owner == 0 {
+                1000
+            } else {
+                5
+            })? {
                 0 => break,
                 2 => {
                     self.shared.disconnect.fetch_add(1, Ordering::AcqRel);
                 }
                 _ => {}
+            }
+            if owner != 0 && !first_picture && app.presented() > presented_base {
+                let claim = f64::from_bits(self.shared.owner_started.load(Ordering::Acquire));
+                self.shared.log(&format!(
+                    "first picture presented since_claim_ms={:.1}",
+                    (native::now() - claim) * 1000.0
+                ));
+                first_picture = true;
             }
             if last_stats.elapsed() >= Duration::from_secs(5) {
                 self.shared.log(&app.stats());
@@ -454,6 +574,42 @@ fn connection(stream: TcpStream, shared: Arc<Shared>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn startup_keyframe_survives_stale_owner_snapshot() {
+        let mut pending = None;
+        let frame = Media::Video {
+            epoch: 2,
+            codec: 265,
+            width: 994,
+            height: 2160,
+            data: vec![1, 2, 3],
+            pts: 0.0,
+        };
+        assert!(defer_new_owner(frame, 1, 2, &mut pending));
+        match pending.take().unwrap() {
+            Media::Video { epoch, data, .. } => {
+                assert_eq!(epoch, 2);
+                assert_eq!(data, vec![1, 2, 3]);
+            }
+            _ => panic!("wrong queued message"),
+        }
+        let old = Media::VideoConfig {
+            epoch: 1,
+            codec: 264,
+            width: 0,
+            height: 0,
+        };
+        assert!(!defer_new_owner(old, 1, 2, &mut pending));
+        assert!(pending.is_none());
+        let stale_audio = Media::Audio {
+            epoch: 2,
+            serial: 0,
+            pcm: vec![],
+            pts: 0.0,
+        };
+        assert!(!defer_new_owner(stale_audio, 2, 2, &mut pending));
+        assert!(pending.is_none());
+    }
     #[test]
     fn private_peer_scope() {
         assert!(permitted("192.168.1.2".parse().unwrap()));

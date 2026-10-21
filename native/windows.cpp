@@ -65,11 +65,11 @@ struct AudioFrame { std::vector<int16_t> pcm; size_t pos = 0; double pts = 0; };
 struct App {
     HWND window = nullptr; Handle wake, audio_event;
     PhoneShell shell;
-    bool hevc_available=false,decoder_ready=false;UINT codec=264;
+    bool hevc_available=false,decoder_ready=false;UINT codec=264,expected_fps=60;
     PhoneCompositor chrome;
     ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
     ComPtr<IDXGISwapChain1> swap; ComPtr<ID3D11VideoDevice> vdevice; ComPtr<ID3D11VideoContext> vcontext;
-    ComPtr<IMFDXGIDeviceManager> manager; ComPtr<IMFTransform> decoder;
+    ComPtr<IMFDXGIDeviceManager> manager; ComPtr<IMFTransform> decoder,h264_cache,hevc_cache;
     ComPtr<ID3D11VideoProcessorEnumerator> venum; ComPtr<ID3D11VideoProcessor> processor;
     ComPtr<IAudioClient> audio; ComPtr<IAudioRenderClient> render;
     UINT32 audio_capacity = 0; double audio_latency = 0; bool audio_running = false;
@@ -77,11 +77,12 @@ struct App {
     std::deque<VideoFrame> video; std::deque<AudioFrame> sound;
     VideoFrame last_frame{};
     ComPtr<ID3D11Texture2D> paused_texture;
+    uint64_t decoder_instances=0;
     uint64_t decoded = 0, presented = 0, gpu_frames = 0, decoder_surfaces = 0, late_frames = 0, audio_frames = 0, underruns = 0;
     std::string adapter; bool com = false, mf = false;
     ~App() {
         if (audio) audio->Stop();
-        sound.clear(); video.clear(); last_frame.sample.Reset(); decoder.Reset(); render.Reset(); audio.Reset();
+        sound.clear(); video.clear(); last_frame.sample.Reset(); paused_texture.Reset();decoder.Reset();h264_cache.Reset();hevc_cache.Reset(); render.Reset(); audio.Reset();
         processor.Reset(); venum.Reset(); manager.Reset(); swap.Reset(); vcontext.Reset(); vdevice.Reset(); context.Reset(); device.Reset();
         chrome=PhoneCompositor{};shell.shutdown();
         if (mf) MFShutdown(); if (com) CoUninitialize();
@@ -118,6 +119,7 @@ struct App {
             hevc_available=SUCCEEDED(create_hevc_transform(false,&probe))&&SUCCEEDED(probe->GetAttributes(&attrs))
                 &&SUCCEEDED(attrs->GetUINT32(MF_SA_D3D11_AWARE,&aware))&&aware
                 &&SUCCEEDED(vdevice->GetVideoDecoderConfigCount(&desc,&configs))&&configs>0;
+            if(hevc_available){hevc_cache=probe;++decoder_instances;}
         }
         CHECK(init_decoder());
         ComPtr<IMMDeviceEnumerator> en; CHECK(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&en)));
@@ -134,12 +136,23 @@ struct App {
         if (!hidden) shell.show();
         return S_OK;
     }
+    void reset_video_decoder(){
+        video.clear();last_frame.sample.Reset();paused_texture.Reset();processor.Reset();venum.Reset();
+        if(decoder){
+            if(decoder_ready){decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM,0);decoder->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH,0);decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING,0);}
+            HRESULT out=decoder->SetOutputType(0,nullptr,0),in=decoder->SetInputType(0,nullptr,0);
+            if(FAILED(out)||FAILED(in)){if(codec==265)hevc_cache.Reset();else h264_cache.Reset();}
+        }
+        decoder.Reset();decoder_ready=false;width=height=0;
+    }
     HRESULT init_decoder(UINT next_codec=264,UINT initial_width=0,UINT initial_height=0) {
-        decoder_ready=false;
-        codec=next_codec;
-        video.clear(); last_frame.sample.Reset(); paused_texture.Reset(); decoder.Reset(); processor.Reset(); venum.Reset(); width = height = 0;
-        if(codec==265){if(!hevc_available)return MF_E_TOPO_CODEC_NOT_FOUND;CHECK(create_hevc_transform(false,&decoder));}
-        else {CHECK(CoCreateInstance(CLSID_CMSH264DecoderMFT, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&decoder)));}
+        reset_video_decoder();codec=next_codec;
+        if(codec==265){
+            if(!hevc_available)return MF_E_TOPO_CODEC_NOT_FOUND;
+            if(!hevc_cache){CHECK(create_hevc_transform(false,&hevc_cache));++decoder_instances;}decoder=hevc_cache;
+        }else{
+            if(!h264_cache){CHECK(CoCreateInstance(CLSID_CMSH264DecoderMFT,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&h264_cache)));++decoder_instances;}decoder=h264_cache;
+        }
         ComPtr<IMFAttributes> attributes; CHECK(decoder->GetAttributes(&attributes));
         UINT32 aware = 0; CHECK(attributes->GetUINT32(MF_SA_D3D11_AWARE, &aware)); if (!aware) return E_NOINTERFACE;
         CHECK(attributes->SetUINT32(MF_LOW_LATENCY, TRUE));
@@ -155,7 +168,7 @@ struct App {
         if(codec==265){
             if(initial_width<48||initial_width>3840||initial_height<48||initial_height>2160)return E_INVALIDARG;
             CHECK(type->SetUINT32(MF_MT_MPEG2_PROFILE,1));CHECK(MFSetAttributeSize(type.Get(),MF_MT_FRAME_SIZE,initial_width,initial_height));
-            CHECK(MFSetAttributeRatio(type.Get(),MF_MT_FRAME_RATE,30,1));CHECK(type->SetUINT32(MF_MT_INTERLACE_MODE,MFVideoInterlace_Progressive));
+            CHECK(MFSetAttributeRatio(type.Get(),MF_MT_FRAME_RATE,expected_fps,1));CHECK(type->SetUINT32(MF_MT_INTERLACE_MODE,MFVideoInterlace_Progressive));
         }
         CHECK(decoder->SetInputType(0, type.Get(), 0)); CHECK(set_output());
         CHECK(decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0));
@@ -209,7 +222,7 @@ struct App {
         ComPtr<IMFMediaBuffer> buffer; CHECK(MFCreateMemoryBuffer(len, &buffer)); BYTE* p;
         CHECK(buffer->Lock(&p, nullptr, nullptr)); memcpy(p, bytes, len); buffer->Unlock(); CHECK(buffer->SetCurrentLength(len));
         ComPtr<IMFSample> sample; CHECK(MFCreateSample(&sample)); CHECK(sample->AddBuffer(buffer.Get()));
-        CHECK(sample->SetSampleTime((LONGLONG)(pts*1e7))); CHECK(sample->SetSampleDuration(166667));
+        CHECK(sample->SetSampleTime((LONGLONG)(pts*1e7))); CHECK(sample->SetSampleDuration(10000000/expected_fps));
         HRESULT hr = decoder->ProcessInput(0, sample.Get(), 0);
         if (hr == MF_E_NOTACCEPTING) { CHECK(output()); hr = decoder->ProcessInput(0, sample.Get(), 0); }
         CHECK(hr); return output();
@@ -303,7 +316,9 @@ struct App {
 struct Discovery {
     DNS_SERVICE_REGISTER_REQUEST req{}; DNS_SERVICE_CANCEL cancel{};
     PDNS_SERVICE_INSTANCE instance = nullptr; Handle done; std::atomic<DWORD> status{ERROR_IO_PENDING};
-    bool registered = false;
+    ULONGLONG started=GetTickCount64();
+    std::wstring name,host;std::vector<std::wstring> keys,values;std::vector<PCWSTR> key_ptrs,value_ptrs;
+    Discovery(){done.h=CreateEventW(nullptr,TRUE,FALSE,nullptr);}
     static void WINAPI callback(DWORD result, void* ctx, PDNS_SERVICE_INSTANCE returned) {
         auto d = static_cast<Discovery*>(ctx); d->status = result;
         if (returned) DnsServiceFreeInstance(returned); SetEvent(d->done.h);
@@ -380,6 +395,12 @@ int am_pump(void* p, unsigned wait_ms) {
     HRESULT hr = a->tick(); if (FAILED(hr)) { error_hr("media presentation", hr); return -1; }
     if (a->shell.disconnect.exchange(false)) return 2; return 1;
 }
+unsigned long long am_presented(void* p){return static_cast<App*>(p)->presented;}
+int am_prepare_video(void* p,unsigned codec,unsigned width,unsigned height,unsigned fps){
+    auto a=static_cast<App*>(p);if((codec!=264&&codec!=265)||(fps!=30&&fps!=60))return 0;
+    a->expected_fps=fps;if(a->decoder_ready&&a->codec==codec)return 1;
+    HRESULT hr=a->init_decoder(codec,width,height);if(FAILED(hr)){error_hr("prepare video decoder",hr);return 0;}return 1;
+}
 int am_hevc_available(void* p) {return static_cast<App*>(p)->hevc_available?1:0;}
 int am_video(void* p, const uint8_t* data, unsigned len, double pts, unsigned codec,unsigned width,unsigned height) {
     auto app=static_cast<App*>(p);if(codec!=264&&codec!=265)return 0;
@@ -406,41 +427,52 @@ int am_reset(void* p) {
     auto a = static_cast<App*>(p); am_flush_audio(p); a->video.clear();
     a->last_frame.sample.Reset();
     a->shell.reset_video();
-    HRESULT hr = a->init_decoder(); if (FAILED(hr)) { error_hr("reset decoder", hr); return 0; } return 1;
+    a->reset_video_decoder();return 1;
 }
 const char* am_stats(void* p) {
     auto a = static_cast<App*>(p); static thread_local std::string text;
     text = "adapter=" + a->adapter + " decoded=" + std::to_string(a->decoded) + " dxgi_frames=" + std::to_string(a->gpu_frames)
         + " decoder_surfaces=" + std::to_string(a->decoder_surfaces) + " presented=" + std::to_string(a->presented) + " late=" + std::to_string(a->late_frames)
         + " audio_samples=" + std::to_string(a->audio_frames) + " resolution=" + std::to_string(a->width) + "x" + std::to_string(a->height)
-        + " codec=" + std::to_string(a->codec) + " hevc_available=" + std::to_string(a->hevc_available)
+        + " decoder_instances="+std::to_string(a->decoder_instances) + " codec=" + std::to_string(a->codec) + " hevc_available=" + std::to_string(a->hevc_available)
         + " local_volume=" + std::to_string(int(a->shell.volume*100)) + " muted=" + std::to_string(a->shell.muted.load());
     return text.c_str();
 }
 void* am_discover(const char* name, const char* host, unsigned short port, const uint8_t* address, uint32_t interface_index, const char* const* keys, const char* const* values, unsigned count) {
     if (count > 32) return nullptr;
-    auto d = std::make_unique<Discovery>(); d->done.h = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    std::vector<std::wstring> k, v; for (unsigned i=0; i<count; ++i) { k.push_back(wide(keys[i])); v.push_back(wide(values[i])); }
-    std::vector<PCWSTR> kp, vp; for (unsigned i=0; i<count; ++i) { kp.push_back(k[i].c_str()); vp.push_back(v[i].c_str()); }
-    auto n = wide(name), h = wide(host);
+    auto d = std::make_unique<Discovery>();
+    if(!d->done.h)return nullptr;
+    for(unsigned i=0;i<count;++i){d->keys.push_back(wide(keys[i]));d->values.push_back(wide(values[i]));}
+    for(unsigned i=0;i<count;++i){d->key_ptrs.push_back(d->keys[i].c_str());d->value_ptrs.push_back(d->values[i].c_str());}
+    d->name=wide(name);d->host=wide(host);
     IP4_ADDRESS ipv4;memcpy(&ipv4,address,4);
-    d->instance = DnsServiceConstructInstance(n.c_str(), h.c_str(), &ipv4, nullptr, port, 0, 0, count, kp.data(), vp.data());
+    d->instance = DnsServiceConstructInstance(d->name.c_str(),d->host.c_str(),&ipv4,nullptr,port,0,0,count,d->key_ptrs.data(),d->value_ptrs.data());
     if (!d->instance) { error_hr("DNS instance", HRESULT_FROM_WIN32(GetLastError())); return nullptr; }
     d->req.Version = DNS_QUERY_REQUEST_VERSION1; d->req.pServiceInstance = d->instance;
     d->req.InterfaceIndex=interface_index;d->instance->dwInterfaceIndex=interface_index;
     d->req.pRegisterCompletionCallback = Discovery::callback; d->req.pQueryContext = d.get();
     DWORD rc = DnsServiceRegister(&d->req, &d->cancel);
     if (rc != DNS_REQUEST_PENDING) { error_hr("DNS register", HRESULT_FROM_WIN32(rc)); return nullptr; }
-    if (WaitForSingleObject(d->done.h, 10000) != WAIT_OBJECT_0) {
-        DnsServiceRegisterCancel(&d->cancel);
-        // The callback still owns its context; retain it until process exit on OS failure.
-        error_hr("DNS register timeout", HRESULT_FROM_WIN32(ERROR_TIMEOUT)); d.release(); return nullptr;
+    return d.release();
+}
+int am_discovery_status(void* p){
+    auto d=static_cast<Discovery*>(p);
+    if(WaitForSingleObject(d->done.h,0)!=WAIT_OBJECT_0){
+        if(GetTickCount64()-d->started<10000)return 0;
+        error_hr("DNS register timeout",HRESULT_FROM_WIN32(ERROR_TIMEOUT));return -1;
     }
-    if (d->status != ERROR_SUCCESS) { error_hr("DNS callback", HRESULT_FROM_WIN32(d->status)); return nullptr; }
-    d->registered = true; return d.release();
+    if(d->status!=ERROR_SUCCESS){error_hr("DNS callback",HRESULT_FROM_WIN32(d->status));return -1;}
+    return 1;
 }
 void am_undiscover(void* p) {
     auto d = static_cast<Discovery*>(p); if (!d) return;
+    if(WaitForSingleObject(d->done.h,0)!=WAIT_OBJECT_0){
+        DnsServiceRegisterCancel(&d->cancel);
+        // Never free callback context while Windows could still be using it.
+        // At most two pending contexts live until process exit on OS failure.
+        if(WaitForSingleObject(d->done.h,1000)!=WAIT_OBJECT_0)return;
+    }
+    if(d->status!=ERROR_SUCCESS){delete d;return;}
     ResetEvent(d->done.h); DWORD rc = DnsServiceDeRegister(&d->req, nullptr);
     if (rc == DNS_REQUEST_PENDING && WaitForSingleObject(d->done.h, 5000) != WAIT_OBJECT_0) return;
     delete d;

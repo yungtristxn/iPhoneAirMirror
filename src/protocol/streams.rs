@@ -10,7 +10,7 @@ use crate::{
 use aes::cipher::{BlockDecryptMut, KeyIvInit, StreamCipher, block_padding::NoPadding};
 use anyhow::{Result, bail, ensure};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     io::Read,
     net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket},
     sync::{
@@ -54,7 +54,7 @@ impl Streams {
         sock.set_read_timeout(Some(Duration::from_millis(100)))?;
         let mut s = Self {
             stop: Arc::new(AtomicBool::new(false)),
-            clock: Arc::new(Mutex::new(Clock::default())),
+            clock: Arc::new(Mutex::new(Clock::new(shared.playout_ms)?)),
             video_port: None,
             audio_ports: None,
             timing_port,
@@ -68,8 +68,8 @@ impl Streams {
             shared,
             epoch,
         };
-        s.spawn("timing", move |stop, clock, _, _| {
-            timing_loop(sock, stop, clock)
+        s.spawn("timing", move |stop, clock, shared, _| {
+            timing_loop(sock, stop, clock, shared)
         });
         Ok(s)
     }
@@ -175,11 +175,30 @@ fn timed_out(e: &std::io::Error) -> bool {
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
     )
 }
-fn timing_loop(sock: UdpSocket, stop: Arc<AtomicBool>, clock: Arc<Mutex<Clock>>) -> Result<()> {
+#[derive(Default)]
+struct TimingRequests(VecDeque<(u64, f64)>);
+impl TimingRequests {
+    fn sent(&mut self, stamp: u64, local: f64) {
+        if self.0.len() == 8 {
+            self.0.pop_front();
+        }
+        self.0.push_back((stamp, local));
+    }
+    fn reply(&mut self, stamp: u64) -> Option<f64> {
+        let i = self.0.iter().position(|(s, _)| *s == stamp)?;
+        self.0.remove(i).map(|(_, t)| t)
+    }
+}
+fn timing_loop(
+    sock: UdpSocket,
+    stop: Arc<AtomicBool>,
+    clock: Arc<Mutex<Clock>>,
+    shared: Arc<Shared>,
+) -> Result<()> {
     let mut last_send = native::now() - 5.0;
     let mut sent = 0;
-    let mut t1 = 0;
-    let mut sent_local = 0.0;
+    let mut pending = TimingRequests::default();
+    let mut synchronized = false;
     let mut last_reply = Instant::now();
     while !stop.load(Ordering::Acquire) {
         let now = native::now();
@@ -187,11 +206,11 @@ fn timing_loop(sock: UdpSocket, stop: Arc<AtomicBool>, clock: Arc<Mutex<Clock>>)
         if now - last_send >= interval {
             let mut req = [0; 32];
             req[..4].copy_from_slice(&[0x80, 0xd2, 0, 7]);
-            t1 = ntp(now);
+            let t1 = ntp(now);
             req[24..32].copy_from_slice(&t1.to_be_bytes());
             sock.send(&req)?;
             last_send = now;
-            sent_local = now;
+            pending.sent(t1, now);
             sent += 1;
         }
         let mut reply = [0; 64];
@@ -200,15 +219,25 @@ fn timing_loop(sock: UdpSocket, stop: Arc<AtomicBool>, clock: Arc<Mutex<Clock>>)
                 let r1 = u64::from_be_bytes(reply[8..16].try_into()?);
                 let r2 = u64::from_be_bytes(reply[16..24].try_into()?);
                 let r3 = u64::from_be_bytes(reply[24..32].try_into()?);
-                if r1 != t1 {
+                let Some(sent_local) = pending.reply(r1) else {
                     continue;
-                }
+                };
                 let t4 = native::now();
                 let processing = difference(r3, r2);
                 let rtt = t4 - sent_local - processing;
-                if (0.0..0.5).contains(&rtt) && (0.0..0.2).contains(&processing) {
-                    clock.lock().unwrap().observe(r3, t4 - rtt / 2.0, rtt)?;
+                if (0.0..0.5).contains(&rtt)
+                    && (0.0..0.2).contains(&processing)
+                    && clock
+                        .lock()
+                        .unwrap()
+                        .observe(r3, t4 - rtt / 2.0, rtt)
+                        .is_ok()
+                {
                     last_reply = Instant::now();
+                    if !synchronized {
+                        shared.log(&format!("clock synchronized rtt_ms={:.1}", rtt * 1000.0));
+                        synchronized = true;
+                    }
                 }
             }
             Ok(32) if reply[1] & 0x7f == 0x52 => {
@@ -231,25 +260,52 @@ fn timing_loop(sock: UdpSocket, stop: Arc<AtomicBool>, clock: Arc<Mutex<Clock>>)
     }
     Ok(())
 }
-fn read_exact_stop(s: &mut TcpStream, out: &mut [u8], stop: &AtomicBool) -> Result<bool> {
+fn read_exact_stop(
+    s: &mut TcpStream,
+    out: &mut [u8],
+    stop: &AtomicBool,
+    started: &mut Option<Instant>,
+    limit: Duration,
+) -> Result<bool> {
     let mut n = 0;
-    let start = Instant::now();
     while n < out.len() {
         if stop.load(Ordering::Acquire) {
             return Ok(false);
         }
         match s.read(&mut out[n..]) {
-            Ok(0) => return Ok(false),
-            Ok(c) => n += c,
+            Ok(0) if n == 0 && started.is_none() => return Ok(false),
+            Ok(0) => bail!("truncated video record"),
+            Ok(c) => {
+                started.get_or_insert_with(Instant::now);
+                n += c;
+            }
             Err(e) if timed_out(&e) => {}
             Err(e) => return Err(e.into()),
         }
         ensure!(
-            start.elapsed() < Duration::from_secs(10),
+            started.is_none_or(|start| start.elapsed() < limit),
             "video record deadline"
         );
     }
     Ok(true)
+}
+fn wait_video_clock(
+    clock: &Mutex<Clock>,
+    raw: u64,
+    stop: &AtomicBool,
+    limit: Duration,
+) -> Result<Option<f64>> {
+    let start = Instant::now();
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        if let Some(pts) = clock.lock().unwrap().video(raw) {
+            return Ok(Some(pts));
+        }
+        ensure!(start.elapsed() < limit, "initial sender clock timeout");
+        thread::sleep(Duration::from_millis(5));
+    }
 }
 #[allow(clippy::too_many_arguments)]
 fn video_loop(
@@ -279,13 +335,21 @@ fn video_loop(
         }
     };
     super::framing::configure_accepted_stream(&s)?;
+    shared.log("video TCP connected");
     let mut cipher = video_cipher(&key, id);
     let mut config = Vec::new();
     let mut codec = None;
     let mut dimensions = (0, 0);
     while !stop.load(Ordering::Acquire) {
         let mut header = [0; 128];
-        if !read_exact_stop(&mut s, &mut header, &stop)? {
+        let mut record_started = None;
+        if !read_exact_stop(
+            &mut s,
+            &mut header,
+            &stop,
+            &mut record_started,
+            Duration::from_secs(10),
+        )? {
             break;
         }
         let len = u32::from_le_bytes(header[..4].try_into()?) as usize;
@@ -302,7 +366,13 @@ fn video_loop(
         };
         ensure!(len <= budget, "mirror payload budget");
         let mut payload = vec![0; len];
-        if !read_exact_stop(&mut s, &mut payload, &stop)? {
+        if !read_exact_stop(
+            &mut s,
+            &mut payload,
+            &stop,
+            &mut record_started,
+            Duration::from_secs(10),
+        )? {
             break;
         }
         match kind {
@@ -325,11 +395,10 @@ fn video_loop(
                     payload = joined;
                 }
                 let raw = u64::from_le_bytes(header[8..16].try_into()?);
-                let pts = clock
-                    .lock()
-                    .unwrap()
-                    .video(raw)
-                    .ok_or_else(|| anyhow::anyhow!("video before clock sync"))?;
+                let Some(pts) = wait_video_clock(&clock, raw, &stop, Duration::from_millis(1500))?
+                else {
+                    break;
+                };
                 ensure!(
                     (pts - native::now()).abs() < 2.0,
                     "video timestamp outside clock window"
@@ -363,6 +432,12 @@ fn video_loop(
                 }
                 codec = Some(next);
                 shared.log(&format!("H.{next} configuration accepted"));
+                shared.send_video(Media::VideoConfig {
+                    epoch,
+                    codec: next,
+                    width: dimensions.0,
+                    height: dimensions.1,
+                })?;
             }
             2 | 5 => {
                 ensure!(len <= 65536, "mirror status budget");
@@ -540,6 +615,157 @@ fn audio_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(10)))
+            .unwrap();
+        (server, client)
+    }
+    #[test]
+    fn idle_video_is_not_a_partial_record_timeout() {
+        let (mut server, mut client) = tcp_pair();
+        let stop = AtomicBool::new(false);
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(80));
+            client.write_all(&[1, 2, 3, 4]).unwrap();
+        });
+        let mut bytes = [0; 4];
+        let mut started = None;
+        assert!(
+            read_exact_stop(
+                &mut server,
+                &mut bytes,
+                &stop,
+                &mut started,
+                Duration::from_millis(30)
+            )
+            .unwrap()
+        );
+        assert_eq!(bytes, [1, 2, 3, 4]);
+        writer.join().unwrap();
+    }
+    #[test]
+    fn partial_video_deadline_and_eof_remain_strict() {
+        let (mut server, mut client) = tcp_pair();
+        client.write_all(&[1]).unwrap();
+        let mut started = None;
+        let stop = AtomicBool::new(false);
+        assert!(
+            read_exact_stop(
+                &mut server,
+                &mut [0; 4],
+                &stop,
+                &mut started,
+                Duration::from_millis(30)
+            )
+            .is_err()
+        );
+        drop(client);
+        assert!(
+            read_exact_stop(
+                &mut server,
+                &mut [0; 4],
+                &stop,
+                &mut started,
+                Duration::from_millis(30)
+            )
+            .is_err()
+        );
+        let (mut server, client) = tcp_pair();
+        drop(client);
+        let mut started = None;
+        assert!(
+            !read_exact_stop(
+                &mut server,
+                &mut [0; 4],
+                &stop,
+                &mut started,
+                Duration::from_millis(30)
+            )
+            .unwrap()
+        );
+    }
+    #[test]
+    fn payload_uses_the_headers_existing_deadline() {
+        let (mut server, mut client) = tcp_pair();
+        let stop = AtomicBool::new(false);
+        let mut started = None;
+        client.write_all(&[1, 2]).unwrap();
+        assert!(
+            read_exact_stop(
+                &mut server,
+                &mut [0; 2],
+                &stop,
+                &mut started,
+                Duration::from_millis(20)
+            )
+            .unwrap()
+        );
+        thread::sleep(Duration::from_millis(30));
+        client.write_all(&[3, 4]).unwrap();
+        assert!(
+            read_exact_stop(
+                &mut server,
+                &mut [0; 2],
+                &stop,
+                &mut started,
+                Duration::from_millis(20)
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn timing_replies_can_be_reordered_but_not_replayed() {
+        let mut pending = TimingRequests::default();
+        pending.sent(1, 1.0);
+        pending.sent(2, 2.0);
+        assert_eq!(pending.reply(1), Some(1.0));
+        assert_eq!(pending.reply(1), None);
+        assert_eq!(pending.reply(2), Some(2.0));
+        for i in 0..10 {
+            pending.sent(i, i as f64);
+        }
+        assert_eq!(pending.0.len(), 8);
+        assert_eq!(pending.reply(0), None);
+        assert_eq!(pending.reply(2), Some(2.0));
+    }
+    #[test]
+    fn first_picture_waits_for_delayed_clock_and_is_cancellable() {
+        let clock = Arc::new(Mutex::new(Clock::default()));
+        let ready = clock.clone();
+        let raw = ntp(1000.0);
+        let setter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            ready
+                .lock()
+                .unwrap()
+                .observe(
+                    raw.wrapping_add(2_208_988_800u64 << 32),
+                    native::now(),
+                    0.002,
+                )
+                .unwrap();
+        });
+        let stop = AtomicBool::new(false);
+        assert!(
+            wait_video_clock(&clock, raw, &stop, Duration::from_millis(500))
+                .unwrap()
+                .is_some()
+        );
+        setter.join().unwrap();
+        let empty = Mutex::new(Clock::default());
+        assert!(wait_video_clock(&empty, raw, &stop, Duration::from_millis(20)).is_err());
+        stop.store(true, Ordering::Release);
+        assert!(
+            wait_video_clock(&empty, raw, &stop, Duration::from_secs(1))
+                .unwrap()
+                .is_none()
+        );
+    }
     #[test]
     fn rtp_lengths() {
         for n in 0..13 {

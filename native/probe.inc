@@ -65,6 +65,10 @@ extern "C" int am_video_probe(void* p) {
     if(app->decoder_surfaces-before<60){error_hr("insufficient hardware decoder surfaces",E_FAIL);return 0;}return 1;
 }
 extern "C" int am_ui_probe(void* p,const char* directory) {
+    // Readiness polling must not consume an asynchronous completion signal.
+    {Discovery d;if(!d.done.h)return 0;Discovery::callback(ERROR_SUCCESS,&d,nullptr);
+        if(am_discovery_status(&d)!=1||am_discovery_status(&d)!=1){error_hr("discovery completion must remain signaled",E_FAIL);return 0;}
+        ResetEvent(d.done.h);d.status=ERROR_IO_PENDING;if(am_discovery_status(&d)!=0)return 0;}
     auto app=static_cast<App*>(p);auto path=wide(directory);HRESULT hr=app->shell.self_test(path.c_str());
     if(FAILED(hr)){error_hr("native UI regression (line encoded in HRESULT)",hr);return 0;}
     app->shell.reset_video();
