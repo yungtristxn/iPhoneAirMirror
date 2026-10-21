@@ -2,7 +2,7 @@
 
 A minimal Windows receiver for iPhone AirPlay **screen mirroring with synchronized sound** over the local network.
 
-**Status:** runnable implementation on `feat/airplay-mvp`; real iPhone acceptance is pending. Native discovery, protocol/state checks, synthetic H.264 hardware decode and AAC-ELD playback have been exercised. These checks do not establish iPhone compatibility or 30-minute A/V synchronization.
+**Status:** working local implementation on `feat/airplay-mvp`. Real iPhone picture and sound passed a five-minute session with user-confirmed synchronization and no freezes. Native hardware decode, isolated AAC-ELD, parser/security checks and shutdown have separate evidence in docs/STATE.md. Longer runs, Wi-Fi-loss recovery and end-to-end latency remain unverified.
 
 ## Run
 
