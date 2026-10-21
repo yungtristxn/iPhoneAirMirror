@@ -195,6 +195,17 @@ fn timing_loop(
     clock: Arc<Mutex<Clock>>,
     shared: Arc<Shared>,
 ) -> Result<()> {
+    timing_loop_until(sock, stop, clock, Duration::from_secs(15), |rtt| {
+        shared.log(&format!("clock synchronized rtt_ms={:.1}", rtt * 1000.0));
+    })
+}
+fn timing_loop_until(
+    sock: UdpSocket,
+    stop: Arc<AtomicBool>,
+    clock: Arc<Mutex<Clock>>,
+    timeout: Duration,
+    mut on_synchronized: impl FnMut(f64),
+) -> Result<()> {
     let mut last_send = native::now() - 5.0;
     let mut sent = 0;
     let mut pending = TimingRequests::default();
@@ -219,24 +230,24 @@ fn timing_loop(
                 let r1 = u64::from_be_bytes(reply[8..16].try_into()?);
                 let r2 = u64::from_be_bytes(reply[16..24].try_into()?);
                 let r3 = u64::from_be_bytes(reply[24..32].try_into()?);
-                let Some(sent_local) = pending.reply(r1) else {
-                    continue;
-                };
-                let t4 = native::now();
-                let processing = difference(r3, r2);
-                let rtt = t4 - sent_local - processing;
-                if (0.0..0.5).contains(&rtt)
-                    && (0.0..0.2).contains(&processing)
-                    && clock
-                        .lock()
-                        .unwrap()
-                        .observe(r3, t4 - rtt / 2.0, rtt)
-                        .is_ok()
-                {
-                    last_reply = Instant::now();
-                    if !synchronized {
-                        shared.log(&format!("clock synchronized rtt_ms={:.1}", rtt * 1000.0));
-                        synchronized = true;
+                // Unmatched/replayed replies must still reach the liveness check.
+                if let Some(sent_local) = pending.reply(r1) {
+                    let t4 = native::now();
+                    let processing = difference(r3, r2);
+                    let rtt = t4 - sent_local - processing;
+                    if (0.0..0.5).contains(&rtt)
+                        && (0.0..0.2).contains(&processing)
+                        && clock
+                            .lock()
+                            .unwrap()
+                            .observe(r3, t4 - rtt / 2.0, rtt)
+                            .is_ok()
+                    {
+                        last_reply = Instant::now();
+                        if !synchronized {
+                            on_synchronized(rtt);
+                            synchronized = true;
+                        }
                     }
                 }
             }
@@ -253,10 +264,7 @@ fn timing_loop(
             Err(e) if timed_out(&e) => {}
             Err(e) => return Err(e.into()),
         }
-        ensure!(
-            last_reply.elapsed() < Duration::from_secs(15),
-            "sender timing lost"
-        );
+        ensure!(last_reply.elapsed() < timeout, "sender timing lost");
     }
     Ok(())
 }
@@ -450,22 +458,80 @@ fn video_loop(
 }
 #[derive(Debug)]
 struct AudioPacket {
-    seq: u16,
     rtp: u32,
     payload: Vec<u8>,
     arrival: Instant,
 }
-fn audio_packet(packet: &[u8]) -> Result<AudioPacket> {
+#[derive(Clone, Copy, Debug)]
+struct RtpPacket<'a> {
+    seq: u16,
+    rtp: u32,
+    payload: &'a [u8],
+}
+fn audio_packet(packet: &[u8]) -> Result<RtpPacket<'_>> {
     ensure!(
         packet.len() > 12 && packet.len() <= 8192 && packet[0] == 0x80,
         "RTP audio framing"
     );
-    Ok(AudioPacket {
+    Ok(RtpPacket {
         seq: u16::from_be_bytes(packet[2..4].try_into()?),
         rtp: u32::from_be_bytes(packet[4..8].try_into()?),
-        payload: packet[12..].to_vec(),
-        arrival: Instant::now(),
+        payload: &packet[12..],
     })
+}
+#[derive(Default)]
+struct AudioQueue {
+    packets: BTreeMap<u16, AudioPacket>,
+    expected: Option<u16>,
+    restart: Option<u16>,
+}
+#[derive(Debug, PartialEq, Eq)]
+enum AudioAdmission {
+    Ignored,
+    Queued,
+    Resynchronized,
+}
+impl AudioQueue {
+    fn clear(&mut self) {
+        self.packets.clear();
+        self.expected = None;
+        self.restart = None;
+    }
+    fn insert(&mut self, packet: RtpPacket<'_>, retransmit: bool) -> AudioAdmission {
+        if retransmit && self.expected.is_none() {
+            return AudioAdmission::Ignored;
+        }
+        let expected = *self.expected.get_or_insert(packet.seq);
+        let delta = packet.seq.wrapping_sub(expected) as i16;
+        let mut admission = AudioAdmission::Queued;
+        if !(0..128).contains(&delta) {
+            // A gap larger than the queue must not leave audio permanently stuck.
+            // Two consecutive forward packets confirm progress; a lone outlier,
+            // old packet or retransmission cannot reset the live sequence.
+            if retransmit || delta < 128 {
+                return AudioAdmission::Ignored;
+            }
+            let confirmed = self.restart == Some(packet.seq);
+            self.restart = Some(packet.seq.wrapping_add(1));
+            if !confirmed {
+                return AudioAdmission::Ignored;
+            }
+            self.packets.clear();
+            self.expected = Some(packet.seq);
+            admission = AudioAdmission::Resynchronized;
+        }
+        self.restart = None;
+        if let std::collections::btree_map::Entry::Vacant(entry) = self.packets.entry(packet.seq) {
+            entry.insert(AudioPacket {
+                rtp: packet.rtp,
+                payload: packet.payload.to_vec(),
+                arrival: Instant::now(),
+            });
+            admission
+        } else {
+            AudioAdmission::Ignored
+        }
+    }
 }
 #[allow(clippy::too_many_arguments)]
 fn audio_loop(
@@ -488,33 +554,32 @@ fn audio_loop(
         "audio codec={} sample_rate=44100 channels=2 AppContainer=yes",
         if codec == 8 { "AAC-ELD" } else { "AAC-LC" }
     ));
-    let mut packets = BTreeMap::<u16, AudioPacket>::new();
-    let mut expected = None;
+    let mut queue = AudioQueue::default();
     let mut pinned_port = None;
     let mut last = Instant::now();
     let mut errors = 0;
     let mut resend_at = Instant::now() - Duration::from_secs(1);
     let mut serial = shared.flush.load(Ordering::Acquire);
+    let mut packet = [0u8; 8193];
     while !stop.load(Ordering::Acquire) && !local_stop.load(Ordering::Acquire) {
         let next_serial = shared.flush.load(Ordering::Acquire);
         if next_serial != serial {
-            packets.clear();
-            expected = None;
+            queue.clear();
             worker.configure(codec)?;
             serial = next_serial;
         }
-        let mut packet = [0u8; 8193];
         match data.recv_from(&mut packet) {
             Ok((n, addr)) if addr.ip() == peer && pinned_port.is_none_or(|p| p == addr.port()) => {
                 if let Ok(p) = audio_packet(&packet[..n]) {
                     pinned_port = Some(addr.port());
-                    last = Instant::now();
-                    if expected.is_none() {
-                        expected = Some(p.seq);
+                    let admitted = queue.insert(p, false);
+                    if admitted != AudioAdmission::Ignored {
+                        last = Instant::now();
                     }
-                    let delta = p.seq.wrapping_sub(expected.unwrap()) as i16;
-                    if (0..128).contains(&delta) {
-                        packets.entry(p.seq).or_insert(p);
+                    if admitted == AudioAdmission::Resynchronized {
+                        worker.configure(codec)?;
+                        errors = 0;
+                        shared.log("audio sequence resynchronized after packet loss");
                     }
                 }
             }
@@ -532,19 +597,18 @@ fn audio_loop(
                     if n == 20 && packet[0] >> 6 == 2 && packet[1] & 0x7f == 0x54 {
                         let rtp = u32::from_be_bytes(packet[4..8].try_into()?);
                         let remote = u64::from_be_bytes(packet[8..16].try_into()?);
-                        let mapped = clock.lock().unwrap().map(remote);
+                        let mut clock = clock.lock().unwrap();
+                        let mapped = clock.map(remote);
                         if let Some(t) = mapped
                             && (t - native::now()).abs() < 3.0
                         {
-                            clock.lock().unwrap().sync_audio(rtp, remote);
+                            clock.sync_audio(rtp, remote);
                         }
                     } else if n > 16
                         && packet[1] & 0x7f == 0x56
                         && let Ok(p) = audio_packet(&packet[4..n])
-                        && expected
-                            .is_some_and(|e| (0..128).contains(&(p.seq.wrapping_sub(e) as i16)))
                     {
-                        packets.entry(p.seq).or_insert(p);
+                        queue.insert(p, true);
                     }
                 }
                 Ok(_) => {}
@@ -552,16 +616,16 @@ fn audio_loop(
                 Err(e) => return Err(e.into()),
             }
         }
-        ensure!(packets.len() <= 128, "audio jitter budget");
+        ensure!(queue.packets.len() <= 128, "audio jitter budget");
         for _ in 0..32 {
-            let Some(seq) = expected else { break };
-            if let Some(p) = packets.get(&seq) {
+            let Some(seq) = queue.expected else { break };
+            if let Some(p) = queue.packets.get(&seq) {
                 let pts = clock.lock().unwrap().audio(p.rtp);
                 if pts.is_none() && p.arrival.elapsed() < Duration::from_millis(500) {
                     break;
                 }
-                let mut p = packets.remove(&seq).unwrap();
-                expected = Some(seq.wrapping_add(1));
+                let mut p = queue.packets.remove(&seq).unwrap();
+                queue.expected = Some(seq.wrapping_add(1));
                 let Some(pts) = pts else { continue };
                 let encrypted = p.payload.len() / 16 * 16;
                 cbc::Decryptor::<aes::Aes128>::new(&key.into(), &iv.into())
@@ -584,9 +648,13 @@ fn audio_loop(
                         ensure!(errors < 20, "repeated AAC decoding failures");
                     }
                 }
-            } else if !packets.is_empty() {
-                let next = *packets.keys().min_by_key(|s| s.wrapping_sub(seq)).unwrap();
-                let earliest = packets.values().map(|p| p.arrival).min().unwrap();
+            } else if !queue.packets.is_empty() {
+                let next = *queue
+                    .packets
+                    .keys()
+                    .min_by_key(|s| s.wrapping_sub(seq))
+                    .unwrap();
+                let earliest = queue.packets.values().map(|p| p.arrival).min().unwrap();
                 if remote_control != 0 && resend_at.elapsed() > Duration::from_millis(15) {
                     let missing = next.wrapping_sub(seq).min(32);
                     let mut req = [0x80, 0xd5, 0, 1, 0, 0, 0, 0];
@@ -596,7 +664,7 @@ fn audio_loop(
                     resend_at = Instant::now();
                 }
                 if earliest.elapsed() > Duration::from_millis(40) {
-                    expected = Some(next);
+                    queue.expected = Some(next);
                 } else {
                     break;
                 }
@@ -606,8 +674,7 @@ fn audio_loop(
         }
         // Silence/lock may legitimately stop audio datagrams. Control/timing owns session liveness.
         if last.elapsed() > Duration::from_secs(2) {
-            packets.clear();
-            expected = None;
+            queue.clear();
         }
     }
     Ok(())
@@ -732,6 +799,89 @@ mod tests {
         assert_eq!(pending.0.len(), 8);
         assert_eq!(pending.reply(0), None);
         assert_eq!(pending.reply(2), Some(2.0));
+    }
+    #[test]
+    fn unmatched_timing_traffic_does_not_extend_liveness() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver.connect(sender.local_addr().unwrap()).unwrap();
+        sender.connect(receiver.local_addr().unwrap()).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(10)))
+            .unwrap();
+        let flood_running = Arc::new(AtomicBool::new(true));
+        let running = flood_running.clone();
+        let flood = thread::spawn(move || {
+            let mut reply = [0; 32];
+            reply[..2].copy_from_slice(&[0x80, 0xd3]);
+            let start = Instant::now();
+            while running.load(Ordering::Acquire) && start.elapsed() < Duration::from_secs(2) {
+                let _ = sender.send(&reply);
+                thread::sleep(Duration::from_millis(2));
+            }
+        });
+        let started = Instant::now();
+        let result = timing_loop_until(
+            receiver,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(Clock::default())),
+            Duration::from_millis(60),
+            |_| panic!("unsolicited timing reply synchronized the clock"),
+        );
+        flood_running.store(false, Ordering::Release);
+        flood.join().unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("sender timing lost")
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+    fn rtp(seq: u16) -> RtpPacket<'static> {
+        RtpPacket {
+            seq,
+            rtp: u32::from(seq) * 480,
+            payload: &[1, 2, 3],
+        }
+    }
+    #[test]
+    fn audio_recovers_after_loss_larger_than_jitter_window() {
+        let mut queue = AudioQueue::default();
+        assert_eq!(queue.insert(rtp(1000), false), AudioAdmission::Queued);
+        queue.packets.remove(&1000);
+        queue.expected = Some(1001);
+        assert_eq!(queue.insert(rtp(1200), false), AudioAdmission::Ignored);
+        assert_eq!(queue.expected, Some(1001));
+        assert_eq!(
+            queue.insert(rtp(1201), false),
+            AudioAdmission::Resynchronized
+        );
+        assert_eq!(queue.expected, Some(1201));
+        assert_eq!(queue.packets.keys().copied().collect::<Vec<_>>(), [1201]);
+        assert_eq!(queue.insert(rtp(1202), false), AudioAdmission::Queued);
+    }
+    #[test]
+    fn audio_reordering_duplicates_wrap_and_outliers_stay_bounded() {
+        let mut queue = AudioQueue::default();
+        assert_eq!(queue.insert(rtp(65534), false), AudioAdmission::Queued);
+        assert_eq!(queue.insert(rtp(0), false), AudioAdmission::Queued);
+        assert_eq!(queue.insert(rtp(65535), true), AudioAdmission::Queued);
+        assert_eq!(queue.insert(rtp(65535), false), AudioAdmission::Ignored);
+        assert_eq!(queue.insert(rtp(65533), false), AudioAdmission::Ignored);
+        assert_eq!(queue.insert(rtp(200), false), AudioAdmission::Ignored);
+        assert_eq!(queue.insert(rtp(201), true), AudioAdmission::Ignored);
+        assert_eq!(queue.expected, Some(65534));
+        assert_eq!(queue.insert(rtp(1), false), AudioAdmission::Queued);
+        assert_eq!(queue.insert(rtp(201), false), AudioAdmission::Ignored);
+        for seq in 2..126 {
+            assert_eq!(queue.insert(rtp(seq), false), AudioAdmission::Queued);
+        }
+        assert_eq!(queue.packets.len(), 128);
+        queue.clear();
+        assert!(queue.packets.is_empty());
+        assert_eq!(queue.insert(rtp(100), true), AudioAdmission::Ignored);
+        assert_eq!(queue.insert(rtp(100), false), AudioAdmission::Queued);
     }
     #[test]
     fn first_picture_waits_for_delayed_clock_and_is_cancellable() {

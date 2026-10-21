@@ -1,4 +1,7 @@
 """Silent real /info wire checks; only processes/listeners created by this test."""
+import argparse
+import hashlib
+import json
 import pathlib
 import plistlib
 import socket
@@ -6,9 +9,23 @@ import subprocess
 import time
 
 root = pathlib.Path(__file__).resolve().parent.parent
-exe = root / "target/release/airmirror-lite.exe"
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--exe", type=pathlib.Path, default=root / "target/release/airmirror-lite.exe")
+args = parser.parse_args()
 data = root / "local/profile-test"
 data.mkdir(parents=True, exist_ok=True)
+result = data / "result.json"
+result.unlink(missing_ok=True)
+exe = args.exe.resolve(strict=True)
+executable_hash = hashlib.sha256(exe.read_bytes()).hexdigest().upper()
+checked = []
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
 for height, width, fps, high in [(1080, 1920, 60, False), (1440, 2560, 60, True), (2160, 3840, 60, True)]:
     with (data / f"{height}-out.txt").open("w") as out, (data / f"{height}-err.txt").open("w") as err:
         process = subprocess.Popen([str(exe), "--hidden", "--no-discovery", "--bind", "127.0.0.1",
@@ -31,7 +48,7 @@ for height, width, fps, high in [(1080, 1920, 60, False), (1440, 2560, 60, True)
                 connection.settimeout(2)
                 connection.sendall(b"GET /info RTSP/1.0\r\nCSeq: 1\r\n\r\n")
                 stream = connection.makefile("rb")
-                assert b"200 OK" in stream.readline(8192)
+                require(b"200 OK" in stream.readline(8192), "/info did not return 200 OK")
                 headers = {}
                 for _ in range(32):
                     line = stream.readline(8192)
@@ -39,15 +56,19 @@ for height, width, fps, high in [(1080, 1920, 60, False), (1440, 2560, 60, True)
                     key, value = line.split(b":", 1)
                     headers[key.lower()] = value.strip()
                 length = int(headers[b"content-length"])
-                assert 0 < length <= 65536
+                require(0 < length <= 65536, "/info body length is invalid")
                 info = plistlib.loads(stream.read(length))
                 display = info["displays"][0]
-                assert (display["width"], display["height"], display["maxFPS"]) == (width, height, fps)
-                assert all(v["outputLatencyMicros"]==80000 for v in info["audioLatencies"])
-                assert bool(info["features"] & (1 << 42)) == high
-            assert process.wait(timeout=10) == 0
+                require((display["width"], display["height"], display["maxFPS"]) == (width, height, fps), "Advertised display profile is incorrect")
+                require(bool(info["audioLatencies"]) and all(v["outputLatencyMicros"] == 80000 for v in info["audioLatencies"]), "Advertised audio playout latency is incorrect")
+                require(bool(info["features"] & (1 << 42)) == high, "HEVC capability flag is incorrect")
+            require(process.wait(timeout=10) == 0, "Receiver exit failed")
+            checked.append({"width": width, "height": height, "fps": fps, "hevc": high})
             print(f"PASS: /info {width}x{height} at {fps} fps; HEVC={high}; clean silent exit")
         finally:
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=5)
+result.write_text(json.dumps({"executable": str(exe), "sha256": executable_hash,
+                             "profiles": checked,
+                             "evidence": "Silent loopback /info and timed exit. No phone acceptance."}, indent=2))

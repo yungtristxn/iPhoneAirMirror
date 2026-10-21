@@ -85,7 +85,7 @@ impl Shared {
         let text: String = text
             .chars()
             .filter(|c| !c.is_control() || *c == ' ')
-            .take(500)
+            .take(1024)
             .collect();
         let line = format!("{:.3} {text}\n", native::now());
         if let Ok(mut log) = self.log.lock() {
@@ -365,8 +365,11 @@ impl ReceiverApp {
                 got_audio = false;
                 reported = false;
             }
-            let status = self.shared.status.lock().unwrap().clone();
-            if status != last_title {
+            let changed_status = {
+                let status = self.shared.status.lock().unwrap();
+                (status.as_str() != last_title).then(|| status.clone())
+            };
+            if let Some(status) = changed_status {
                 app.title(&format!(
                     "AirMirrorLite — {status} | F11 fullscreen · D disconnect"
                 ));

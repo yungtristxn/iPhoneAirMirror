@@ -11,7 +11,7 @@ use anyhow::{Result, bail, ensure};
 use plist::{bytes, dict, get, num, number};
 use std::{
     io::Write,
-    net::TcpStream,
+    net::{IpAddr, TcpStream},
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
@@ -94,6 +94,83 @@ impl Session {
         self.claimed = true;
         self.shared.status("Connecting iPhone");
         Ok(())
+    }
+    fn setup(&mut self, body: &[u8], peer: IpAddr, local: IpAddr) -> Result<Vec<u8>> {
+        self.claim()?;
+        let shared_key = *self.pair.shared()?;
+        let value = plist::decode(body)?;
+        ensure!(value.as_dictionary().is_some(), "SETUP dictionary");
+        let mut response = ::plist::Dictionary::new();
+
+        if get(&value, "ekey").is_ok() {
+            ensure!(self.streams.is_none(), "duplicate encrypted SETUP");
+            let encrypted = bytes::<72>(&value, "ekey")?;
+            let iv = bytes::<16>(&value, "eiv")?;
+            if let Ok(timing) = get(&value, "timingProtocol") {
+                ensure!(
+                    timing.as_string() == Some("NTP"),
+                    "only NTP timing supported"
+                );
+            }
+            let timing = u16::try_from(num(&value, "timingPort")?)?;
+            let mut worker = native::Worker::start()?;
+            let key = worker.decrypt_key(self.fp.message()?, &encrypted)?;
+            let key = pairing::hash16(&key, &shared_key);
+            let streams =
+                streams::Streams::new(peer, local, timing, key, iv, self.shared.clone(), self.id)?;
+            response.insert("timingPort".into(), number(streams.timing_port.into()));
+            response.insert("eventPort".into(), number(0));
+            self.streams = Some(streams);
+        }
+
+        if let Ok(requested) = get(&value, "streams") {
+            let requested = requested
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("stream list"))?;
+            ensure!(
+                !requested.is_empty() && requested.len() <= 2,
+                "stream count"
+            );
+            let media = self
+                .streams
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("stream SETUP before keys"))?;
+            let mut replies = Vec::with_capacity(requested.len());
+            for stream in requested {
+                match num(stream, "type")? {
+                    110 => {
+                        let port = media.start_video(plist::stream_connection_id(stream)?)?;
+                        replies.push(dict([
+                            ("type", number(110)),
+                            ("dataPort", number(port.into())),
+                        ]));
+                        self.shared.log("video transport ready");
+                    }
+                    96 => {
+                        let codec = u8::try_from(num(stream, "ct")?)?;
+                        let spf = u16::try_from(num(stream, "spf")?)?;
+                        let format = num(stream, "audioFormat")?;
+                        ensure!(
+                            (codec == 8 && format == 1 << 24) || (codec == 4 && format == 1 << 22),
+                            "only stereo 44100Hz AAC-ELD/AAC-LC negotiated"
+                        );
+                        let control = u16::try_from(num(stream, "controlPort")?)?;
+                        let (data_port, control_port) = media.start_audio(codec, spf, control)?;
+                        replies.push(dict([
+                            ("type", number(96)),
+                            ("dataPort", number(data_port.into())),
+                            ("controlPort", number(control_port.into())),
+                        ]));
+                        self.shared.log("audio transport ready");
+                    }
+                    kind => bail!("unsupported stream type {kind}"),
+                }
+            }
+            response.insert("streams".into(), Value::Array(replies));
+        }
+        self.shared
+            .status("Connected — waiting for picture and sound");
+        plist::encode(&Value::Dictionary(response))
     }
 }
 impl Drop for Session {
@@ -288,50 +365,97 @@ pub fn serve(mut socket: TcpStream, shared: Arc<Shared>) -> Result<()> {
             continue;
         }
         let result = (|| -> Result<(Vec<u8>, &str, String, bool)> {
-            match (req.method.as_str(),target) {
-                ("OPTIONS",_)=>Ok((Vec::new(),"text/plain","Public: OPTIONS, GET, POST, SETUP, RECORD, SET_PARAMETER, GET_PARAMETER, FLUSH, TEARDOWN\r\n".into(),false)),
-                ("GET","/info")|("POST","/info")=>Ok((plist::encode(&info(&shared))?,"application/x-apple-binary-plist",String::new(),false)),
-                ("POST","/pair-setup")=>{session.claim()?;shared.log("pair-setup");Ok((session.pair.setup(&req.body,&shared.identity)?,"application/octet-stream",String::new(),false))},
-                ("POST","/pair-verify")=>{session.claim()?;shared.log("pair-verify");Ok((session.pair.verify(&req.body,&shared.identity)?,"application/octet-stream",String::new(),false))},
-                ("POST","/fp-setup")=>{session.claim()?;session.pair.shared()?;shared.log("fp-setup");Ok((session.fp.exchange(&req.body)?,"application/octet-stream",String::new(),false))},
-                ("POST","/feedback")=>Ok((Vec::new(),"application/octet-stream",String::new(),false)),
-                ("POST","/audioMode")=>{ensure!(session.streams.is_some(),"audio mode before SETUP");validate_audio_mode(&req.body)?;Ok((Vec::new(),"application/octet-stream",String::new(),false))},
-                ("SETUP",_)=>{
-                    session.claim()?;let shared_key=*session.pair.shared()?;let v=plist::decode(&req.body)?;ensure!(v.as_dictionary().is_some(),"SETUP dictionary");
-                    let mut response=::plist::Dictionary::new();
-                    if get(&v,"ekey").is_ok(){
-                        ensure!(session.streams.is_none(),"duplicate encrypted SETUP");let encrypted=bytes::<72>(&v,"ekey")?;let iv=bytes::<16>(&v,"eiv")?;
-                        if let Ok(timing)=get(&v,"timingProtocol"){ensure!(timing.as_string()==Some("NTP"),"only NTP timing supported");}
-                        let timing=u16::try_from(num(&v,"timingPort")?)?;
-                        let mut worker=native::Worker::start()?;let key=worker.decrypt_key(session.fp.message()?,&encrypted)?;
-                        let key=pairing::hash16(&key,&shared_key);
-                        let streams=streams::Streams::new(peer,local,timing,key,iv,shared.clone(),id)?;
-                        response.insert("timingPort".into(),number(streams.timing_port as u64));response.insert("eventPort".into(),number(0));session.streams=Some(streams);
-                    }
-                    if let Ok(streams)=get(&v,"streams"){
-                        let streams=streams.as_array().ok_or_else(||anyhow::anyhow!("stream list"))?;ensure!(!streams.is_empty()&&streams.len()<=2,"stream count");
-                        let media=session.streams.as_mut().ok_or_else(||anyhow::anyhow!("stream SETUP before keys"))?;let mut replies=Vec::new();
-                        for s in streams {match num(s,"type")? {
-                            110=>{let port=media.start_video(plist::stream_connection_id(s)?)?;replies.push(dict([("type",number(110)),("dataPort",number(port as u64))]));shared.log("video transport ready");}
-                            96=>{let codec=u8::try_from(num(s,"ct")?)?;let spf=u16::try_from(num(s,"spf")?)?;let format=num(s,"audioFormat")?;
-                                ensure!((codec==8&&format==1<<24)||(codec==4&&format==1<<22),"only stereo 44100Hz AAC-ELD/AAC-LC negotiated");
-                                let cport=u16::try_from(num(s,"controlPort")?)?;let(dp,cp)=media.start_audio(codec,spf,cport)?;
-                                replies.push(dict([("type",number(96)),("dataPort",number(dp as u64)),("controlPort",number(cp as u64))]));shared.log("audio transport ready");}
-                            t=>bail!("unsupported stream type {t}")
-                        }}response.insert("streams".into(),Value::Array(replies));
-                    }
-                    shared.status("Connected — waiting for picture and sound");Ok((plist::encode(&Value::Dictionary(response))?,"application/x-apple-binary-plist",format!("Session: {id}\r\n"),false))
+            match (req.method.as_str(), target) {
+                ("OPTIONS", _) => Ok((
+                    Vec::new(),
+                    "text/plain",
+                    "Public: OPTIONS, GET, POST, SETUP, RECORD, SET_PARAMETER, GET_PARAMETER, FLUSH, TEARDOWN\r\n".into(),
+                    false,
+                )),
+                ("GET", "/info") | ("POST", "/info") => Ok((
+                    plist::encode(&info(&shared))?,
+                    "application/x-apple-binary-plist",
+                    String::new(),
+                    false,
+                )),
+                ("POST", "/pair-setup") => {
+                    session.claim()?;
+                    shared.log("pair-setup");
+                    Ok((
+                        session.pair.setup(&req.body, &shared.identity)?,
+                        "application/octet-stream", String::new(), false,
+                    ))
                 }
-                ("RECORD",_)=>{ensure!(session.streams.is_some(),"RECORD before SETUP");shared.log("RECORD");Ok((Vec::new(),"text/plain",format!("Audio-Latency: {}\r\nSession: {id}\r\n",u64::from(shared.playout_ms)*44100/1000),false))},
-                ("GET_PARAMETER",_)=>{ensure!(session.streams.is_some(),"parameter before SETUP");let db=f32::from_bits(shared.volume_db.load(Ordering::Relaxed));Ok((format!("volume: {db:.6}\r\n").into_bytes(),"text/parameters",String::new(),false))},
-                ("SET_PARAMETER",_)=>{ensure!(session.streams.is_some(),"parameter before SETUP");ensure!(req.body.len()<=1024,"parameter budget");
-                    if req.headers.get("content-type").is_some_and(|s|s=="text/parameters") {for line in std::str::from_utf8(&req.body)?.lines(){if let Some(v)=line.strip_prefix("volume:"){let db=v.trim().parse::<f32>()?;ensure!(db.is_finite()&&(-144.0..=0.0).contains(&db),"volume range");shared.volume_db.store(db.to_bits(),Ordering::Relaxed);}}}
-                    Ok((Vec::new(),"text/parameters",String::new(),false))},
-                ("FLUSH",_)=>{ensure!(session.streams.is_some(),"flush before SETUP");shared.log("FLUSH requested");shared.flush.fetch_add(1,Ordering::AcqRel);Ok((Vec::new(),"text/plain",String::new(),false))},
-                ("TEARDOWN",_)=>{shared.log("TEARDOWN");let types=teardown_types(&req.body)?;let done=types.as_ref().is_none_or(|types|types.contains(&110));
-                    if types.as_ref().is_some_and(|types|types.contains(&96)) && let Some(media)=session.streams.as_mut(){media.stop_audio();shared.log("audio stream stopped; screen session retained");}
-                    Ok((Vec::new(),"text/plain",String::new(),done))},
-                _=>bail!("unsupported endpoint")
+                ("POST", "/pair-verify") => {
+                    session.claim()?;
+                    shared.log("pair-verify");
+                    Ok((
+                        session.pair.verify(&req.body, &shared.identity)?,
+                        "application/octet-stream", String::new(), false,
+                    ))
+                }
+                ("POST", "/fp-setup") => {
+                    session.claim()?;
+                    session.pair.shared()?;
+                    shared.log("fp-setup");
+                    Ok((session.fp.exchange(&req.body)?, "application/octet-stream", String::new(), false))
+                }
+                ("POST", "/feedback") => Ok((Vec::new(), "application/octet-stream", String::new(), false)),
+                ("POST", "/audioMode") => {
+                    ensure!(session.streams.is_some(), "audio mode before SETUP");
+                    validate_audio_mode(&req.body)?;
+                    Ok((Vec::new(), "application/octet-stream", String::new(), false))
+                }
+                ("SETUP", _) => Ok((
+                    session.setup(&req.body, peer, local)?,
+                    "application/x-apple-binary-plist",
+                    format!("Session: {id}\r\n"),
+                    false,
+                )),
+                ("RECORD", _) => {
+                    ensure!(session.streams.is_some(), "RECORD before SETUP");
+                    shared.log("RECORD");
+                    let latency = u64::from(shared.playout_ms) * 44100 / 1000;
+                    Ok((Vec::new(), "text/plain", format!("Audio-Latency: {latency}\r\nSession: {id}\r\n"), false))
+                }
+                ("GET_PARAMETER", _) => {
+                    ensure!(session.streams.is_some(), "parameter before SETUP");
+                    let db = f32::from_bits(shared.volume_db.load(Ordering::Relaxed));
+                    Ok((format!("volume: {db:.6}\r\n").into_bytes(), "text/parameters", String::new(), false))
+                }
+                ("SET_PARAMETER", _) => {
+                    ensure!(session.streams.is_some(), "parameter before SETUP");
+                    ensure!(req.body.len() <= 1024, "parameter budget");
+                    if req.headers.get("content-type").is_some_and(|s| s == "text/parameters") {
+                        for line in std::str::from_utf8(&req.body)?.lines() {
+                            if let Some(value) = line.strip_prefix("volume:") {
+                                let db = value.trim().parse::<f32>()?;
+                                ensure!(db.is_finite() && (-144.0..=0.0).contains(&db), "volume range");
+                                shared.volume_db.store(db.to_bits(), Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    Ok((Vec::new(), "text/parameters", String::new(), false))
+                }
+                ("FLUSH", _) => {
+                    ensure!(session.streams.is_some(), "flush before SETUP");
+                    shared.log("FLUSH requested");
+                    shared.flush.fetch_add(1, Ordering::AcqRel);
+                    Ok((Vec::new(), "text/plain", String::new(), false))
+                }
+                ("TEARDOWN", _) => {
+                    shared.log("TEARDOWN");
+                    let types = teardown_types(&req.body)?;
+                    let done = types.as_ref().is_none_or(|types| types.contains(&110));
+                    if types.as_ref().is_some_and(|types| types.contains(&96))
+                        && let Some(media) = session.streams.as_mut()
+                    {
+                        media.stop_audio();
+                        shared.log("audio stream stopped; screen session retained");
+                    }
+                    Ok((Vec::new(), "text/plain", String::new(), done))
+                }
+                _ => bail!("unsupported endpoint"),
             }
         })();
         match result {

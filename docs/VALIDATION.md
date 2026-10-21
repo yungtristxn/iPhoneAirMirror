@@ -32,7 +32,8 @@ in the receiver package. The AAC fixture generator is also development-only.
 |---|---|---|
 | Rust tests | bounded framing/plist expansion, pairing proof/state/replay, FairPlay mode bounds, H.264 SPS/NAL budgets, RTP framing, shared-clock arithmetic, audio-mode/teardown parsing | iPhone compatibility |
 | Native ASan | known-answer and deterministic malformed-input execution with memory instrumentation and output canaries | complete native-code safety or exhaustive fuzz coverage |
-| Native media probe | synthetic H.264 decoded to `D3D11_BIND_DECODER` textures on RTX 4070 SUPER; GPU presentation and paused redraw; generated AAC-ELD decoded in AppContainer and written to WASAPI | phone sound, physical A/V synchronization or glass-to-glass latency |
+| Silent native probe (default) | synthetic H.264/HEVC decoded to `D3D11_BIND_DECODER` textures; GPU presentation, paused redraw, controls and isolated AAC/IPC in memory, with no PCM submitted to WASAPI | phone sound, physical A/V synchronization or glass-to-glass latency |
+| Explicit audible probe (not run in this pass) | additionally sends generated AAC-ELD to WASAPI | phone sound or physical A/V synchronization |
 | Worker probe | AppContainer token has zero capabilities; host canary read denied; worker UDP probe not delivered to a host listener | formal sandbox certification |
 | Loopback control | actual requests, single owner, invalid framing/sequencing rejection, listener survival and timed shutdown | physical disconnect/lock/Wi-Fi behavior |
 | Phone test | user's observations plus negotiated codec, decoder-surface and audio counters in the bounded local log | durations/scenarios not actually exercised |
@@ -41,16 +42,19 @@ in the receiver package. The AAC fixture generator is also development-only.
 
 RTSP headers 8 KiB, bodies 64 KiB, four control connections, connection/record
 deadlines and per-connection request rates. Binary plists: 1,024 objects, depth 16,
-4,096 expanded visits, 512 KiB expanded-data budget. Video: 2 MiB compressed
-record, eight queued compressed records, a 500 ms backpressure deadline, at most
-eight decoded samples and admission below six to preserve decoder-pool headroom.
+4,096 expanded visits, 512 KiB expanded-data budget. Video: 2 MiB H.264 / 4 MiB
+HEVC compressed record, eight queued compressed records plus one transition item,
+a 500 ms backpressure deadline, at most eight H.264 / four HEVC decoded samples
+and admission below six / three to preserve decoder-pool headroom.
 SPS rejects unsupported profiles/bit depths/interlacing, oversized pictures and
-more than eight references before native decode. Screen target is H.264 SDR,
-1920x1080-class (rotation allowed), up to 60 fps.
+more than eight references before native decode. Screen targets are H.264 SDR,
+1920x1080-class (rotation allowed), or HEVC Main 8-bit SDR through 3840x2160,
+up to 60 fps. The native HEVC/GPU capability gate determines advertisement.
 
 Audio: stereo 44.1 kHz AAC-ELD (480 samples/frame) or AAC-LC (1,024), 8 KiB packet,
-128-packet jitter window, 32 PCM blocks per host queue; native worker has a
-256 MiB process-memory limit and a two-second reply deadline. Its job permits
+128-packet jitter window, 32 PCM blocks plus one transition item per host queue;
+native worker has a 256 MiB process-memory limit and a two-second transaction
+deadline covering request writes and response reads. Its job permits
 one process and terminates on host close. Logs rotate at 1 MiB without media,
 keys or raw negotiation bodies.
 
@@ -62,7 +66,7 @@ records host/codec CPU (percent of one core), working set, private bytes, handle
 and threads. JSONL traces and the bounded receiver log stay under ignored local
 directories. Working-set sums may include shared pages; private bytes are separate.
 
-The shared NTP clock and 120 ms playout target are implementation settings, not
+The shared NTP clock and default 80 ms playout target are implementation settings, not
 measured end-to-end latency. Measure phone capture-to-PC display separately with
 a synchronized visual counter/high-speed observation if a numeric latency claim
 is needed. The user shortened the sustained test to five minutes; no 30-minute
@@ -73,7 +77,7 @@ local development build; third-party distribution licensing is not resolved.
 
 ## Native UI regression (2026-10-21)
 
-`--self-test` also exercises the hidden native shell: no caption/client inset,
+`--ui-test` exercises the hidden native shell: no caption/client inset,
 portrait/landscape aspect locking, bottom-right hit testing, default-size reset,
 rotation during fullscreen, hover slider, mute/restore, volume limits, owned
 palette lifetime flags, stable speaker position when the hover slider opens at
@@ -82,7 +86,7 @@ checks landscape/portrait decode, paused redraw, resizing and fullscreen against
 the DirectComposition path. The idle renderer checks that unmodified ticks do
 not repaint the chrome.
 
-`--self-test --ui-test-dir local/qol-test/renders` saves the native idle/connecting
+`--ui-test --ui-test-dir local/qol-test/renders` saves the native idle/connecting
 artwork and control palette as PNG diagnostics. This is internal rendering of
 app artwork, not desktop automation, screen capture or phone recording. The
 export is refused when a video surface is active. Inspect the diagnostics for
@@ -91,8 +95,9 @@ They do not establish final desktop composition, mouse feel or physical phone
 acceptance. The user requested no Computer Use for this validation.
 
 Production video remains on D3D11 surfaces. Direct2D/DirectWrite paint idle chrome
-only when invalidated; GDI+ paints only the small control palette. Both are Windows
-components. There is no web runtime, UI framework package or new third-party source.
+and the small control palette only when invalidated. GDI+ serializes diagnostic
+artwork PNGs only. These are Windows components. There is no web runtime,
+UI framework package or new third-party source.
 Local gain is applied at the final WASAPI write so queued PCM responds to mute and
 volume changes; sender gain and media timestamps remain independent.
 
@@ -149,7 +154,7 @@ The HEVC parser tests cover malformed/truncated box lengths and parameter arrays
 NAL lengths/layer IDs, unsupported depth/profile, coded dimensions, DPB budget,
 bounded zero alignment padding and 8,192 deterministic mutations. H.264 now also
 rejects over-budget coded area hidden by cropping. Real /info checks in
-`python scripts/Test-VideoProfiles.py` verify 1080/60, 1440/30, 2160/30, and the
+`python scripts/Test-VideoProfiles.py` verify 1080/60, 1440/60, 2160/60, and the
 conditional high feature bit. All these checks are silent.
 
 HEVC bounds: 4 MiB compressed access unit (including initial parameter sets),
@@ -215,3 +220,65 @@ first picture. If a transform refuses reset, that cached instance is discarded.
 The 80 ms default removes 40 ms from the former configured playout target, and
 all resolutions now request up to 60 fps. These are not numeric glass-to-glass
 latency results. All tests remain silent; physical A/V sync is not re-tested.
+
+## Performance and code-quality pass (2026-10-21)
+
+Parallel source reviews covered native media/IPC ownership, Rust transport and
+session handling, UI rendering/interactions, and build/measurement tooling.
+The following actionable findings were fixed; this is a scoped engineering
+review, not a claim that all possible defects have been eliminated.
+
+| Finding | Change and focused evidence |
+|---|---|
+| Audio could remain stuck after more than 128 lost sequence numbers | Two consecutive forward packets resynchronize the bounded queue; tests cover loss, wrap, reordered/duplicate packets, outliers and retransmissions |
+| Unmatched timing replies bypassed the liveness deadline | All replies reach the deadline check; a real loopback UDP flood cannot extend the session |
+| Audio IPC allocated scratch vectors per packet | Reuse fixed host reply and worker input/output buffers; removes three explicit Rust allocations per packet while PCM keeps owned queue storage |
+| Worker request writes were outside the reply deadline | Both overlapped directions share two seconds; silent blocked-pipe tests cover write/read/expired deadlines |
+| Presentation could queue frames or block audio work | Waitable DXGI video chain limits queued presentation to one; nonblocking Present retains queued data and its reserved slot on backpressure |
+| Shared event-driven audio requested a fixed 30 ms buffer | Follow the zero-duration API contract and log actual endpoint capacity/latency; physical A/V sync remains pending |
+| Huge finite native timestamps could overflow integer conversion | Validate the signed MF clock range and clamp audio skip before conversion; rejection tests submit no PCM |
+| Moving the window recreated/repainted control artwork | Reuse a bounded DC/bitmap/brush and cache artwork; 100 intrinsic moves add zero paints/allocations and no GDI objects |
+| Volume flyout could stay open, stale timers could close it early, and capture loss left pressed artwork | Zone-based leave grace, monotonic timer deadline, capture cleanup and keyboard repeat tests |
+| Partial text-resource initialization was mistaken for success | Retry each missing resource independently and invalidate cached artwork after failures |
+| SETUP handling and unchanged status polling obscured state/allocated repeatedly | Extract explicit setup stages, preserve wire/state guards, and clone status only on change |
+| Old binaries/tests could receive misleading provenance | Mandatory offline package freshness build; release defaults; artifact hashes; stale success removal; Python checks survive optimized mode |
+| Resource sampling missed its endpoint or reused PID history | Final endpoint sample plus process-start identity and per-process timing; a 2-second passive probe ends at 2.056 seconds |
+| ASan could reuse stale external native input or accept an empty fixture | Watch native/vendor inputs; empty fixture exits 5 instead of reporting success |
+
+Final silent native suite: 100 decoder-bound GPU surfaces, two cached decoder
+instances, 103 presentations including confirmed paused redraws, and zero audio
+samples submitted. Every resize/fullscreen transition now requires an actual
+presentation within one second. The isolated worker decoded 360 AAC-ELD frames
+across three resets with identical PCM hashes, plus the FairPlay known answer.
+File-read denial and absent UDP delivery were checked. A successful UDP send
+return is logged separately because it does not establish delivery; no worker
+capabilities or firewall exemptions were changed.
+
+The ASan run passed 1,024 fixed-size valid-mode FairPlay mutations, 120 AAC-ELD
+fixture frames and 1,024 bounded malformed AAC packets, with PCM canaries intact.
+The separate empty-fixture negative test exited 5 as required. No audio endpoint
+was fed by these checks.
+
+New runtime metrics describe queue high-water marks and CPU time spent inside
+MF submit/output and Present calls. The silent mixed-format GPU probe measured
+about 0.50 ms mean submit and 0.59 ms mean Present on this RTX 4070 SUPER; maxima
+were 17.54 and 8.39 ms. The endpoint reported capacity 1,036 frames (about 23.49 ms
+at 44.1 kHz) and stream latency zero. These are local synthetic/initialization
+observations, not sustained phone throughput or end-to-end latency measurements.
+
+On the exact final executable (`411F3F2F3318712880725825CD1F1668C731915A53AA68873F4C5C99DCE613F6`),
+44 Rust tests, strict clippy, silent media/control checks and all three /info
+profiles passed. The loopback startup median was 383.9 ms (395.2/383.9/380.4),
+versus 390.9 ms (395.2/385.3/390.9) before this pass. Both are roughly 0.4 seconds;
+three samples do not support a significant additional startup-speed claim.
+The reopened packaged receiver completed real discovery in 786.3 ms after
+listener readiness and remained idle without errors. A 20.06-second passive
+sample, excluding its first five seconds of startup, recorded 0–0.313% CPU of
+one core and 77.83–77.89 MiB private memory; the final three samples held
+1,037 handles. This is idle host evidence, not active mirroring or GPU memory.
+
+Raw local evidence: `work/optimization-{tests,clippy,build,media,control,profiles,asan}.log`,
+`local/{media-test,control-test,profile-test}/result.json`,
+`local/startup-optimization-{before,after}/result.json`, and
+`local/measure-20261021-165044.jsonl`. Packaging freshness was exercised before
+launch; the package and all three test summaries have the same executable hash.

@@ -20,7 +20,7 @@ int main(int argc,char** argv){
         message[12]=uint8_t(mode);playfair_decrypt(message.data(),encrypted.data(),key.data());
     }
     void* decoder=am_aac_open(8);if(!decoder)return 4;
-    auto audio=read(argv[2]);size_t pos=0;unsigned frames=0;
+    auto audio=read(argv[2]);if(audio.empty()){am_aac_close(decoder);return 5;}size_t pos=0;unsigned frames=0;
     std::array<int16_t,4098> pcm{};
     while(pos<audio.size()){
         if(pos+4>audio.size())return 5;uint32_t size;memcpy(&size,audio.data()+pos,4);pos+=4;if(size>8192||pos+size>audio.size())return 6;

@@ -162,6 +162,7 @@ impl App {
     pub fn video(&self, data: &[u8], pts: f64, codec: u32, width: u32, height: u32) -> Result<()> {
         ensure!(
             matches!(codec, 264 | 265)
+                && !data.is_empty()
                 && data.len()
                     <= if codec == 265 {
                         4 * 1024 * 1024
@@ -189,7 +190,7 @@ impl App {
     }
     pub fn audio(&self, pcm: &[i16], pts: f64) -> Result<()> {
         ensure!(
-            pcm.len() <= 4096 && pcm.len().is_multiple_of(2) && pts.is_finite(),
+            !pcm.is_empty() && pcm.len() <= 4096 && pcm.len().is_multiple_of(2) && pts.is_finite(),
             "invalid audio sample"
         );
         if unsafe { am_audio(self.0.as_ptr(), pcm.as_ptr(), pcm.len() as u32, pts) } == 0 {
@@ -280,29 +281,36 @@ pub fn protect(input: &[u8], decrypt: bool) -> Result<Vec<u8>> {
     out.truncate(len as usize);
     Ok(out)
 }
-pub struct Worker(NonNull<c_void>);
+pub struct Worker {
+    handle: NonNull<c_void>,
+    reply: Box<[u8; 16384]>,
+}
 impl Worker {
     pub fn start() -> Result<Self> {
         NonNull::new(unsafe { am_worker_start() })
-            .map(Self)
+            .map(|handle| Self {
+                handle,
+                reply: Box::new([0; 16384]),
+            })
             .ok_or_else(error)
     }
-    pub fn call(&mut self, op: u32, input: &[u8]) -> Result<Vec<u8>> {
+    pub fn call(&mut self, op: u32, input: &[u8]) -> Result<&[u8]> {
         ensure!(input.len() <= 8192, "worker request too large");
-        let mut out = vec![0; 16384];
         let n = unsafe {
             am_worker_call(
-                self.0.as_ptr(),
+                self.handle.as_ptr(),
                 op,
                 input.as_ptr(),
                 input.len() as u32,
-                out.as_mut_ptr(),
-                out.len() as u32,
+                self.reply.as_mut_ptr(),
+                self.reply.len() as u32,
             )
         };
-        ensure!(n >= 0, "isolated codec worker failed or timed out");
-        out.truncate(n as usize);
-        Ok(out)
+        ensure!(
+            n >= 0 && n as usize <= self.reply.len(),
+            "isolated codec worker failed or timed out"
+        );
+        Ok(&self.reply[..n as usize])
     }
     pub fn decrypt_key(&mut self, message: &[u8; 164], key: &[u8; 72]) -> Result<[u8; 16]> {
         ensure!(message[12] < 4, "invalid FairPlay key mode");
@@ -333,7 +341,9 @@ impl Worker {
 }
 impl Drop for Worker {
     fn drop(&mut self) {
-        unsafe { am_worker_close(self.0.as_ptr()) }
+        use zeroize::Zeroize;
+        self.reply.zeroize();
+        unsafe { am_worker_close(self.handle.as_ptr()) }
     }
 }
 
@@ -355,6 +365,11 @@ pub fn worker_main() -> Result<()> {
         }
     }
     let mut decoder = Decoder(std::ptr::null_mut());
+    // The IPC contract has fixed maxima. Reuse storage instead of allocating and
+    // clearing request/PCM response vectors for every 480-sample audio frame.
+    let mut data = [0; 8192];
+    let mut reply = [0; 8192];
+    let mut pcm = [0i16; 4096];
     loop {
         let mut h = [0; 8];
         if input.read_exact(&mut h).is_err() {
@@ -363,9 +378,8 @@ pub fn worker_main() -> Result<()> {
         let op = u32::from_le_bytes(h[..4].try_into()?);
         let len = u32::from_le_bytes(h[4..].try_into()?) as usize;
         ensure!(len <= 8192, "worker input size");
-        let mut data = vec![0; len];
-        input.read_exact(&mut data)?;
-        let reply = match op {
+        input.read_exact(&mut data[..len])?;
+        let reply_len = match op {
             1 => {
                 ensure!(
                     len == 236
@@ -377,7 +391,9 @@ pub fn worker_main() -> Result<()> {
                 );
                 let mut key = [0; 16];
                 unsafe { playfair_decrypt(data.as_ptr(), data[164..].as_ptr(), key.as_mut_ptr()) };
-                key.to_vec()
+                reply[..16].copy_from_slice(&key);
+                zeroize::Zeroize::zeroize(&mut key);
+                16
             }
             2 => {
                 ensure!(
@@ -385,11 +401,11 @@ pub fn worker_main() -> Result<()> {
                     "worker codec contract"
                 );
                 decoder = Decoder(unsafe { am_aac_open(data[0] as u32) });
-                vec![u8::from(!decoder.0.is_null())]
+                reply[0] = u8::from(!decoder.0.is_null());
+                1
             }
             3 => {
                 ensure!(!decoder.0.is_null() && len > 0, "worker decoder state");
-                let mut pcm = [0i16; 4096];
                 let n = unsafe {
                     am_aac_decode(
                         decoder.0,
@@ -400,22 +416,23 @@ pub fn worker_main() -> Result<()> {
                     )
                 };
                 if n < 0 {
-                    Vec::new()
+                    0
                 } else {
                     ensure!(n as usize <= pcm.len(), "worker PCM length");
-                    pcm[..n as usize]
-                        .iter()
-                        .flat_map(|x| x.to_le_bytes())
-                        .collect()
+                    for (value, bytes) in pcm[..n as usize].iter().zip(reply.chunks_exact_mut(2)) {
+                        bytes.copy_from_slice(&value.to_le_bytes());
+                    }
+                    n as usize * 2
                 }
             }
             4 => {
                 ensure!(len == 0, "worker probe length");
-                vec![1]
+                reply[0] = 1;
+                1
             }
             5 => {
                 ensure!(len <= 2048, "sandbox probe size");
-                let request = std::str::from_utf8(&data)?;
+                let request = std::str::from_utf8(&data[..len])?;
                 let (port, path) = request.split_once('\n').context("sandbox probe format")?;
                 let file_denied = std::fs::read(path)
                     .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied);
@@ -425,41 +442,132 @@ pub fn worker_main() -> Result<()> {
                     Ok(())
                 })()
                 .is_err();
-                vec![file_denied.into(), network_denied.into()]
+                reply[..2].copy_from_slice(&[file_denied.into(), network_denied.into()]);
+                2
             }
             _ => bail!("unsupported worker operation"),
         };
-        output.write_all(&(reply.len() as u32).to_le_bytes())?;
-        output.write_all(&reply)?;
+        output.write_all(&(reply_len as u32).to_le_bytes())?;
+        output.write_all(&reply[..reply_len])?;
         output.flush()?;
     }
 }
 
-pub fn codec_probe(app: &App) -> Result<()> {
-    use std::io::Read;
+fn checked_worker() -> Result<Worker> {
+    use std::io::Write;
+    struct Canary(std::path::PathBuf);
+    impl Drop for Canary {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
     let mut worker = Worker::start()?;
-    let canary = std::env::current_exe()?
+    let path = std::env::current_exe()?
         .parent()
         .unwrap()
         .join(format!("sandbox-canary-{}.txt", std::process::id()));
-    std::fs::write(&canary, b"Nonsecret sandbox test canary")?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    let canary = Canary(path);
+    let written = file.write_all(b"Nonsecret sandbox test canary");
+    drop(file);
+    written?;
     let udp = std::net::UdpSocket::bind("127.0.0.1:0")?;
     let result = worker.call(
         5,
-        format!("{}\n{}", udp.local_addr()?.port(), canary.display()).as_bytes(),
+        format!("{}\n{}", udp.local_addr()?.port(), canary.0.display()).as_bytes(),
     );
-    std::fs::remove_file(&canary)?;
+    std::fs::remove_file(&canary.0)?;
     let result = result?;
     udp.set_read_timeout(Some(std::time::Duration::from_millis(250)))?;
     let mut packet = [0; 32];
-    let delivered = udp.recv_from(&mut packet).is_ok();
+    let delivered = match udp.recv_from(&mut packet) {
+        Ok(_) => true,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            false
+        }
+        Err(error) => return Err(error).context("sandbox probe receive failed"),
+    };
+    // Winsock sendto success confirms submission, not delivery. AppContainer
+    // filtering may reject the datagram after send_to has returned successfully.
+    // Keep the token/file checks and observe the receiving socket independently.
     ensure!(
-        result.first() == Some(&1) && !delivered,
-        "AppContainer denial probe file/network={result:?}, datagram_delivered={delivered}"
+        matches!(result, [1, 0 | 1]) && !delivered,
+        "AppContainer denial probe file_denied/send_error={result:?}, datagram_delivered={delivered}"
+    );
+    println!(
+        "PASS: AppContainer file read denied; UDP datagram not received (send_error={}).",
+        result[1] != 0
     );
     let vector = include_bytes!("../tests/fixtures/fairplay-known-answer.bin");
     let key = worker.decrypt_key(vector[..164].try_into()?, vector[164..236].try_into()?)?;
     ensure!(key == vector[236..], "FairPlay known-answer mismatch");
+    Ok(worker)
+}
+
+// Decode-only regression: no App reference and no path to am_audio/WASAPI.
+// Reconfiguration and repeat hashes cover reuse of the fixed IPC buffers.
+pub fn codec_probe_silent() -> Result<()> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut worker = checked_worker()?;
+    let fixture = include_bytes!("../tests/fixtures/tone-44100-stereo-eld.frames");
+    let mut reference = None;
+    let mut total_frames = 0;
+    for _ in 0..3 {
+        worker.configure(4)?;
+        worker.configure(8)?;
+        let mut input = std::io::Cursor::new(fixture);
+        let mut hash = Sha256::new();
+        let mut frames = 0;
+        let mut energy = 0f64;
+        while (input.position() as usize) < fixture.len() {
+            let mut len = [0; 4];
+            input.read_exact(&mut len)?;
+            let len = u32::from_le_bytes(len) as usize;
+            ensure!(len <= 8192, "fixture length");
+            let start = input.position() as usize;
+            let end = start.checked_add(len).context("fixture length overflow")?;
+            let packet = fixture.get(start..end).context("truncated AAC fixture")?;
+            input.set_position(end as u64);
+            let pcm = worker.decode(packet)?;
+            ensure!(pcm.len() == 960, "AAC-ELD 480-frame contract");
+            for sample in pcm {
+                hash.update(sample.to_le_bytes());
+                energy += f64::from(sample).powi(2);
+            }
+            frames += 1;
+        }
+        ensure!(
+            frames >= 100 && energy > 1e6,
+            "AAC fixture decoded no signal"
+        );
+        let digest = hash.finalize();
+        if let Some(previous) = reference {
+            ensure!(
+                digest == previous,
+                "AAC reset/reuse changed decoded samples"
+            );
+        }
+        reference = Some(digest);
+        total_frames += frames;
+    }
+    println!(
+        "PASS: silent isolated codec regression: FairPlay known-answer, sandbox denials, {total_frames} AAC frames, identical hashes after reset. No audio samples submitted."
+    );
+    Ok(())
+}
+
+pub fn codec_probe(app: &App) -> Result<()> {
+    use std::io::Read;
+    let mut worker = checked_worker()?;
     worker.configure(8)?;
     let mut input = std::io::Cursor::new(include_bytes!(
         "../tests/fixtures/tone-44100-stereo-eld.frames"

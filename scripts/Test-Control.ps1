@@ -1,9 +1,12 @@
 param([string]$Executable = '')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-if (-not $Executable) { $Executable = Join-Path $root 'target/debug/airmirror-lite.exe' }
+if (-not $Executable) { $Executable = Join-Path $root 'target/release/airmirror-lite.exe' }
 $data = Join-Path $root 'local/control-test'
 New-Item -ItemType Directory -Force -Path $data | Out-Null
+$result = Join-Path $data 'result.json'
+if (Test-Path -LiteralPath $result) { Remove-Item -LiteralPath $result }
+$Executable = (Resolve-Path -LiteralPath $Executable).Path
 $process = Start-Process -FilePath $Executable -ArgumentList @('--no-discovery','--hidden','--bind','127.0.0.1','--port','17000','--seconds','12','--data-dir',('"' + $data + '"')) -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $data 'stdout.txt') -RedirectStandardError (Join-Path $data 'stderr.txt')
 function Send-Request([string]$Request) {
     $client = [Net.Sockets.TcpClient]::new()
@@ -46,5 +49,6 @@ try {
     if(-not $process.WaitForExit(15000)){throw 'Receiver did not exit on deadline'}
     if($process.ExitCode -ne 0){throw ('Receiver exit failure: ' + $process.ExitCode)}
     $probe=[Net.Sockets.TcpClient]::new();try{$probe.Connect('127.0.0.1',17000);throw 'Listener remains after shutdown'}catch [Net.Sockets.SocketException]{}finally{$probe.Dispose()}
+    @{timeUtc=[DateTime]::UtcNow.ToString('o');executable=$Executable;sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $Executable).Hash;exitCode=$process.ExitCode;evidence='Silent loopback control, one-owner admission, malformed framing/state rejection and timed shutdown. No phone acceptance.'} | ConvertTo-Json | Set-Content -LiteralPath $result -Encoding utf8
     'PASS: real loopback control requests, one-owner admission, malformed framing/state rejection, listener survives, timed shutdown removes listener.'
 } finally { if(-not $process.HasExited){Stop-Process -Id $process.Id -ErrorAction SilentlyContinue} }

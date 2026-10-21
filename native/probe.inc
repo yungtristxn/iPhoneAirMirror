@@ -34,19 +34,30 @@ static HRESULT probe_video(App* app, UINT width, UINT height,UINT codec=264) {
     double until=now_seconds()+0.4;while(now_seconds()<until){CHECK(app->tick());Sleep(2);}
     // A paused redraw uses the retained private texture, not a live decoder surface.
     if(!app->last_frame.sample)return E_FAIL;
+    app->video.clear();
+    auto redraw_paused=[&]() -> HRESULT {
+        const uint64_t before=app->presented;const ULONGLONG deadline=GetTickCount64()+1000;
+        app->shell.redraw=true;
+        do {
+            CHECK(app->tick());if(app->presented>before)return S_OK;
+            Sleep(2);
+        } while(GetTickCount64()<deadline);
+        return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+    };
     RECT original;GetWindowRect(app->window,&original);
     for(auto size: {std::pair<int,int>{800,500},{600,900},{1200,700}}){
         if(!SetWindowPos(app->window,nullptr,original.left,original.top,size.first,size.second,SWP_NOZORDER|SWP_NOACTIVATE))return HRESULT_FROM_WIN32(GetLastError());
-        app->shell.redraw=true;CHECK(app->tick());
+        CHECK(redraw_paused());
     }
     DWORD_PTR result=0;
     if(!SendMessageTimeoutW(app->window,WM_KEYDOWN,VK_F11,0,SMTO_ABORTIFHUNG,2000,&result))return HRESULT_FROM_WIN32(GetLastError());
     if(GetWindowLongPtrW(app->window,GWL_STYLE)&WS_CAPTION)return E_FAIL;
-    app->shell.redraw=true;CHECK(app->tick());
+    CHECK(redraw_paused());
     if(!SendMessageTimeoutW(app->window,WM_KEYDOWN,VK_F11,0,SMTO_ABORTIFHUNG,2000,&result))return HRESULT_FROM_WIN32(GetLastError());
     if((GetWindowLongPtrW(app->window,GWL_STYLE)&WS_CAPTION)||app->shell.fullscreen)return E_FAIL;
+    CHECK(redraw_paused());
     if(!SetWindowPos(app->window,nullptr,original.left,original.top,original.right-original.left,original.bottom-original.top,SWP_NOZORDER|SWP_NOACTIVATE))return HRESULT_FROM_WIN32(GetLastError());
-    app->shell.redraw=true;CHECK(app->tick());return S_OK;
+    CHECK(redraw_paused());return S_OK;
 }
 extern "C" int am_video_probe(void* p) {
     auto app=static_cast<App*>(p);uint64_t before=app->decoder_surfaces;
@@ -69,7 +80,44 @@ extern "C" int am_ui_probe(void* p,const char* directory) {
     {Discovery d;if(!d.done.h)return 0;Discovery::callback(ERROR_SUCCESS,&d,nullptr);
         if(am_discovery_status(&d)!=1||am_discovery_status(&d)!=1){error_hr("discovery completion must remain signaled",E_FAIL);return 0;}
         ResetEvent(d.done.h);d.status=ERROR_IO_PENDING;if(am_discovery_status(&d)!=0)return 0;}
-    auto app=static_cast<App*>(p);auto path=wide(directory);HRESULT hr=app->shell.self_test(path.c_str());
+    auto app=static_cast<App*>(p);
+    // Exercise transport deadlines with local pipe ends that deliberately never drain/reply.
+    // No worker codec, audio endpoint, desktop input or network is involved.
+    {
+        GUID id{};if(FAILED(CoCreateGuid(&id)))return 0;wchar_t guid[40];StringFromGUID2(id,guid,40);
+        const std::wstring name=L"\\\\.\\pipe\\AirMirrorLite-probe-"+std::wstring(guid);
+        Worker blocked;Handle reader,writer;
+        if(!worker_pipe(name+L"-request",true,blocked.input,reader,blocked.write_event,4096)
+            ||!worker_pipe(name+L"-reply",false,blocked.output,writer,blocked.read_event,4096))return 0;
+        std::array<uint8_t,8192> bytes{};ULONGLONG began=GetTickCount64();
+        if(write_worker(&blocked,bytes.data(),DWORD(bytes.size()),began+40)||GetTickCount64()-began>1000){error_hr("worker stalled-write deadline",E_FAIL);return 0;}
+        began=GetTickCount64();
+        if(read_worker(&blocked,bytes.data(),4,began+40)||GetTickCount64()-began>1000){error_hr("worker stalled-read deadline",E_FAIL);return 0;}
+        if(write_worker(&blocked,bytes.data(),4,GetTickCount64())){error_hr("worker expired shared deadline",E_FAIL);return 0;}
+    }
+    {
+        ComPtr<IDXGISwapChain2> paced;UINT latency=0;DXGI_SWAP_CHAIN_DESC1 desc{};
+        if(FAILED(app->swap.As(&paced))||FAILED(paced->GetMaximumFrameLatency(&latency))||latency!=1
+            ||FAILED(app->swap->GetDesc1(&desc))||!(desc.Flags&DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT))return 0;
+        // An unavailable presentation slot keeps the newest due frame queued without blocking.
+        Handle unavailable;unavailable.h=CreateEventW(nullptr,FALSE,FALSE,nullptr);if(!unavailable.h)return 0;
+        HANDLE actual=app->video_event.h;app->video_event.h=unavailable.h;
+        bool reserved=app->video_slot_reserved;app->video_slot_reserved=false;
+        const auto presented=app->presented,late=app->late_frames,waits=app->video_waits;const double now=now_seconds();
+        for(int i=0;i<3;++i)app->video.push_back({{},now-1+i*.01,16,16});
+        app->shell.redraw=true;HRESULT gate=app->tick();if(SUCCEEDED(gate))gate=app->tick();
+        bool retained=app->video.size()==1&&app->video.front().pts==now-1+.02&&app->presented==presented&&app->shell.redraw;
+        app->video.clear();app->video_event.h=actual;app->video_slot_reserved=reserved;app->late_frames=late;app->video_waits=waits;
+        if(FAILED(gate)||!retained){error_hr("nonblocking video backpressure",E_FAIL);return 0;}
+        const int16_t zero[2]{};const uint8_t dummy=0;
+        if(valid_media_time(std::numeric_limits<double>::max())||valid_media_time(-1)||valid_media_time(std::numeric_limits<double>::infinity())
+            ||app->submit(&dummy,1,std::numeric_limits<double>::max())!=E_INVALIDARG
+            ||am_audio(app,zero,0,now)||am_audio(app,zero,2,std::numeric_limits<double>::max())
+            ||app->audio_running||!app->sound.empty()||app->audio_frames){error_hr("native media timestamp boundary",E_FAIL);return 0;}
+        if(!app->audio_capacity||!std::isfinite(app->audio_latency)||app->audio_latency<0)return 0;
+        last_error.clear();
+    }
+    auto path=wide(directory);HRESULT hr=app->shell.self_test(path.c_str());
     if(FAILED(hr)){error_hr("native UI regression (line encoded in HRESULT)",hr);return 0;}
     app->shell.reset_video();
     app->shell.set_status(L"Connected — waiting for picture and sound");

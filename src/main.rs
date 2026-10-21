@@ -70,11 +70,15 @@ fn run() -> Result<()> {
             }
             "--resolution" => {
                 i += 1;
-                resolution = Some(
-                    args.get(i)
-                        .context("--resolution requires 1080, 1440 or 2160")?
-                        .parse::<u32>()?,
+                let requested = args
+                    .get(i)
+                    .context("--resolution requires 1080, 1440 or 2160")?
+                    .parse::<u32>()?;
+                anyhow::ensure!(
+                    matches!(requested, 1080 | 1440 | 2160),
+                    "resolution must be 1080, 1440 or 2160"
                 );
+                resolution = Some(requested);
             }
             "--port" => {
                 i += 1;
@@ -115,6 +119,7 @@ fn run() -> Result<()> {
         "--ui-test-dir requires --ui-test or --self-test"
     );
     anyhow::ensure!(!(preview && probe), "choose --self-test or --ui-preview");
+    anyhow::ensure!(bind.is_ipv4(), "--bind requires a local IPv4 address");
     let startup = std::time::Instant::now();
     let app = native::App::open(hidden || probe).context("native video/audio startup")?;
     let native_ms = startup.elapsed().as_secs_f64() * 1000.0;
@@ -150,8 +155,9 @@ fn run() -> Result<()> {
         )?;
         app.video_probe()?;
         if silent_probe {
+            native::codec_probe_silent()?;
             println!(
-                "PASS: silent native UI and synthetic hardware video regression. No audio samples submitted.\n{}\nNo physical iPhone, sound or desktop-composition acceptance claimed.",
+                "PASS: silent native UI, synthetic hardware video and isolated codec/IPC regression. No audio samples submitted.\n{}\nNo physical iPhone, sound or desktop-composition acceptance claimed.",
                 app.stats()
             );
         } else {

@@ -2,18 +2,27 @@
 #include <d2d1.h>
 #include <dwrite.h>
 #include <wrl/client.h>
+#include <algorithm>
+#include <cmath>
+#include <cwchar>
 using Microsoft::WRL::ComPtr;
 
 struct ControlArtwork {
     float scale=1,rail_x=0,flyout_x=0,volume=1,arrow_x=0;
     int width=0,height=0,hot=-1,pressed=-1,focus=-1;
     bool popup=false,fullscreen=false,muted=false,collapsed=false,arrow_left=false;
+    bool operator==(const ControlArtwork& other) const {
+        return scale==other.scale&&rail_x==other.rail_x&&flyout_x==other.flyout_x&&volume==other.volume&&arrow_x==other.arrow_x
+            &&width==other.width&&height==other.height&&hot==other.hot&&pressed==other.pressed&&focus==other.focus
+            &&popup==other.popup&&fullscreen==other.fullscreen&&muted==other.muted&&collapsed==other.collapsed&&arrow_left==other.arrow_left;
+    }
 };
 // Vector artwork rendered at the monitor's pixel density. Only this small UI
 // surface is CPU-backed; mirrored frames stay on the GPU.
 class ControlPainter {
     ComPtr<ID2D1Factory> factory;
     ComPtr<ID2D1DCRenderTarget> canvas;
+    ComPtr<ID2D1SolidColorBrush> brush;
     ComPtr<IDWriteFactory> writing;
     ComPtr<IDWriteTextFormat> icons,text,chevrons;
 public:
@@ -21,12 +30,18 @@ public:
 #define PAINT_TRY(call) do{HRESULT result=(call);if(FAILED(result))return result;}while(0)
         if(!factory){
             PAINT_TRY(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,factory.GetAddressOf()));
+        }
+        // Each resource may fail independently. Retrying an incomplete initial
+        // draw must never treat a successful factory creation as full readiness.
+        if(!writing){
             PAINT_TRY(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,__uuidof(IDWriteFactory),reinterpret_cast<IUnknown**>(writing.GetAddressOf())));
+        }
+        if(!icons||!chevrons||!text){
             ComPtr<IDWriteFontCollection> fonts;PAINT_TRY(writing->GetSystemFontCollection(&fonts));UINT32 index;BOOL exists;
             PAINT_TRY(fonts->FindFamilyName(L"Segoe Fluent Icons",&index,&exists));
-            PAINT_TRY(writing->CreateTextFormat(exists?L"Segoe Fluent Icons":L"Segoe MDL2 Assets",nullptr,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,20,L"en-us",&icons));
-            PAINT_TRY(writing->CreateTextFormat(exists?L"Segoe Fluent Icons":L"Segoe MDL2 Assets",nullptr,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,16,L"en-us",&chevrons));
-            PAINT_TRY(writing->CreateTextFormat(L"Segoe UI",nullptr,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,12,L"en-us",&text));
+            if(!icons)PAINT_TRY(writing->CreateTextFormat(exists?L"Segoe Fluent Icons":L"Segoe MDL2 Assets",nullptr,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,20,L"en-us",&icons));
+            if(!chevrons)PAINT_TRY(writing->CreateTextFormat(exists?L"Segoe Fluent Icons":L"Segoe MDL2 Assets",nullptr,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,16,L"en-us",&chevrons));
+            if(!text)PAINT_TRY(writing->CreateTextFormat(L"Segoe UI",nullptr,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,12,L"en-us",&text));
             icons->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);icons->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             chevrons->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);chevrons->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             text->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);text->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -36,7 +51,7 @@ public:
             PAINT_TRY(factory->CreateDCRenderTarget(&properties,&canvas));
         }
         RECT bounds{0,0,a.width,a.height};PAINT_TRY(canvas->BindDC(dc,&bounds));
-        ComPtr<ID2D1SolidColorBrush> brush;PAINT_TRY(canvas->CreateSolidColorBrush(D2D1::ColorF(0xffffff),&brush));
+        if(!brush)PAINT_TRY(canvas->CreateSolidColorBrush(D2D1::ColorF(0xffffff),&brush));
         canvas->BeginDraw();canvas->SetTransform(D2D1::Matrix3x2F::Scale(a.scale,a.scale));canvas->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);canvas->Clear(D2D1::ColorF(0,0));
         auto color=[&](UINT rgb,float alpha=1){brush->SetColor(D2D1::ColorF(rgb,alpha));};
         auto panel=[&](D2D1_RECT_F rect,float radius){
@@ -84,7 +99,7 @@ public:
             color(a.muted?0x8c929d:0x709ed6);canvas->FillEllipse(D2D1::Ellipse(D2D1::Point2F(thumb,58),3,3),brush.Get());
         }
         }
-        HRESULT result=canvas->EndDraw();if(result==D2DERR_RECREATE_TARGET)canvas.Reset();return result;
+        HRESULT result=canvas->EndDraw();if(result==D2DERR_RECREATE_TARGET){brush.Reset();canvas.Reset();}return result;
 #undef PAINT_TRY
     }
 };

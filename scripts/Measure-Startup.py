@@ -1,5 +1,6 @@
 """Measure fresh-process listener readiness, without media or desktop automation."""
 import argparse
+import hashlib
 import json
 import pathlib
 import socket
@@ -12,6 +13,13 @@ parser.add_argument("--label", required=True)
 parser.add_argument("--discovery", action="store_true")
 parser.add_argument("--address", default="127.0.0.1")
 args = parser.parse_args()
+root = pathlib.Path(__file__).resolve().parent.parent
+if not args.label or len(args.label) > 64 or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for c in args.label):
+    parser.error("--label must contain 1-64 letters, digits, dots, underscores or hyphens")
+folder = root / "local" / ("startup-" + args.label)
+folder.mkdir(parents=True, exist_ok=True)
+result = folder / "result.json"
+result.unlink(missing_ok=True)
 if args.discovery and args.address == "127.0.0.1":
     parser.error("--discovery requires --address with the PC's private LAN IPv4 address")
 if args.discovery:
@@ -20,13 +28,12 @@ if args.discovery:
             raise RuntimeError("Close the normal receiver before a discovery benchmark")
     except OSError:
         pass
-root = pathlib.Path(__file__).resolve().parent.parent
-folder = root / "local" / ("startup-" + args.label)
-folder.mkdir(parents=True, exist_ok=True)
+executable = pathlib.Path(args.exe).resolve(strict=True)
+executable_hash = hashlib.sha256(executable.read_bytes()).hexdigest().upper()
 samples = []
 for trial in range(3):
     with (folder / f"{trial}-out.txt").open("w") as out, (folder / f"{trial}-err.txt").open("w") as err:
-        command = [args.exe, "--hidden", "--seconds", "2", "--port", "17005", "--data-dir", str(folder)]
+        command = [str(executable), "--hidden", "--seconds", "2", "--port", "17005", "--data-dir", str(folder)]
         if not args.discovery:
             command += ["--no-discovery", "--bind", "127.0.0.1"]
         address = args.address
@@ -46,13 +53,16 @@ for trial in range(3):
                 except OSError:
                     time.sleep(.01)
             elapsed = (time.perf_counter() - started) * 1000
-            assert process.wait(timeout=10) == 0
+            exit_code = process.wait(timeout=10)
+            if exit_code != 0:
+                raise RuntimeError(f"Receiver exited with {exit_code}; inspect {folder}")
             samples.append(round(elapsed, 1))
         finally:
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=5)
 summary = {"listener_ready_ms": samples, "discovery": args.discovery,
+           "executable": str(executable), "sha256": executable_hash,
            "evidence": "Fresh processes, existing OS caches; no phone, media or sound"}
-(folder / "result.json").write_text(json.dumps(summary, indent=2))
+result.write_text(json.dumps(summary, indent=2))
 print(json.dumps(summary))

@@ -5,6 +5,7 @@
 #include <dwmapi.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <future>
 #include "control_artwork.h"
 #include "resources.h"
@@ -16,6 +17,40 @@ constexpr UINT_PTR HIDE_VOLUME=1;
 constexpr wchar_t const* labels[]={L"Mute / unmute (M) — hover for volume",L"Fit at source resolution (0)",L"Fullscreen (F11)",L"Close AirMirrorLite (Alt+F4)",L"Hide controls (C)"};
 RECT work_area(HWND hwnd){MONITORINFO mi{sizeof(mi)};GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&mi);return mi.rcWork;}
 }
+// One bounded backing bitmap, owned and released on the UI thread. Moving the
+// owned palette does not change its pixels and must not allocate or repaint.
+class PaletteSurface {
+public:
+    HDC memory=nullptr;
+    HBITMAP bitmap=nullptr;
+    HGDIOBJ previous=nullptr;
+    void* pixels=nullptr;
+    int width=0,height=0;
+    uint64_t allocations=0,draws=0;
+    bool valid=false;
+    ControlArtwork artwork{};
+    ~PaletteSurface(){release();}
+    void release(){
+        if(memory&&previous)SelectObject(memory,previous);
+        if(bitmap)DeleteObject(bitmap);
+        if(memory)DeleteDC(memory);
+        memory=nullptr;bitmap=nullptr;previous=nullptr;pixels=nullptr;width=height=0;valid=false;
+    }
+    HRESULT resize(int w,int h){
+        if(w<1||h<1||w>2048||h>2048)return E_INVALIDARG;
+        if(memory&&w==width&&h==height)return S_OK;
+        HDC next_memory=CreateCompatibleDC(nullptr);
+        if(!next_memory)return E_OUTOFMEMORY;
+        BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=w;info.bmiHeader.biHeight=-h;
+        info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
+        void* next_pixels=nullptr;HBITMAP next_bitmap=CreateDIBSection(nullptr,&info,DIB_RGB_COLORS,&next_pixels,nullptr,0);
+        if(!next_bitmap||!next_pixels){if(next_bitmap)DeleteObject(next_bitmap);DeleteDC(next_memory);return E_OUTOFMEMORY;}
+        HGDIOBJ next_previous=SelectObject(next_memory,next_bitmap);
+        if(!next_previous||next_previous==HGDI_ERROR){DeleteObject(next_bitmap);DeleteDC(next_memory);return E_FAIL;}
+        release();memory=next_memory;bitmap=next_bitmap;previous=next_previous;pixels=next_pixels;width=w;height=h;++allocations;
+        return S_OK;
+    }
+};
 PhoneShell::PhoneShell()=default;
 PhoneShell::~PhoneShell(){shutdown();}
 float PhoneShell::corner_radius(UINT width,UINT height,float s){return std::clamp(float(std::min(width,height))*.105f,20*s,36*s);}
@@ -26,6 +61,7 @@ HRESULT PhoneShell::create(HANDLE wake,bool hidden){
     thread_=std::thread([this,created=std::move(created)]() mutable {
         GdiplusStartupInput startup;if(GdiplusStartup(&gdiplus_,&startup,nullptr)!=Ok){created.set_value(nullptr);return;}
         painter_=std::make_unique<ControlPainter>();
+        palette_surface_=std::make_unique<PaletteSurface>();
         INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_STANDARD_CLASSES};InitCommonControlsEx(&controls);
         WNDCLASSW wc{};wc.lpfnWndProc=main_proc;wc.hInstance=GetModuleHandleW(nullptr);wc.hIcon=LoadIconW(wc.hInstance,MAKEINTRESOURCEW(IDI_AIRMIRRORLITE));wc.style=CS_DBLCLKS;wc.lpszClassName=L"AirMirrorLiteWindow";wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);RegisterClassW(&wc);
         WNDCLASSW pc=wc;pc.lpfnWndProc=palette_proc;pc.lpszClassName=L"AirMirrorLiteControls";RegisterClassW(&pc);
@@ -46,6 +82,7 @@ HRESULT PhoneShell::create(HANDLE wake,bool hidden){
         created.set_value(window);
         if(window){MSG msg;while(GetMessageW(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}}
         painter_.reset();
+        palette_surface_.reset();
         if(small_icon_)DestroyIcon(small_icon_);if(large_icon_)DestroyIcon(large_icon_);small_icon_=large_icon_=nullptr;
         if(gdiplus_){GdiplusShutdown(gdiplus_);gdiplus_=0;}
     });
@@ -135,8 +172,17 @@ void PhoneShell::toggle_controls(){
     place_palette();
 }
 void PhoneShell::dismiss_volume(){
-    KillTimer(palette_,HIDE_VOLUME);TRACKMOUSEEVENT cancel{sizeof(cancel),TME_CANCEL|TME_HOVER,palette_,0};TrackMouseEvent(&cancel);
+    update_volume_timer(true);TRACKMOUSEEVENT cancel{sizeof(cancel),TME_CANCEL|TME_HOVER,palette_,0};TrackMouseEvent(&cancel);
     hover_pending_=false;if(popup_){popup_=false;place_palette();}else update_tooltips();
+}
+void PhoneShell::update_volume_timer(bool in_zone){
+    if(!popup_||in_zone||dragging_slider_){
+        if(hide_volume_pending_)KillTimer(palette_,HIDE_VOLUME);
+        hide_volume_pending_=false;hide_volume_deadline_=0;
+    }else if(!hide_volume_pending_){
+        hide_volume_pending_=SetTimer(palette_,HIDE_VOLUME,350,nullptr)!=0;
+        hide_volume_deadline_=hide_volume_pending_?GetTickCount64()+350:0;
+    }
 }
 void PhoneShell::place_palette(){
     if(!palette_)return;
@@ -187,22 +233,23 @@ void PhoneShell::update_tooltips(){
     SendMessageW(tooltip_,TTM_ACTIVATE,popup_||hover_pending_?FALSE:TRUE,0);
 }
 HRESULT PhoneShell::paint_palette(const wchar_t* diagnostic_path,float diagnostic_scale){
-    if(!palette_||!gdiplus_)return E_UNEXPECTED;
+    if(!palette_||!gdiplus_||!painter_||!palette_surface_)return E_UNEXPECTED;
     float s=diagnostic_scale>0?diagnostic_scale:dpi_scale();int width=int(palette_width_*s),height=int((BODY_HEIGHT+20)*s);
     if(width<1||height<1||width>2048||height>2048)return E_INVALIDARG;
-    HDC screen=GetDC(nullptr),memory=CreateCompatibleDC(screen);BITMAPINFO info{};info.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);info.bmiHeader.biWidth=width;info.bmiHeader.biHeight=-height;info.bmiHeader.biPlanes=1;info.bmiHeader.biBitCount=32;info.bmiHeader.biCompression=BI_RGB;
-    void* bits=nullptr;HBITMAP dib=CreateDIBSection(screen,&info,DIB_RGB_COLORS,&bits,nullptr,0);
-    if(!dib||!bits){if(dib)DeleteObject(dib);DeleteDC(memory);ReleaseDC(nullptr,screen);return E_OUTOFMEMORY;}
-    HGDIOBJ old=SelectObject(memory,dib);
     ControlArtwork artwork{s,float(rail_x_),float(flyout_x_),volume,float(arrow_x_),width,height,hot_,pressed_,keyboard_focus_,popup_,fullscreen,muted,controls_collapsed_,controls_collapsed_?!dock_right_:dock_right_};
-    HRESULT result=painter_->draw(memory,artwork);
+    auto& surface=*palette_surface_;
+    if(!diagnostic_path&&surface.valid&&surface.artwork==artwork){update_tooltips();return S_OK;}
+    HRESULT result=surface.resize(width,height);if(FAILED(result))return result;
+    surface.valid=false;result=painter_->draw(surface.memory,artwork);
+    if(SUCCEEDED(result))++surface.draws;
     if(SUCCEEDED(result)&&diagnostic_path){
         static const CLSID png={0x557cf406,0x1a04,0x11d3,{0x9a,0x73,0x00,0x00,0xf8,0x1e,0xf3,0x2e}};
-        Bitmap bitmap(width,height,width*4,PixelFormat32bppPARGB,static_cast<BYTE*>(bits));if(bitmap.Save(diagnostic_path,&png,nullptr)!=Ok)result=E_FAIL;
+        Bitmap bitmap(width,height,width*4,PixelFormat32bppPARGB,static_cast<BYTE*>(surface.pixels));if(bitmap.Save(diagnostic_path,&png,nullptr)!=Ok)result=E_FAIL;
     }
     if(SUCCEEDED(result)&&!diagnostic_path){SIZE size{width,height};POINT source{};BLENDFUNCTION blend{AC_SRC_OVER,0,255,AC_SRC_ALPHA};
-        if(!UpdateLayeredWindow(palette_,screen,nullptr,&size,memory,&source,0,&blend,ULW_ALPHA))result=HRESULT_FROM_WIN32(GetLastError());}
-    SelectObject(memory,old);DeleteObject(dib);DeleteDC(memory);ReleaseDC(nullptr,screen);update_tooltips();return result;
+        if(!UpdateLayeredWindow(palette_,nullptr,nullptr,&size,surface.memory,&source,0,&blend,ULW_ALPHA))result=HRESULT_FROM_WIN32(GetLastError());
+        else{surface.artwork=artwork;surface.valid=true;}}
+    update_tooltips();return result;
 }
 void PhoneShell::menu(POINT screen){
     HMENU menu=CreatePopupMenu();AppendMenuW(menu,MF_STRING,1,L"Default size\t0");AppendMenuW(menu,MF_STRING,2,L"Fullscreen\tF11");AppendMenuW(menu,MF_STRING,3,L"Disconnect\tD");AppendMenuW(menu,MF_SEPARATOR,0,nullptr);AppendMenuW(menu,MF_STRING,4,L"Close\tAlt+F4");
@@ -257,7 +304,7 @@ LRESULT CALLBACK PhoneShell::main_proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         if(wp=='0'||wp==VK_NUMPAD0){a->default_size();return 0;}
         if(wp==VK_UP||wp==VK_DOWN){a->set_volume(a->volume+(wp==VK_UP?.05f:-.05f));return 0;}
         if(wp==VK_TAB){a->keyboard_focus_=a->controls_collapsed_?4:a->keyboard_focus_<0?(GetKeyState(VK_SHIFT)<0?4:0):(a->keyboard_focus_+(GetKeyState(VK_SHIFT)<0?4:1))%5;a->paint_palette();return 0;}
-        if((wp==VK_RETURN||wp==VK_SPACE)&&a->keyboard_focus_>=0){a->invoke(a->keyboard_focus_);return 0;}
+        if((wp==VK_RETURN||wp==VK_SPACE)&&a->keyboard_focus_>=0){if(!(lp&(1LL<<30)))a->invoke(a->keyboard_focus_);return 0;}
         if(wp==VK_ESCAPE){if(a->popup_||a->hover_pending_){a->dismiss_volume();return 0;}if(a->fullscreen)a->toggle_fullscreen();else{a->disconnect=true;a->signal();}return 0;}
         if((wp==VK_LEFT||wp==VK_RIGHT)&&a->keyboard_focus_==0&&!a->controls_collapsed_){a->popup_=true;a->place_palette();a->set_volume(a->volume+(wp==VK_RIGHT?.01f:-.01f));return 0;}
         if(wp=='D'){a->disconnect=true;a->signal();return 0;}break;
@@ -275,7 +322,7 @@ LRESULT CALLBACK PhoneShell::palette_proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         if(!a->tracking_){TRACKMOUSEEVENT track{sizeof(track),TME_LEAVE,h,0};TrackMouseEvent(&track);a->tracking_=true;}
         if(a->dragging_slider_){a->pointer_volume(point.x);return 0;}
         int hot=a->button_at(point);bool changed=hot!=a->hot_;a->hot_=hot;
-        if(a->volume_zone(point))KillTimer(h,HIDE_VOLUME);else if(a->popup_&&changed)SetTimer(h,HIDE_VOLUME,350,nullptr);
+        a->update_volume_timer(a->volume_zone(point));
         if(hot==0&&!a->popup_&&!a->hover_pending_&&a->pressed_<0){
             UINT delay=400;SystemParametersInfoW(SPI_GETMOUSEHOVERTIME,0,&delay,0);TRACKMOUSEEVENT hover{sizeof(hover),TME_HOVER,h,std::clamp(delay,200u,1000u)};
             TrackMouseEvent(&hover);a->hover_pending_=true;a->update_tooltips();
@@ -283,14 +330,14 @@ LRESULT CALLBACK PhoneShell::palette_proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         if(changed)a->paint_palette();return 0;}
     case WM_MOUSEHOVER:{bool pending=a->hover_pending_;a->hover_pending_=false;POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
         if(pending&&a->button_at(p)==0&&a->pressed_<0&&!a->dragging_slider_){a->popup_=true;a->place_palette();}return 0;}
-    case WM_MOUSELEAVE:a->tracking_=false;a->hover_pending_=false;a->hot_=-1;if(!a->dragging_slider_)SetTimer(h,HIDE_VOLUME,350,nullptr);a->paint_palette();return 0;
-    case WM_TIMER:if(wp==HIDE_VOLUME){POINT p;GetCursorPos(&p);ScreenToClient(h,&p);if(!a->volume_zone(p)&&!a->dragging_slider_)a->dismiss_volume();KillTimer(h,HIDE_VOLUME);}return 0;
+    case WM_MOUSELEAVE:a->tracking_=false;a->hover_pending_=false;a->hot_=-1;a->update_volume_timer(false);a->paint_palette();return 0;
+    case WM_TIMER:if(wp==HIDE_VOLUME&&a->hide_volume_pending_&&GetTickCount64()>=a->hide_volume_deadline_){KillTimer(h,HIDE_VOLUME);a->hide_volume_pending_=false;a->hide_volume_deadline_=0;POINT p;GetCursorPos(&p);ScreenToClient(h,&p);if(!a->volume_zone(p)&&!a->dragging_slider_)a->dismiss_volume();}return 0;
     case WM_LBUTTONDOWN:{POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};a->pressed_=a->button_at(p);
         TRACKMOUSEEVENT cancel{sizeof(cancel),TME_CANCEL|TME_HOVER,h,0};TrackMouseEvent(&cancel);a->hover_pending_=false;
         a->dragging_slider_=a->slider_hit(p);if(a->pressed_>=0||a->dragging_slider_){if(!a->hidden_)SetCapture(h);}
         if(a->dragging_slider_)a->pointer_volume(p.x);a->paint_palette();return 0;}
-    case WM_LBUTTONUP:{POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};int hit=a->button_at(p);bool slider=a->dragging_slider_;int pressed=a->pressed_;a->dragging_slider_=false;if(GetCapture()==h)ReleaseCapture();a->pressed_=-1;if(!slider&&hit==pressed&&hit>=0)a->invoke(hit);a->paint_palette();return 0;}
-    case WM_CAPTURECHANGED:a->dragging_slider_=false;a->pressed_=-1;return 0;
+    case WM_LBUTTONUP:{POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};int hit=a->button_at(p);bool slider=a->dragging_slider_;int pressed=a->pressed_;a->dragging_slider_=false;a->pressed_=-1;if(GetCapture()==h)ReleaseCapture();if(!slider&&hit==pressed&&hit>=0)a->invoke(hit);a->paint_palette();return 0;}
+    case WM_CAPTURECHANGED:if(a->dragging_slider_||a->pressed_>=0){a->dragging_slider_=false;a->pressed_=-1;a->dismiss_volume();a->paint_palette();}return 0;
     case WM_MOUSEWHEEL:a->set_volume(a->volume+(GET_WHEEL_DELTA_WPARAM(wp)>0?.05f:-.05f));return 0;
     case WM_CLOSE:a->quit=true;a->signal();return 0;
     }

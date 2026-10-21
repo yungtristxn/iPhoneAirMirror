@@ -26,11 +26,27 @@ HRESULT PhoneShell::test_on_ui_thread(const wchar_t* directory){
     palette_proc(palette_,WM_MOUSEMOVE,0,point(1));UI_REQUIRE(!hover_pending_&&!popup_);
     palette_proc(palette_,WM_MOUSEHOVER,0,point(0));UI_REQUIRE(!popup_);
     hover();UI_REQUIRE(popup_&&!hover_pending_);
+    // Crossing below the flyout can keep the same hovered reset button. The
+    // leave grace follows the volume zone, independently of button changes.
+    const int rail_center=int((rail_x_+38)*dpi_scale());
+    palette_proc(palette_,WM_MOUSEMOVE,0,MAKELPARAM(rail_center,int(80*dpi_scale())));
+    UI_REQUIRE(hot_==1&&!hide_volume_pending_);
+    palette_proc(palette_,WM_MOUSEMOVE,0,MAKELPARAM(rail_center,int(96*dpi_scale())));
+    UI_REQUIRE(hot_==1&&hide_volume_pending_);
+    // A queued timer from an earlier hover must not shorten the new grace time.
+    palette_proc(palette_,WM_TIMER,HIDE_VOLUME,0);UI_REQUIRE(hide_volume_pending_&&popup_);
+    palette_proc(palette_,WM_MOUSEMOVE,0,point(0));UI_REQUIRE(!hide_volume_pending_&&popup_);
     POINT slider{int((flyout_x_+106)*dpi_scale()),int(58*dpi_scale())};UI_REQUIRE(slider_hit(slider)&&volume_zone(slider));
     UI_REQUIRE(!slider_hit({int((flyout_x_+106)*dpi_scale()),int(24*dpi_scale())}));
     palette_proc(palette_,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(slider.x,slider.y));UI_REQUIRE(dragging_slider_&&std::abs(volume-.5f)<.02f);
     palette_proc(palette_,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(int((flyout_x_+188)*dpi_scale()),slider.y));UI_REQUIRE(volume==1);
     palette_proc(palette_,WM_LBUTTONUP,0,MAKELPARAM(slider.x,slider.y));UI_REQUIRE(!dragging_slider_);
+    // An ordinary release preserves the open flyout. Losing capture to another
+    // window cancels the interaction and removes the pressed state immediately.
+    palette_proc(palette_,WM_CAPTURECHANGED,0,0);UI_REQUIRE(popup_);
+    palette_proc(palette_,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(slider.x,slider.y));UI_REQUIRE(dragging_slider_);
+    palette_proc(palette_,WM_CAPTURECHANGED,0,0);UI_REQUIRE(!dragging_slider_&&pressed_==-1&&!popup_&&!hover_pending_);
+    hover();UI_REQUIRE(popup_);
     pointer_volume(slider.x);UI_REQUIRE(!muted&&std::abs(volume-.5f)<.02f);
     UI_REQUIRE(SUCCEEDED(save(L"volume.png")));UI_REQUIRE(SUCCEEDED(save(L"volume-125.png",1.25f)));UI_REQUIRE(SUCCEEDED(save(L"volume-200.png",2)));
     click(0);UI_REQUIRE(muted);UI_REQUIRE(SUCCEEDED(save(L"muted.png")));click(0);
@@ -74,6 +90,21 @@ HRESULT PhoneShell::test_on_ui_thread(const wchar_t* directory){
     dismiss_volume();main_proc(window,WM_FORMAT,498,1080);default_size(true);
     UI_REQUIRE(GetWindow(palette_,GW_OWNER)==window&&(GetWindowLongPtrW(palette_,GWL_EXSTYLE)&WS_EX_TOOLWINDOW));
     keyboard_focus_=-1;key(VK_TAB);UI_REQUIRE(keyboard_focus_==0);key(VK_LEFT);UI_REQUIRE(popup_&&volume<1);key(VK_ESCAPE);UI_REQUIRE(!popup_&&!disconnect);
+    key(VK_SPACE);UI_REQUIRE(muted);
+    main_proc(window,WM_KEYDOWN,VK_SPACE,1LL<<30);UI_REQUIRE(muted);
+    key(VK_SPACE);UI_REQUIRE(!muted);
+    float before_repeat=volume;main_proc(window,WM_KEYDOWN,VK_LEFT,1LL<<30);UI_REQUIRE(volume<before_repeat);dismiss_volume();
+    // Repositioning unchanged artwork uses the existing layered surface. Hover
+    // and volume changes repaint it without allocating another bitmap or DC.
+    hot_=keyboard_focus_=-1;place_palette();UI_REQUIRE(palette_surface_->valid);
+    const auto draws=palette_surface_->draws,allocations=palette_surface_->allocations;
+    DWORD objects=GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS);
+    GetWindowRect(window,&outer);
+    for(int i=0;i<100;++i)SetWindowPos(window,nullptr,outer.left+(i%2),outer.top,outer.right-outer.left,outer.bottom-outer.top,SWP_NOZORDER|SWP_NOACTIVATE);
+    UI_REQUIRE(palette_surface_->draws==draws&&palette_surface_->allocations==allocations);
+    UI_REQUIRE(GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS)==objects);
+    palette_proc(palette_,WM_MOUSEMOVE,0,point(1));UI_REQUIRE(palette_surface_->draws==draws+1&&palette_surface_->allocations==allocations);
+    set_volume(.42f);UI_REQUIRE(palette_surface_->draws==draws+2&&palette_surface_->allocations==allocations);
     key('D');UI_REQUIRE(disconnect.exchange(false));click(3);UI_REQUIRE(quit.exchange(false));
     UI_REQUIRE(!IsWindowVisible(window)&&!IsWindowVisible(palette_));
     hot_=keyboard_focus_=-1;dismiss_volume();set_volume(1);muted=false;place_palette();return S_OK;

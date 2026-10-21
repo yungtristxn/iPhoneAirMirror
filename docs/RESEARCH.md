@@ -176,3 +176,23 @@ waits briefly for a valid clock rather than failing a first-reply race. An idle
 video socket is not a partially received record: the ten-second deadline starts
 with the first byte and covers header plus payload; control/timing still own
 connection liveness.
+
+## Performance and lifecycle review
+
+[Microsoft's DXGI latency guidance](https://learn.microsoft.com/en-us/windows/uwp/gaming/reduce-latency-with-dxgi-1-3-swap-chains)
+supports a per-swap-chain presentation budget of one. The receiver checks the
+waitable slot only when a frame/redraw is due and uses nonblocking Present,
+retaining the newest due decoded frame when the display is busy. It does not
+wait on a continuously ready display event while idle. Compressed dependencies
+are preserved; the existing decoded queue bounds remain in force.
+
+[IAudioClient::Initialize](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize)
+requires zero duration and periodicity for shared event-driven audio. The actual
+endpoint capacity and reported stream latency are logged rather than assumed.
+Changing the buffer contract still needs physical synchronization acceptance.
+
+Worker request writes and response reads now share one two-second deadline.
+Overlapped operations are cancelled and completed before their buffers leave
+scope. Fixed IPC scratch storage avoids repeated allocations; returned PCM
+still owns its bounded queue entry. None of these local changes establishes
+numeric phone-to-screen latency.

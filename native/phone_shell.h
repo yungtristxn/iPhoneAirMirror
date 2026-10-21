@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <memory>
 class ControlPainter;
+class PaletteSurface;
 
 // UI-thread-only geometry/input plus atomic handoff to the media thread.
 // The owned palette has no taskbar entry and never outlives the receiver.
@@ -35,8 +36,9 @@ private:
     HICON small_icon_=nullptr,large_icon_=nullptr;
     HANDLE wake_=nullptr;
     std::thread thread_;
-    bool hidden_=false, popup_=false, tracking_=false, dragging_slider_=false, user_sized_=false,hover_pending_=false;
+    bool hidden_=false, popup_=false, tracking_=false, dragging_slider_=false, user_sized_=false,hover_pending_=false,hide_volume_pending_=false;
     bool controls_collapsed_=false,dock_right_=true;
+    ULONGLONG hide_volume_deadline_=0;
     int hot_=-1, pressed_=-1, keyboard_focus_=-1, rail_x_=0, flyout_x_=0, palette_width_=96,arrow_x_=84;
     float aspect_=498.0f/1080.0f, last_nonzero_=1.0f;
     UINT display_w_=0,display_h_=0; // UI-thread source pixels
@@ -44,6 +46,7 @@ private:
     RECT restore_{},size_start_{};
     ULONG_PTR gdiplus_=0;
     std::unique_ptr<ControlPainter> painter_;
+    std::unique_ptr<PaletteSurface> palette_surface_;
     HRESULT initial_paint_=E_PENDING;
     void default_size(bool center=false);
     RECT fitted_rect(RECT original) const;
@@ -60,6 +63,7 @@ private:
     bool volume_zone(POINT point) const;
     bool slider_hit(POINT point) const;
     void dismiss_volume();
+    void update_volume_timer(bool in_zone);
     void toggle_controls();
     void update_tooltips();
     int button_at(POINT point) const;

@@ -4,6 +4,9 @@ $root = Split-Path -Parent $PSScriptRoot
 if (-not $Executable) { $Executable = Join-Path $root 'target/release/airmirror-lite.exe' }
 $data = Join-Path $root 'local/media-test'
 New-Item -ItemType Directory -Force -Path $data | Out-Null
+$result = Join-Path $data 'result.json'
+if (Test-Path -LiteralPath $result) { Remove-Item -LiteralPath $result }
+$Executable = (Resolve-Path -LiteralPath $Executable).Path
 $arguments = @($(if ($Audio) { '--self-test' } else { '--ui-test' }))
 if ($UiRenderDirectory) { $arguments += @('--ui-test-dir', ('"' + $UiRenderDirectory + '"')) }
 $process = Start-Process -FilePath $Executable -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $data 'stdout.txt') -RedirectStandardError (Join-Path $data 'stderr.txt')

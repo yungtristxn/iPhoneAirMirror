@@ -36,8 +36,9 @@ no administrator rights, Bonjour service, account or cloud connection.
   it is not an allowlist of trusted people.
 - Firewall access should be limited to this exact executable, **Private** profile
   and **LocalSubnet**. Do not allow public-network access or disable protection.
-- `--ui-test` runs **silent** native controls, embedded-icon and synthetic
-  H.264/HEVC hardware-video checks.
+- `--ui-test` runs **silent** native controls, embedded-icon, synthetic
+  H.264/HEVC hardware-video and isolated codec/IPC checks. AAC test data is
+  decoded in memory only; it is never sent to an audio endpoint.
   `scripts/Test-Media.ps1` uses this mode by default; it submits no audio samples.
 - `--ui-test --ui-test-dir local/ui-renders` also renders idle/control artwork at
   100%, 125% and 200% for inspection. It cannot export a mirrored phone frame.
@@ -88,7 +89,12 @@ Preferred stack: Rust + Win32, native Windows DNS-SD, Media Foundation H.264 + D
 ./scripts/Build.ps1 -Test
 ./scripts/Test-Media.ps1
 ./scripts/Test-Control.ps1
+python scripts/Test-VideoProfiles.py
 ```
+
+The control and media wrappers both default to the release executable and record
+its hash. Packaging runs a locked, offline release freshness build before copying
+the executable and writing source provenance to `BUILD.json`.
 
 The Rust tests cover request/body budgets, plist graphs, pairing proof/replay,
 FairPlay modes, NAL/SPS lengths and dimensions, RTP framing and shared-clock math.

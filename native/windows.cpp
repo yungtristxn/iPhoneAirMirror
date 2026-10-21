@@ -11,7 +11,7 @@
 #include <wmcodecdsp.h>
 #include <codecapi.h>
 #include <d3d11.h>
-#include <dxgi1_2.h>
+#include <dxgi1_3.h>
 #include <audioclient.h>
 #include <mmdeviceapi.h>
 #include <windns.h>
@@ -31,12 +31,18 @@
 #include <vector>
 #include <thread>
 #include <future>
+#include <limits>
 using Microsoft::WRL::ComPtr;
 #define CHECK(x) do { HRESULT hr_ = (x); if (FAILED(hr_)) { error_hr(#x, hr_); return hr_; } } while (0)
 
 static double now_seconds() {
-    LARGE_INTEGER q, f; QueryPerformanceCounter(&q); QueryPerformanceFrequency(&f);
-    return double(q.QuadPart) / double(f.QuadPart);
+    static const double frequency=[] {LARGE_INTEGER f;QueryPerformanceFrequency(&f);return double(f.QuadPart);}();
+    LARGE_INTEGER q; QueryPerformanceCounter(&q);
+    return double(q.QuadPart) / frequency;
+}
+static bool valid_media_time(double pts) {
+    // A finite double can still overflow Media Foundation's signed 100-ns clock.
+    return std::isfinite(pts) && pts>=0 && pts<double(std::numeric_limits<LONGLONG>::max())/1e7;
 }
 static thread_local std::string last_error;
 static void error_hr(const char* stage, HRESULT hr) {
@@ -63,7 +69,7 @@ struct VideoFrame { ComPtr<IMFSample> sample; double pts; UINT width; UINT heigh
 struct AudioFrame { std::vector<int16_t> pcm; size_t pos = 0; double pts = 0; };
 #include "phone_compositor.h"
 struct App {
-    HWND window = nullptr; Handle wake, audio_event;
+    HWND window = nullptr; Handle wake, audio_event, video_event;
     PhoneShell shell;
     bool hevc_available=false,decoder_ready=false;UINT codec=264,expected_fps=60;
     PhoneCompositor chrome;
@@ -76,9 +82,13 @@ struct App {
     UINT width = 0, height = 0, vieww = 0, viewh = 0;
     std::deque<VideoFrame> video; std::deque<AudioFrame> sound;
     VideoFrame last_frame{};
+    bool video_slot_reserved=false;
     ComPtr<ID3D11Texture2D> paused_texture;
     uint64_t decoder_instances=0;
     uint64_t decoded = 0, presented = 0, gpu_frames = 0, decoder_surfaces = 0, late_frames = 0, audio_frames = 0, underruns = 0;
+    size_t video_high_water=0,audio_high_water=0;
+    uint64_t video_waits=0,present_busy=0,submit_calls=0;
+    double submit_seconds=0,submit_max_seconds=0,present_seconds=0,present_max_seconds=0;
     std::string adapter; bool com = false, mf = false;
     ~App() {
         if (audio) audio->Stop();
@@ -109,7 +119,10 @@ struct App {
         sc.SampleDesc.Count = 1; sc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
         sc.Width=sc.Height=1;sc.AlphaMode=DXGI_ALPHA_MODE_PREMULTIPLIED;
         sc.BufferCount = 2; sc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; sc.Scaling = DXGI_SCALING_STRETCH;
+        sc.Flags=DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
         CHECK(factory->CreateSwapChainForComposition(device.Get(), &sc, nullptr, &swap));
+        ComPtr<IDXGISwapChain2> paced_swap;CHECK(swap.As(&paced_swap));CHECK(paced_swap->SetMaximumFrameLatency(1));
+        video_event.h=paced_swap->GetFrameLatencyWaitableObject();if(!video_event.h)return E_UNEXPECTED;
         CHECK(chrome.init(device.Get(),factory.Get(),window,swap.Get()));CHECK(chrome.layout(shell));
         factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);
         UINT token; CHECK(MFCreateDXGIDeviceManager(&token, &manager)); CHECK(manager->ResetDevice(device.Get(), token));
@@ -129,7 +142,7 @@ struct App {
         format.wBitsPerSample = 16; format.nBlockAlign = 4; format.nAvgBytesPerSec = 176400;
         CHECK(audio->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK |
             AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-            300000, 0, &format, nullptr));
+            0, 0, &format, nullptr));
         CHECK(audio->SetEventHandle(audio_event.h)); CHECK(audio->GetBufferSize(&audio_capacity));
         REFERENCE_TIME latency; CHECK(audio->GetStreamLatency(&latency)); audio_latency = latency / 1e7;
         CHECK(audio->GetService(IID_PPV_ARGS(&render)));
@@ -213,25 +226,28 @@ struct App {
             if (video.size() == (codec==265?4:8)) { video.pop_front(); ++late_frames; }
             shell.video_size(width,height);
             video.push_back({s, pts / 1e7, width, height});
+            video_high_water=std::max(video_high_water,video.size());
         }
         return E_UNEXPECTED;
     }
     HRESULT submit(const uint8_t* bytes, unsigned len, double pts) {
         if(!decoder_ready||!decoder)return MF_E_TRANSFORM_TYPE_NOT_SET;
-        if (!bytes || !len || len > (codec==265?4u:2u)*1024*1024 || !std::isfinite(pts)) return E_INVALIDARG;
+        if (!bytes || !len || len > (codec==265?4u:2u)*1024*1024 || !valid_media_time(pts)) return E_INVALIDARG;
+        const double began=now_seconds();
         ComPtr<IMFMediaBuffer> buffer; CHECK(MFCreateMemoryBuffer(len, &buffer)); BYTE* p;
         CHECK(buffer->Lock(&p, nullptr, nullptr)); memcpy(p, bytes, len); buffer->Unlock(); CHECK(buffer->SetCurrentLength(len));
         ComPtr<IMFSample> sample; CHECK(MFCreateSample(&sample)); CHECK(sample->AddBuffer(buffer.Get()));
         CHECK(sample->SetSampleTime((LONGLONG)(pts*1e7))); CHECK(sample->SetSampleDuration(10000000/expected_fps));
         HRESULT hr = decoder->ProcessInput(0, sample.Get(), 0);
         if (hr == MF_E_NOTACCEPTING) { CHECK(output()); hr = decoder->ProcessInput(0, sample.Get(), 0); }
-        CHECK(hr); return output();
+        CHECK(hr);CHECK(output());
+        const double elapsed=now_seconds()-began;++submit_calls;submit_seconds+=elapsed;submit_max_seconds=std::max(submit_max_seconds,elapsed);return S_OK;
     }
     HRESULT draw(IMFSample* frame, UINT width, UINT height) {
         CHECK(chrome.layout(shell));UINT vw=chrome.video_width,vh=chrome.video_height;
         if (!vw || !vh || !width || !height) return S_OK;
         if (vieww != vw || viewh != vh) {
-            context->ClearState(); CHECK(swap->ResizeBuffers(0, vw, vh, DXGI_FORMAT_UNKNOWN, 0)); vieww = vw; viewh = vh;processor.Reset();venum.Reset();
+            context->ClearState(); CHECK(swap->ResizeBuffers(0, vw, vh, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)); vieww = vw; viewh = vh;processor.Reset();venum.Reset();
         }
         ComPtr<IMFMediaBuffer> b; CHECK(frame->GetBufferByIndex(0, &b)); ComPtr<IMFDXGIBuffer> dxgi; CHECK(b.As(&dxgi));
         ComPtr<ID3D11Texture2D> texture; CHECK(dxgi->GetResource(IID_PPV_ARGS(&texture))); UINT slice; CHECK(dxgi->GetSubresourceIndex(&slice));
@@ -277,11 +293,19 @@ struct App {
             }
             context->CopySubresourceRegion(paused_texture.Get(),0,0,0,0,texture.Get(),slice,nullptr);last_frame.width=width;last_frame.height=height;
         }
-        CHECK(swap->Present(0, 0)); ++presented; return S_OK;
+        // Audio shares this thread: a display queue must never block its deadline.
+        const double began=now_seconds();HRESULT present=swap->Present(0,DXGI_PRESENT_DO_NOT_WAIT);
+        const double elapsed=now_seconds()-began;present_seconds+=elapsed;present_max_seconds=std::max(present_max_seconds,elapsed);
+        // A failed nonblocking Present did not enqueue a frame or consume our slot.
+        // Keep the reservation and retry on the next normal pump; DXGI need not signal it again.
+        if(present==DXGI_ERROR_WAS_STILL_DRAWING){++present_busy;return S_FALSE;}
+        video_slot_reserved=false;
+        CHECK(present); ++presented; return S_OK;
     }
     HRESULT tick_audio() {
         if (!audio_running) return S_OK;
         UINT32 padding; CHECK(audio->GetCurrentPadding(&padding));
+        if(padding>audio_capacity)return E_UNEXPECTED;
         UINT32 count = audio_capacity-padding; if (!count) return S_OK;
         BYTE* raw; CHECK(render->GetBuffer(count, &raw)); auto out = (int16_t*)raw;
         memset(raw, 0, count*4);
@@ -292,8 +316,9 @@ struct App {
             while (!sound.empty()) {
                 auto& a = sound.front(); double delta = a.pts + double(a.pos/2)/44100 - t;
                 if (delta < -0.010) {
-                    size_t skip = std::min(a.pcm.size()-a.pos, size_t((-delta-0.002)*44100)*2);
-                    a.pos += skip;
+                    // Clamp before conversion; an untrusted timestamp must not overflow size_t.
+                    const double skip=std::min(double((a.pcm.size()-a.pos)/2),(-delta-0.002)*44100);
+                    a.pos += size_t(skip)*2;
                 }
                 if (a.pos >= a.pcm.size()) { sound.pop_front(); continue; }
                 if (delta > 0.003) break;
@@ -306,8 +331,17 @@ struct App {
     HRESULT tick() {
         CHECK(tick_audio());CHECK(chrome.layout(shell)); double n = now_seconds();bool redraw_needed=shell.redraw.exchange(false);
         while (video.size() > 1 && video[1].pts <= n) { video.pop_front(); ++late_frames; }
-        if (!video.empty() && video.front().pts <= n) { auto frame = video.front(); video.pop_front(); CHECK(draw(frame.sample.Get(),frame.width,frame.height)); }
-        else if(redraw_needed && last_frame.sample){CHECK(draw(last_frame.sample.Get(),last_frame.width,last_frame.height));}
+        const bool due=!video.empty()&&video.front().pts<=n;
+        if(!due&&!(redraw_needed&&last_frame.sample))return S_OK;
+        // Poll only when drawing is useful. A permanently ready display must not spin the idle pump.
+        if(!video_slot_reserved){
+            DWORD ready=WaitForSingleObject(video_event.h,0);
+            if(ready==WAIT_TIMEOUT){++video_waits;if(redraw_needed)shell.redraw=true;return S_OK;}
+            if(ready!=WAIT_OBJECT_0)return HRESULT_FROM_WIN32(GetLastError());
+            video_slot_reserved=true;
+        }
+        if(due){auto& frame=video.front();HRESULT hr=draw(frame.sample.Get(),frame.width,frame.height);CHECK(hr);if(hr==S_OK)video.pop_front();}
+        else {HRESULT hr=draw(last_frame.sample.Get(),last_frame.width,last_frame.height);CHECK(hr);if(hr==S_FALSE)shell.redraw=true;}
         return S_OK;
     }
 };
@@ -326,25 +360,48 @@ struct Discovery {
     ~Discovery() { if (instance) DnsServiceFreeInstance(instance); }
 };
 
-struct Worker { Handle process, job, input, output, read_event;
+struct Worker { Handle process, job, input, output, read_event, write_event;
     ~Worker(){if(job.h)TerminateJobObject(job.h,0);if(process.h)WaitForSingleObject(process.h,3000);}
 };
-static bool read_worker(Worker* w, void* dest, DWORD size, ULONGLONG deadline) {
-    DWORD total = 0; auto p = static_cast<uint8_t*>(dest);
+static bool transfer_worker(Worker* w, void* data, DWORD size, ULONGLONG deadline,bool write) {
+    DWORD total = 0; auto p = static_cast<uint8_t*>(data);
+    HANDLE pipe=write?w->input.h:w->output.h;
     while (total < size) {
-        OVERLAPPED operation{}; operation.hEvent=w->read_event.h; ResetEvent(operation.hEvent);
+        if(GetTickCount64()>=deadline)return false;
+        OVERLAPPED operation{}; operation.hEvent=write?w->write_event.h:w->read_event.h; ResetEvent(operation.hEvent);
         DWORD n=0;
-        if(!ReadFile(w->output.h,p+total,size-total,&n,&operation)) {
+        BOOL complete=write?WriteFile(pipe,p+total,size-total,&n,&operation):ReadFile(pipe,p+total,size-total,&n,&operation);
+        if(!complete) {
             if(GetLastError()!=ERROR_IO_PENDING)return false;
             HANDLE wait_handles[]={operation.hEvent,w->process.h};
             ULONGLONG now=GetTickCount64();DWORD timeout=now<deadline?DWORD(deadline-now):0;
-            if(WaitForMultipleObjects(2,wait_handles,FALSE,timeout)!=WAIT_OBJECT_0){
-                CancelIoEx(w->output.h,&operation);GetOverlappedResult(w->output.h,&operation,&n,TRUE);return false;
+            if(WaitForMultipleObjects(w->process.h?2:1,wait_handles,FALSE,timeout)!=WAIT_OBJECT_0){
+                // The stack OVERLAPPED and caller buffer stay alive until cancellation completes.
+                CancelIoEx(pipe,&operation);GetOverlappedResult(pipe,&operation,&n,TRUE);return false;
             }
-            if(!GetOverlappedResult(w->output.h,&operation,&n,FALSE))return false;
+            if(!GetOverlappedResult(pipe,&operation,&n,FALSE))return false;
         }
         if(!n)return false;
         total += n;
+    }
+    return true;
+}
+static bool read_worker(Worker* w,void* data,DWORD size,ULONGLONG deadline){return transfer_worker(w,data,size,deadline,false);}
+static bool write_worker(Worker* w,const void* data,DWORD size,ULONGLONG deadline){return transfer_worker(w,const_cast<void*>(data),size,deadline,true);}
+static bool worker_pipe(const std::wstring& name,bool parent_writes,Handle& parent,Handle& child,Handle& event,DWORD capacity=65536) {
+    SECURITY_ATTRIBUTES inherit{sizeof(inherit),nullptr,TRUE};
+    parent.h=CreateNamedPipeW(name.c_str(),(parent_writes?PIPE_ACCESS_OUTBOUND:PIPE_ACCESS_INBOUND)|FILE_FLAG_OVERLAPPED|FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_BYTE|PIPE_READMODE_BYTE|PIPE_WAIT|PIPE_REJECT_REMOTE_CLIENTS,1,capacity,capacity,0,nullptr);
+    if(parent.h==INVALID_HANDLE_VALUE)return false;
+    child.h=CreateFileW(name.c_str(),parent_writes?GENERIC_READ:GENERIC_WRITE,0,&inherit,OPEN_EXISTING,0,nullptr);
+    if(child.h==INVALID_HANDLE_VALUE)return false;
+    event.h=CreateEventW(nullptr,TRUE,FALSE,nullptr);if(!event.h)return false;
+    // The local child end is already connected, so this cannot leave pending stack I/O.
+    OVERLAPPED connection{};connection.hEvent=event.h;
+    if(!ConnectNamedPipe(parent.h,&connection)){
+        DWORD error=GetLastError();if(error==ERROR_PIPE_CONNECTED)return true;
+        if(error==ERROR_IO_PENDING){CancelIoEx(parent.h,&connection);DWORD ignored=0;GetOverlappedResult(parent.h,&connection,&ignored,TRUE);}
+        return false;
     }
     return true;
 }
@@ -410,13 +467,14 @@ int am_video(void* p, const uint8_t* data, unsigned len, double pts, unsigned co
 int am_video_ready(void* p) {auto a=static_cast<App*>(p);return a->video.size()<(a->codec==265?3:6);}
 int am_audio(void* p, const int16_t* pcm, unsigned samples, double pts) {
     auto a = static_cast<App*>(p);
-    if (!pcm || samples > 4096 || samples % 2 || !std::isfinite(pts)) {error_hr("invalid PCM sample",E_INVALIDARG);return 0;}
+    if (!pcm || !samples || samples > 4096 || samples % 2 || !valid_media_time(pts)) {error_hr("invalid PCM sample",E_INVALIDARG);return 0;}
     if (a->sound.size() >= 32) {
         UINT32 padding=0;a->audio->GetCurrentPadding(&padding);char detail[300];
         sprintf_s(detail,"audio queue full padding=%u capacity=%u latency=%.4f now=%.4f first_pts=%.4f played=%llu",padding,a->audio_capacity,a->audio_latency,now_seconds(),a->sound.front().pts,(unsigned long long)a->audio_frames);
         error_hr(detail,E_FAIL);return 0;
     }
     a->sound.push_back({std::vector<int16_t>(pcm, pcm+samples), 0, pts});
+    a->audio_high_water=std::max(a->audio_high_water,a->sound.size());
     if (!a->audio_running) { HRESULT hr=a->audio->Start(); if (FAILED(hr)) {error_hr("WASAPI start",hr);return 0;} a->audio_running=true; }
     return 1;
 }
@@ -435,7 +493,14 @@ const char* am_stats(void* p) {
         + " decoder_surfaces=" + std::to_string(a->decoder_surfaces) + " presented=" + std::to_string(a->presented) + " late=" + std::to_string(a->late_frames)
         + " audio_samples=" + std::to_string(a->audio_frames) + " resolution=" + std::to_string(a->width) + "x" + std::to_string(a->height)
         + " decoder_instances="+std::to_string(a->decoder_instances) + " codec=" + std::to_string(a->codec) + " hevc_available=" + std::to_string(a->hevc_available)
-        + " local_volume=" + std::to_string(int(a->shell.volume*100)) + " muted=" + std::to_string(a->shell.muted.load());
+        + " local_volume=" + std::to_string(int(a->shell.volume*100)) + " muted=" + std::to_string(a->shell.muted.load())
+        + " audio_capacity="+std::to_string(a->audio_capacity)+" audio_latency_ms="+std::to_string(a->audio_latency*1000)
+        + " video_queue_max="+std::to_string(a->video_high_water)+" audio_queue_max="+std::to_string(a->audio_high_water)
+        + " video_waits="+std::to_string(a->video_waits)+" present_busy="+std::to_string(a->present_busy)
+        + " submit_avg_ms="+std::to_string(a->submit_calls?a->submit_seconds*1000/a->submit_calls:0)
+        + " submit_max_ms="+std::to_string(a->submit_max_seconds*1000)
+        + " present_avg_ms="+std::to_string(a->presented+a->present_busy?a->present_seconds*1000/(a->presented+a->present_busy):0)
+        + " present_max_ms="+std::to_string(a->present_max_seconds*1000);
     return text.c_str();
 }
 void* am_discover(const char* name, const char* host, unsigned short port, const uint8_t* address, uint32_t interface_index, const char* const* keys, const char* const* values, unsigned count) {
@@ -511,19 +576,11 @@ void* am_worker_start() {
     if (rc == ERROR_SUCCESS) rc = SetNamedSecurityInfoW(path, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, newacl, nullptr);
     if (newacl) LocalFree(newacl); if (sd) LocalFree(sd);
     if (rc != ERROR_SUCCESS) { error_hr("worker executable ACL grant", HRESULT_FROM_WIN32(rc)); return nullptr; }
-    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE}; Handle child_in, child_out;
-    if (!CreatePipe(&child_in.h, &w->input.h, &sa, 65536)) return nullptr;
+    Handle child_in, child_out;
     GUID pipe_id{};if(FAILED(CoCreateGuid(&pipe_id)))return nullptr;wchar_t guid[40];StringFromGUID2(pipe_id,guid,40);
     std::wstring pipe_name=L"\\\\.\\pipe\\AirMirrorLite-"+std::to_wstring(GetCurrentProcessId())+L"-"+guid;
-    w->output.h=CreateNamedPipeW(pipe_name.c_str(),PIPE_ACCESS_INBOUND|FILE_FLAG_OVERLAPPED|FILE_FLAG_FIRST_PIPE_INSTANCE,
-        PIPE_TYPE_BYTE|PIPE_READMODE_BYTE|PIPE_WAIT|PIPE_REJECT_REMOTE_CLIENTS,1,65536,65536,0,nullptr);
-    if(w->output.h==INVALID_HANDLE_VALUE)return nullptr;
-    child_out.h=CreateFileW(pipe_name.c_str(),GENERIC_WRITE,0,&sa,OPEN_EXISTING,0,nullptr);
-    if(child_out.h==INVALID_HANDLE_VALUE)return nullptr;
-    w->read_event.h=CreateEventW(nullptr,TRUE,FALSE,nullptr);if(!w->read_event.h)return nullptr;
-    OVERLAPPED connection{};connection.hEvent=w->read_event.h;
-    if(!ConnectNamedPipe(w->output.h,&connection) && GetLastError()!=ERROR_PIPE_CONNECTED)return nullptr;
-    SetHandleInformation(w->input.h, HANDLE_FLAG_INHERIT, 0); SetHandleInformation(w->output.h, HANDLE_FLAG_INHERIT, 0);
+    if(!worker_pipe(pipe_name+L"-request",true,w->input,child_in,w->write_event)
+        ||!worker_pipe(pipe_name+L"-reply",false,w->output,child_out,w->read_event))return nullptr;
     w->job.h = CreateJobObjectW(nullptr, nullptr); if (!w->job.h) return nullptr;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_PROCESS_MEMORY;
@@ -558,10 +615,9 @@ void* am_worker_start() {
 void am_worker_close(void* p) { delete static_cast<Worker*>(p); }
 int am_worker_call(void* p, unsigned op, const uint8_t* input, unsigned len, uint8_t* output, unsigned cap) {
     auto w = static_cast<Worker*>(p); if (len > 8192 || cap > 16384) return -1;
-    uint32_t header[2] = {op, len}; DWORD n;
-    if (!WriteFile(w->input.h, header, sizeof(header), &n, nullptr) || n != sizeof(header)) return -1;
-    if (len && (!WriteFile(w->input.h, input, len, &n, nullptr) || n != len)) return -1;
-    uint32_t result=0; ULONGLONG deadline = GetTickCount64()+2000;
+    uint32_t header[2] = {op, len};ULONGLONG deadline = GetTickCount64()+2000;
+    if(!write_worker(w,header,sizeof(header),deadline)||!write_worker(w,input,len,deadline)){TerminateProcess(w->process.h,1);return -1;}
+    uint32_t result=0;
     if (!read_worker(w, &result, 4, deadline) || result > cap) { TerminateProcess(w->process.h, 1); return -1; }
     if (!read_worker(w, output, result, deadline)) { TerminateProcess(w->process.h, 1); return -1; }
     return int(result);
