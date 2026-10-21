@@ -36,16 +36,16 @@ static HRESULT probe_video(App* app, UINT width, UINT height) {
     RECT original;GetWindowRect(app->window,&original);
     for(auto size: {std::pair<int,int>{800,500},{600,900},{1200,700}}){
         if(!SetWindowPos(app->window,nullptr,original.left,original.top,size.first,size.second,SWP_NOZORDER|SWP_NOACTIVATE))return HRESULT_FROM_WIN32(GetLastError());
-        app->redraw=true;CHECK(app->tick());
+        app->shell.redraw=true;CHECK(app->tick());
     }
     DWORD_PTR result=0;
     if(!SendMessageTimeoutW(app->window,WM_KEYDOWN,VK_F11,0,SMTO_ABORTIFHUNG,2000,&result))return HRESULT_FROM_WIN32(GetLastError());
     if(GetWindowLongPtrW(app->window,GWL_STYLE)&WS_CAPTION)return E_FAIL;
-    app->redraw=true;CHECK(app->tick());
+    app->shell.redraw=true;CHECK(app->tick());
     if(!SendMessageTimeoutW(app->window,WM_KEYDOWN,VK_F11,0,SMTO_ABORTIFHUNG,2000,&result))return HRESULT_FROM_WIN32(GetLastError());
-    if(!(GetWindowLongPtrW(app->window,GWL_STYLE)&WS_CAPTION))return E_FAIL;
+    if((GetWindowLongPtrW(app->window,GWL_STYLE)&WS_CAPTION)||app->shell.fullscreen)return E_FAIL;
     if(!SetWindowPos(app->window,nullptr,original.left,original.top,original.right-original.left,original.bottom-original.top,SWP_NOZORDER|SWP_NOACTIVATE))return HRESULT_FROM_WIN32(GetLastError());
-    app->redraw=true;CHECK(app->tick());return S_OK;
+    app->shell.redraw=true;CHECK(app->tick());return S_OK;
 }
 extern "C" int am_video_probe(void* p) {
     auto app=static_cast<App*>(p);uint64_t before=app->decoder_surfaces;
@@ -53,4 +53,30 @@ extern "C" int am_video_probe(void* p) {
     if(SUCCEEDED(hr))hr=probe_video(app,1080,1920);
     if(FAILED(hr)){error_hr("synthetic GPU probe",hr);return 0;}
     if(app->decoder_surfaces-before<60){error_hr("insufficient hardware decoder surfaces",E_FAIL);return 0;}return 1;
+}
+extern "C" int am_ui_probe(void* p,const char* directory) {
+    auto app=static_cast<App*>(p);auto path=wide(directory);HRESULT hr=app->shell.self_test(path.c_str());
+    if(FAILED(hr)){error_hr("native UI regression (line encoded in HRESULT)",hr);return 0;}
+    app->shell.reset_video();
+    app->shell.set_status(L"Connected — waiting for picture and sound");
+    if(app->shell.status!=1){error_hr("negotiated session waiting state",E_FAIL);return 0;}
+    app->shell.set_status(L"Ready");
+    auto file=path+L"/idle.png";hr=app->chrome.layout(app->shell,path.empty()?nullptr:file.c_str());
+    if(FAILED(hr)){error_hr("idle artwork diagnostic",hr);return 0;}
+    if(!path.empty()){
+        app->shell.set_status(L"Connecting");file=path+L"/connecting.png";hr=app->chrome.layout(app->shell,file.c_str());
+        if(FAILED(hr))return 0;
+        app->shell.set_status(L"Ready");
+        SendMessageW(app->window,PhoneShell::WM_FORMAT,1920,1080);
+        SendMessageW(app->window,WM_KEYDOWN,'0',0);
+        file=path+L"/landscape-idle.png";hr=app->chrome.layout(app->shell,file.c_str());if(FAILED(hr))return 0;
+        SetWindowPos(app->window,nullptr,0,0,328,188,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+        file=path+L"/compact-idle.png";hr=app->chrome.layout(app->shell,file.c_str());if(FAILED(hr))return 0;
+        SendMessageW(app->window,PhoneShell::WM_FORMAT,498,1080);SendMessageW(app->window,WM_KEYDOWN,'0',0);
+        hr=app->chrome.layout(app->shell);if(FAILED(hr))return 0;
+    }
+    const auto redraws=app->chrome.redraws;
+    for(int i=0;i<20;++i){hr=app->tick();if(FAILED(hr)){error_hr("idle tick regression",hr);return 0;}}
+    if(app->chrome.redraws!=redraws){error_hr("idle chrome repainted without invalidation",E_FAIL);return 0;}
+    return 1;
 }

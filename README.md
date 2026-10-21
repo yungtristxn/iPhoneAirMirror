@@ -12,7 +12,13 @@ Control Center → Screen Mirroring, and play a local non-DRM video with sound.
 Both devices must be on the same trusted private LAN. Normal operation requires
 no administrator rights, Bonjour service, account or cloud connection.
 
-- F11: fullscreen; Escape: leave fullscreen or disconnect; D: disconnect.
+- Frameless, rounded phone view that follows the mirrored video’s aspect ratio.
+  Drag the picture to move; drag the curved bottom-right grip to resize.
+- Side controls: speaker, default size, fullscreen and close. Hover the speaker
+  for a volume slider; click to mute/unmute. Volume changes only PC playback.
+- Keyboard: `0` default size; `M` mute; Up/Down volume; `F11` fullscreen;
+  `D` disconnect; Escape leaves fullscreen or disconnects. Double-click the
+  picture to toggle fullscreen. Tab then Enter/Space operates the side controls.
 - Close the receiver window to stop discovery, sockets and codec workers.
 - Identity is random and protected by Windows DPAPI in `local/identity.dpapi`
   next to the executable. `local/receiver.log` is bounded to 1 MiB and contains
@@ -24,7 +30,12 @@ no administrator rights, Bonjour service, account or cloud connection.
   and **LocalSubnet**. Do not allow public-network access or disable protection.
 - `--self-test` generates synthetic landscape/portrait bars and a brief quiet
   tone, checks hardware decoder surfaces, FairPlay known-answer data, AAC-ELD,
-  AppContainer file denial and network isolation. It does not access a phone.
+  AppContainer file denial and network isolation. It also checks the frameless
+  geometry, resize/rotation, hover slider, mute restoration and close event.
+  It does not access a phone.
+- `--self-test --ui-test-dir local/ui-renders` additionally renders idle/control
+  artwork for inspection. It cannot export a mirrored phone frame.
+  `--ui-preview` shows synthetic video without discovery or network listeners.
 
 Runtime requirements: Windows 10/11 x64 with the Microsoft Visual C++ x64 runtime
 (`MSVCP140.dll`, `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`), Media Foundation, a D3D11 H.264
@@ -57,7 +68,7 @@ Preferred stack: Rust + Win32, native Windows DNS-SD, Media Foundation H.264 + D
 The Rust tests cover request/body budgets, plist graphs, pairing proof/replay,
 FairPlay modes, NAL/SPS lengths and dimensions, RTP framing and shared-clock math.
 The loopback check covers the real control listener and shutdown. The media probe
-uses generated test media. See [STATE](docs/STATE.md) for the current evidence and
+uses generated test media; UI diagnostics exercise a hidden native test window. See [STATE](docs/STATE.md) for the current evidence and
 the still-open physical acceptance checks.
 
 The kickoff prompt uses focused context, explicit boundaries and observable acceptance criteria, informed by [OpenAI's workflow guidance](https://developers.openai.com/cookbook/examples/codex/iterating-development-workflows-with-codex#build-phase-files). It does not add routine approval gates between implementation steps.

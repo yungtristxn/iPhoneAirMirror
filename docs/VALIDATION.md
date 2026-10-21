@@ -70,3 +70,48 @@ or long-term drift claim should be made from it.
 
 Current evidence and unresolved checks are in STATE.md. The final package is a
 local development build; third-party distribution licensing is not resolved.
+
+## Native UI regression (2026-10-21)
+
+`--self-test` also exercises the hidden native shell: no caption/client inset,
+portrait/landscape aspect locking, bottom-right hit testing, default-size reset,
+rotation during fullscreen, hover slider, mute/restore, volume limits, owned
+palette lifetime flags, stable speaker position when the hover slider opens at
+the top screen edge in a compact landscape window, and close/disconnect events. The existing GPU probe then
+checks landscape/portrait decode, paused redraw, resizing and fullscreen against
+the DirectComposition path. The idle renderer checks that unmodified ticks do
+not repaint the chrome.
+
+`--self-test --ui-test-dir local/qol-test/renders` saves the native idle/connecting
+artwork and control palette as PNG diagnostics. This is internal rendering of
+app artwork, not desktop automation, screen capture or phone recording. The
+export is refused when a video surface is active. Inspect the diagnostics for
+clipping, typography and alpha corners, including a compact landscape window.
+They do not establish final desktop composition, mouse feel or physical phone
+acceptance. The user requested no Computer Use for this validation.
+
+Production video remains on D3D11 surfaces. Direct2D/DirectWrite paint idle chrome
+only when invalidated; GDI+ paints only the small control palette. Both are Windows
+components. There is no web runtime, UI framework package or new third-party source.
+Local gain is applied at the final WASAPI write so queued PCM responds to mute and
+volume changes; sender gain and media timestamps remain independent.
+
+## Historical physical performance before the phone-shell UI
+
+The five-minute sample (shortened at the user's request) used 498x1080 video on
+RTX 4070 SUPER driver 32.0.16.1692 / Ryzen 7 7800X3D: 59.30 decoded and 57.76
+presented fps, 13,230,000 audio samples; GPU Video Decode counters 1.89–1.93%.
+Host private memory was 89.81→89.91 MiB, working set 76.51–79.45 MiB, handles
+711→708. Codec private memory was 2.33→2.40 MiB, handles 153→153. User reported
+synchronized sound and no freezes. This preceded the socket-spin fix.
+
+The subsequent real-phone CPU sample on 2026-10-21, 12:11:55–12:12:25 UTC,
+covered 29.46 seconds with the blocking-read fix: host 1.871% plus codec 0.423%
+of one logical core, approximately 30 video frames/s, no disconnect or stderr.
+Host working set 76.15–76.86 MiB, private memory 82.87→83.54 MiB, handles 713→714.
+Codec working set 11.32–11.38 MiB, private memory 2.39→2.31 MiB, handles 153→153.
+Package SHA-256 was `345A6C9E448C732320B02911543A1BA41C44A2F568A4C68594469365EAB5746F`.
+A separate live close took 177 ms with clean shutdown log and no remaining
+receiver/worker, TCP listener, UDP endpoint or mDNS service response; the reopened
+process handle did not provide an exit code. None of these measurements is a
+physical acceptance result for the later frameless UI build.

@@ -11,6 +11,7 @@ unsafe extern "C" {
     fn am_now() -> f64;
     fn am_open(hidden: i32) -> *mut c_void;
     fn am_video_probe(app: *mut c_void) -> i32;
+    fn am_ui_probe(app: *mut c_void, directory: *const c_char) -> i32;
     fn am_close(app: *mut c_void);
     fn am_wake_handle(app: *mut c_void) -> *mut c_void;
     fn am_signal(handle: *mut c_void);
@@ -96,6 +97,13 @@ impl Drop for Wake {
     }
 }
 impl App {
+    pub fn ui_probe(&self, directory: &str) -> Result<()> {
+        let path = CString::new(directory)?;
+        if unsafe { am_ui_probe(self.0.as_ptr(), path.as_ptr()) } == 0 {
+            return Err(error());
+        }
+        Ok(())
+    }
     pub fn video_ready(&self) -> bool {
         unsafe { am_video_ready(self.0.as_ptr()) != 0 }
     }

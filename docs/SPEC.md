@@ -7,7 +7,12 @@ Confirmed 2026-10-21: the user wants their own minimal, efficient Windows AirPla
 - H.264 SDR screen video with correct aspect ratio and portrait/landscape changes.
 - Synchronized phone audio through Windows speakers using WASAPI.
 - One active sender; a second sender must not silently replace the current one.
-- One resizable window, fullscreen, disconnect and minimal connection status.
+- One frameless, rounded phone view, fitted to the actual mirrored video aspect.
+  Drag the picture to move; bottom-right grip resizes proportionally. Default-size
+  action restores a monitor-aware fit; rotation/fullscreen retain sensible sizing.
+- Compact owned control rail next to the phone: hover volume slider, click mute,
+  default size, fullscreen and close. PC-local playback volume, keyboard access,
+  disconnect and a minimal ready/connecting state; no title bar or fake notch.
 - Ordinary-user runtime; close fully exits, deregisters discovery and closes sockets.
 - No timer, watermark, subscription, account or cloud relay.
 

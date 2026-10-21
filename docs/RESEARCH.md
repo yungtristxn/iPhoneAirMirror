@@ -109,3 +109,12 @@ Reducing features and dependencies does not itself fix the AirPlay parser or pai
 6. Measure actual CPU, GPU decode activity, private working set, frame pacing and glass-to-glass latency separately. Local decoder timing is not end-to-end latency.
 
 No receiver implementation, installation, service creation or firewall modification was performed for this research. A separate project bootstrap has since been prepared.
+
+## Native phone shell (2026-10-21)
+
+The UI uses DirectComposition with a GPU video child and a separately invalidated
+Direct2D/DirectWrite frame. The owned GDI+ layered palette draws controls only.
+Microsoft API references:
+- [Composition swap chain](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/nf-dxgi1_2-idxgifactory2-createswapchainforcomposition)
+- [HWND composition target](https://learn.microsoft.com/en-us/windows/win32/api/dcomp/nf-dcomp-idcompositiondevice-createtargetforhwnd)
+- [Rounded composition clip](https://learn.microsoft.com/en-us/windows/win32/api/dcomp/nn-dcomp-idcompositionrectangleclip)

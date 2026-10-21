@@ -54,11 +54,11 @@ struct Handle {
 };
 struct VideoFrame { ComPtr<IMFSample> sample; double pts; UINT width; UINT height; };
 struct AudioFrame { std::vector<int16_t> pcm; size_t pos = 0; double pts = 0; };
+#include "phone_compositor.h"
 struct App {
     HWND window = nullptr; Handle wake, audio_event;
-    std::atomic<bool> quit{false}, disconnect{false}, redraw{false};bool fullscreen=false;
-    std::thread ui_thread;
-    WINDOWPLACEMENT placement{sizeof(WINDOWPLACEMENT)};
+    PhoneShell shell;
+    PhoneCompositor chrome;
     ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
     ComPtr<IDXGISwapChain1> swap; ComPtr<ID3D11VideoDevice> vdevice; ComPtr<ID3D11VideoContext> vcontext;
     ComPtr<IMFDXGIDeviceManager> manager; ComPtr<IMFTransform> decoder;
@@ -75,43 +75,8 @@ struct App {
         if (audio) audio->Stop();
         sound.clear(); video.clear(); last_frame.sample.Reset(); decoder.Reset(); render.Reset(); audio.Reset();
         processor.Reset(); venum.Reset(); manager.Reset(); swap.Reset(); vcontext.Reset(); vdevice.Reset(); context.Reset(); device.Reset();
-        if(ui_thread.joinable()){if(window)PostMessageW(window,WM_APP+1,0,0);ui_thread.join();}
+        chrome=PhoneCompositor{};shell.shutdown();
         if (mf) MFShutdown(); if (com) CoUninitialize();
-    }
-    void toggle_fullscreen() {
-        if (!fullscreen) {
-            GetWindowPlacement(window, &placement);
-            MONITORINFO mi{sizeof(mi)}; GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &mi);
-            SetWindowLongPtrW(window, GWL_STYLE, WS_POPUP | WS_VISIBLE);
-            SetWindowPos(window, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
-                mi.rcMonitor.right-mi.rcMonitor.left, mi.rcMonitor.bottom-mi.rcMonitor.top, SWP_FRAMECHANGED);
-        } else {
-            SetWindowLongPtrW(window, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
-            SetWindowPlacement(window, &placement); SetWindowPos(window, nullptr, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
-        }
-        fullscreen = !fullscreen;
-    }
-    static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
-        auto a = reinterpret_cast<App*>(GetWindowLongPtrW(h, GWLP_USERDATA));
-        if (msg == WM_NCCREATE) {
-            a = static_cast<App*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
-            SetWindowLongPtrW(h, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(a));
-        }
-        if (a) {
-            if(msg==WM_APP+1){DestroyWindow(h);PostQuitMessage(0);return 0;}
-            if(msg==WM_SIZE){a->redraw=true;SetEvent(a->wake.h);}
-            if(msg==WM_DPICHANGED){auto r=reinterpret_cast<RECT*>(lp);SetWindowPos(h,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE);return 0;}
-            if (msg == WM_CLOSE) { a->quit = true; SetEvent(a->wake.h); return 0; }
-            if (msg == WM_KEYDOWN && wp == VK_F11 && !(lp & (1LL<<30))) { a->toggle_fullscreen(); return 0; }
-            if (msg == WM_KEYDOWN && wp == VK_ESCAPE) {
-                if (a->fullscreen) a->toggle_fullscreen(); else a->disconnect = true; return 0;
-            }
-            if (msg == WM_KEYDOWN && wp == 'D') { a->disconnect = true; return 0; }
-            if (msg == WM_ERASEBKGND) return 1;
-            if (msg == WM_PAINT) { PAINTSTRUCT ps; BeginPaint(h, &ps); FillRect(ps.hdc, &ps.rcPaint, (HBRUSH)GetStockObject(BLACK_BRUSH)); EndPaint(h, &ps); a->redraw=true;SetEvent(a->wake.h);return 0; }
-        }
-        return DefWindowProcW(h, msg, wp, lp);
     }
     HRESULT init(bool hidden) {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -120,17 +85,7 @@ struct App {
         wake.h = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         audio_event.h = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!wake.h || !audio_event.h) return HRESULT_FROM_WIN32(GetLastError());
-        std::promise<HWND> created;auto ready=created.get_future();
-        ui_thread=std::thread([this,created=std::move(created)]() mutable {
-            WNDCLASSW wc{};wc.lpfnWndProc=wndproc;wc.hInstance=GetModuleHandleW(nullptr);
-            wc.lpszClassName=L"AirMirrorLiteWindow";wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);
-            wc.hbrBackground=(HBRUSH)GetStockObject(BLACK_BRUSH);RegisterClassW(&wc);
-            HWND hwnd=CreateWindowExW(0,wc.lpszClassName,L"AirMirrorLite — preparing receiver",WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,1000,700,nullptr,nullptr,wc.hInstance,this);
-            created.set_value(hwnd);if(!hwnd)return;
-            MSG msg;while(GetMessageW(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}
-        });
-        window=ready.get();
-        if (!window) return HRESULT_FROM_WIN32(GetLastError());
+        CHECK(shell.create(wake.h,hidden));window=shell.window;
         D3D_FEATURE_LEVEL level;
         CHECK(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
             D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
@@ -143,8 +98,10 @@ struct App {
         ComPtr<IDXGIFactory2> factory; CHECK(ad->GetParent(IID_PPV_ARGS(&factory)));
         DXGI_SWAP_CHAIN_DESC1 sc{}; sc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         sc.SampleDesc.Count = 1; sc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        sc.BufferCount = 2; sc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; sc.Scaling = DXGI_SCALING_STRETCH;
-        CHECK(factory->CreateSwapChainForHwnd(device.Get(), window, &sc, nullptr, nullptr, &swap));
+        sc.Width=sc.Height=1;sc.AlphaMode=DXGI_ALPHA_MODE_PREMULTIPLIED;
+        sc.BufferCount = 2; sc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; sc.Scaling = DXGI_SCALING_STRETCH;
+        CHECK(factory->CreateSwapChainForComposition(device.Get(), &sc, nullptr, &swap));
+        CHECK(chrome.init(device.Get(),factory.Get(),window,swap.Get()));CHECK(chrome.layout(shell));
         factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);
         UINT token; CHECK(MFCreateDXGIDeviceManager(&token, &manager)); CHECK(manager->ResetDevice(device.Get(), token));
         CHECK(init_decoder());
@@ -159,7 +116,7 @@ struct App {
         CHECK(audio->SetEventHandle(audio_event.h)); CHECK(audio->GetBufferSize(&audio_capacity));
         REFERENCE_TIME latency; CHECK(audio->GetStreamLatency(&latency)); audio_latency = latency / 1e7;
         CHECK(audio->GetService(IID_PPV_ARGS(&render)));
-        if (!hidden) ShowWindow(window, SW_SHOW);
+        if (!hidden) shell.show();
         return S_OK;
     }
     HRESULT init_decoder() {
@@ -217,6 +174,7 @@ struct App {
             if (texture_desc.BindFlags & D3D11_BIND_DECODER) ++decoder_surfaces;
             ++gpu_frames; ++decoded;
             if (video.size() == 8) { video.pop_front(); ++late_frames; }
+            shell.video_size(width,height);
             video.push_back({s, pts / 1e7, width, height});
         }
         return E_UNEXPECTED;
@@ -232,10 +190,10 @@ struct App {
         CHECK(hr); return output();
     }
     HRESULT draw(IMFSample* frame, UINT width, UINT height) {
-        RECT client; GetClientRect(window, &client); UINT vw = client.right, vh = client.bottom;
+        CHECK(chrome.layout(shell));UINT vw=chrome.video_width,vh=chrome.video_height;
         if (!vw || !vh || !width || !height) return S_OK;
         if (vieww != vw || viewh != vh) {
-            context->ClearState(); CHECK(swap->ResizeBuffers(0, vw, vh, DXGI_FORMAT_UNKNOWN, 0)); vieww = vw; viewh = vh;
+            context->ClearState(); CHECK(swap->ResizeBuffers(0, vw, vh, DXGI_FORMAT_UNKNOWN, 0)); vieww = vw; viewh = vh;processor.Reset();venum.Reset();
         }
         ComPtr<IMFMediaBuffer> b; CHECK(frame->GetBufferByIndex(0, &b)); ComPtr<IMFDXGIBuffer> dxgi; CHECK(b.As(&dxgi));
         ComPtr<ID3D11Texture2D> texture; CHECK(dxgi->GetResource(IID_PPV_ARGS(&texture))); UINT slice; CHECK(dxgi->GetSubresourceIndex(&slice));
@@ -255,6 +213,7 @@ struct App {
         RECT src{0, 0, LONG(width), LONG(height)}, dst{(LONG(vw)-dw)/2, (LONG(vh)-dh)/2, (LONG(vw)+dw)/2, (LONG(vh)+dh)/2};
         D3D11_VIDEO_COLOR bg{}; bg.RGBA.A = 1;
         vcontext->VideoProcessorSetOutputBackgroundColor(processor.Get(), FALSE, &bg);
+        vcontext->VideoProcessorSetOutputAlphaFillMode(processor.Get(),D3D11_VIDEO_PROCESSOR_ALPHA_FILL_MODE_OPAQUE,0);
         vcontext->VideoProcessorSetStreamFrameFormat(processor.Get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
         vcontext->VideoProcessorSetStreamSourceRect(processor.Get(), 0, TRUE, &src);
         vcontext->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &dst);
@@ -289,6 +248,7 @@ struct App {
         BYTE* raw; CHECK(render->GetBuffer(count, &raw)); auto out = (int16_t*)raw;
         memset(raw, 0, count*4);
         double target = now_seconds() + double(padding)/44100 + audio_latency;
+        const float local_gain=shell.gain();
         for (UINT32 f = 0; f < count; ++f) {
             double t = target + double(f)/44100;
             while (!sound.empty()) {
@@ -299,14 +259,14 @@ struct App {
                 }
                 if (a.pos >= a.pcm.size()) { sound.pop_front(); continue; }
                 if (delta > 0.003) break;
-                out[2*f] = a.pcm[a.pos++]; out[2*f+1] = a.pcm[a.pos++]; ++audio_frames;
+                out[2*f] = int16_t(a.pcm[a.pos++]*local_gain); out[2*f+1] = int16_t(a.pcm[a.pos++]*local_gain); ++audio_frames;
                 if (a.pos >= a.pcm.size()) sound.pop_front(); break;
             }
         }
         return render->ReleaseBuffer(count, 0);
     }
     HRESULT tick() {
-        CHECK(tick_audio()); double n = now_seconds();bool redraw_needed=redraw.exchange(false);
+        CHECK(tick_audio());CHECK(chrome.layout(shell)); double n = now_seconds();bool redraw_needed=shell.redraw.exchange(false);
         while (video.size() > 1 && video[1].pts <= n) { video.pop_front(); ++late_frames; }
         if (!video.empty() && video.front().pts <= n) { auto frame = video.front(); video.pop_front(); CHECK(draw(frame.sample.Get(),frame.width,frame.height)); }
         else if(redraw_needed && last_frame.sample){CHECK(draw(last_frame.sample.Get(),last_frame.width,last_frame.height));}
@@ -387,13 +347,13 @@ void* am_wake_handle(void* p) {
 }
 void am_signal(void* handle) { SetEvent(handle); }
 void am_signal_close(void* handle) { CloseHandle(handle); }
-void am_title(void* p, const char* title) { auto s = wide(title); SetWindowTextW(static_cast<App*>(p)->window, s.c_str()); }
+void am_title(void* p, const char* title) { auto s = wide(title); static_cast<App*>(p)->shell.set_status(s); }
 int am_pump(void* p, unsigned wait_ms) {
     auto a = static_cast<App*>(p); HANDLE hs[] = {a->wake.h, a->audio_event.h};
     WaitForMultipleObjects(2,hs,FALSE,std::min(wait_ms,1000u));
-    if (a->quit) return 0;
+    if (a->shell.quit) return 0;
     HRESULT hr = a->tick(); if (FAILED(hr)) { error_hr("media presentation", hr); return -1; }
-    if (a->disconnect.exchange(false)) return 2; return 1;
+    if (a->shell.disconnect.exchange(false)) return 2; return 1;
 }
 int am_video(void* p, const uint8_t* data, unsigned len, double pts) {
     HRESULT hr = static_cast<App*>(p)->submit(data, len, pts); if (FAILED(hr)) { error_hr("H.264 decode", hr); return 0; } return 1;
@@ -417,15 +377,15 @@ void am_flush_audio(void* p) {
 int am_reset(void* p) {
     auto a = static_cast<App*>(p); am_flush_audio(p); a->video.clear();
     a->last_frame.sample.Reset();
-    ComPtr<ID3D11Texture2D> target;ComPtr<ID3D11RenderTargetView> view;
-    if(SUCCEEDED(a->swap->GetBuffer(0,IID_PPV_ARGS(&target)))&&SUCCEEDED(a->device->CreateRenderTargetView(target.Get(),nullptr,&view))){float black[4]={0,0,0,1};a->context->ClearRenderTargetView(view.Get(),black);a->swap->Present(1,0);}
+    a->shell.reset_video();
     HRESULT hr = a->init_decoder(); if (FAILED(hr)) { error_hr("reset decoder", hr); return 0; } return 1;
 }
 const char* am_stats(void* p) {
     auto a = static_cast<App*>(p); static thread_local std::string text;
     text = "adapter=" + a->adapter + " decoded=" + std::to_string(a->decoded) + " dxgi_frames=" + std::to_string(a->gpu_frames)
         + " decoder_surfaces=" + std::to_string(a->decoder_surfaces) + " presented=" + std::to_string(a->presented) + " late=" + std::to_string(a->late_frames)
-        + " audio_samples=" + std::to_string(a->audio_frames) + " resolution=" + std::to_string(a->width) + "x" + std::to_string(a->height);
+        + " audio_samples=" + std::to_string(a->audio_frames) + " resolution=" + std::to_string(a->width) + "x" + std::to_string(a->height)
+        + " local_volume=" + std::to_string(int(a->shell.volume*100)) + " muted=" + std::to_string(a->shell.muted.load());
     return text.c_str();
 }
 void* am_discover(const char* name, const char* host, unsigned short port, const uint8_t* address, uint32_t interface_index, const char* const* keys, const char* const* values, unsigned count) {

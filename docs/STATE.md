@@ -2,67 +2,57 @@
 
 Updated: 2026-10-21
 
-## Working implementation
-- Branch `feat/airplay-mvp`; implementation `e82528a`, connection/CPU fixes `c14d37f`.
-  Local commits only; no push or publication. Working tree was clean at this checkpoint.
-- Run `dist/AirMirrorLite/AirMirrorLite.exe`. Current executable SHA-256:
-  `345A6C9E448C732320B02911543A1BA41C44A2F568A4C68594469365EAB5746F`.
-- Real iPhone discovery, legacy pairing/FairPlay, H.264 hardware video and AAC-ELD
-  44.1 kHz stereo audio work. User confirmed picture/sound, pause/resume, then
-  a five-minute run with synchronized sound and no freezes. User explicitly
-  shortened the original 30-minute target; do not claim 30-minute acceptance.
-- Native DNS-SD on the private physical IPv4 LAN, MF/D3D11 display, WASAPI audio,
-  separate UI thread, bounded transport/queues, persistent DPAPI identity.
-  F11 fullscreen, D disconnect, close exits. No software/video-only fallback.
-- AAC/FairPlay run in a zero-capability AppContainer with one-process/256 MiB job
-  limits and bounded private IPC. Four app firewall rules are verified Private /
-  LocalSubnet / edge traversal Block. No services, exclusions or Defender changes.
+## Runnable build
+- Branch `feat/airplay-mvp`; local commits only, no push or publication.
+- Run `dist/AirMirrorLite/AirMirrorLite.exe`. Executable SHA-256:
+  `3750CD0E204BD7C8D79C8AE62C8848F2D94A22EA161CE85BB4921851750C5DB0`.
+- Frameless rounded phone view; native DirectComposition video and a thin rim.
+  Actual video aspect drives the window, including rotation. Drag the picture
+  to move, bottom-right curved grip to resize, reset button / `0` for default size.
+- Side controls: hover speaker for volume slider, click to mute/restore, default
+  size, fullscreen, close. `M` mute, Up/Down volume, F11/double-click fullscreen,
+  Tab/Enter controls, D disconnect. PC-local gain leaves phone volume independent.
+- Native DNS-SD, MF/D3D11 hardware H.264, synchronized WASAPI audio, separate UI
+  thread, bounded transport/queues and DPAPI identity remain in place. AAC/FairPlay
+  retain the zero-capability AppContainer and one-process/256 MiB job.
+  No new third-party source, services, firewall changes or Defender changes.
 
-## Verification
-- 26 Rust tests, `cargo clippy --all-targets --locked --offline -- -D warnings`,
-  release build and real loopback control/single-owner/shutdown checks pass.
-- Native synthetic regression covers landscape/portrait hardware decoding,
-  paused-picture redraw, resize/fullscreen and AAC-ELD through WASAPI. AppContainer
-  host-file read denied; worker UDP probe not delivered. These are separate from
-  physical iPhone evidence.
-- Native ASan: FairPlay known answer + 1,024 fixed-size valid-mode mutations;
-  120 AAC-ELD fixture frames + 1,024 malformed packets; PCM canaries intact.
-  All 263 pinned vendor file hashes verified. See VALIDATION.md / THIRD_PARTY.md.
-- Live five-minute sample: 498x1080 video, 59.30 decoded / 57.76 presented fps,
-  13,230,000 audio samples. RTX 4070 SUPER, driver 32.0.16.1692; Ryzen 7 7800X3D.
-  Per-process Windows Video Decode engine counters measured 1.89–1.93%.
-- Host private memory 89.81→89.91 MiB; working set 76.51–79.45 MiB; handles 711→708.
-  Codec private memory 2.33→2.40 MiB and handles 153→153. No disconnect in the sample.
-- That sample exposed two busy CPU cores from inherited nonblocking Winsock
-  connections. The current package explicitly restores blocking reads with 100 ms
-  cancellation/deadline checks. Regression passes; a real idle control connection
-  measured 0.0% of one core over ten seconds. Post-fix live CPU is verified below.
-- Current package also preserves signed/unsigned encodings of all 64 stream-ID
-  bits, fixing intermittent negotiation rejection. Numeric lengths/ports stay strict.
-- Live close completed in 177 ms with no receiver/worker, TCP listener, UDP endpoint
-  or mDNS service response remaining; clean shutdown log and empty stderr. Exit code
-  was unavailable from the reopened process handle. The receiver was restarted.
+## Current verification
+- 26 Rust tests; clippy with `-D warnings`; offline release build: pass.
+- Hidden native UI tests: captionless client geometry, portrait/landscape ratio,
+  bottom-right resize, default reset, rotation during fullscreen, hover slider,
+  volume clamps, mute restoration, palette ownership, close/disconnect events.
+- Native GPU/audio probe: 71 hardware decoder surfaces, over 60 presentations and
+  57,600 AAC-ELD PCM frames through WASAPI; landscape/portrait, paused redraw,
+  resize/fullscreen and isolated worker checks pass on RTX 4070 SUPER.
+- Real loopback control/single-owner/invalid-input checks and timed shutdown pass.
+- Native-rendered idle, connecting, portrait, landscape, compact and control PNGs
+  inspected under ignored `local/qol-test/renders`. Final validation used internal
+  tests/artwork diagnostics, with no further Computer Use after the user's request.
+  These are not screenshots of the final desktop composition or a physical phone.
+- Hidden idle sample before the final palette-position adjustment, 10.01 seconds: 0.156% of one logical core, private memory
+  60.32→60.35 MiB, handles 784→786; clean timed exit, empty stderr. Not playback data.
+- Commands: `scripts/Build.ps1 -Test`; `cargo clippy --all-targets --locked --offline
+  -- -D warnings`; `scripts/Test-Media.ps1 -UiRenderDirectory local/qol-test/renders`;
+  `scripts/Test-Control.ps1 -Executable target/release/airmirror-lite.exe`.
+  MSVC builds use the installed toolchain outside the restricted sandbox because
+  its librarian previously failed with LNK1114/error 5. No protection was weakened.
 
-## Remaining evidence / limits
-- The five-minute media run used the preceding package; the current package also
-  passed the post-fix live playback/CPU measurement below.
-- Physical lock/unlock and Wi-Fi-loss recovery, 30-minute drift, and measured
-  glass-to-glass latency remain unverified. The 120 ms playout setting is not an
-  end-to-end latency measurement.
-- Local development build; distribution licensing is unresolved. MSVC x64 runtime
-  is required. No phone keys, captured media or private logs are committed.
-- Build commands: scripts/Build.ps1 -Test, Test-Media.ps1, Test-Control.ps1.
-  Sandbox MSVC archive update failed LNK1114/error 5; offline builds outside that
-  sandbox passed. The native ASan command and detailed bounds are in VALIDATION.md.
-
-## Final CPU verification
-- Current package measured during real iPhone playback, 2026-10-21
-  12:11:55–12:12:25 UTC: seven samples over 29.46 seconds. No disconnect or stderr.
-- Mean CPU as percent of one logical core: host 1.871%, codec worker 0.423%,
-  combined about 2.3%. This replaces the two busy idle-read threads observed
-  before the fix; the current clip delivered approximately 30 video frames/s.
-- Host working set 76.15–76.86 MiB and private memory 82.87→83.54 MiB;
-  codec working set 11.32–11.38 MiB and private memory 2.39→2.31 MiB.
-  Host handles 713→714; codec handles 153→153. Working-set sums include shared pages.
-- The raw trace and summary remain under ignored local/; the executable hash above
-  identifies the measured package. Short verification is complete; receiver left open.
+## Prior physical evidence and remaining checks
+- Before this UI change, real iPhone discovery, pairing/FairPlay, H.264 picture and
+  44.1 kHz stereo AAC-ELD worked. The user confirmed pause/resume and a five-minute
+  synchronized run without freezes, explicitly shortening the original 30 minutes.
+- Prior package `345A6C9E448C732320B02911543A1BA41C44A2F568A4C68594469365EAB5746F`
+  passed a live playback CPU sample: host 1.871% + codec 0.423% of one core.
+  Earlier GPU Video Decode counters measured 1.89–1.93%; prior live close took
+  177 ms and left no receiver/worker/listeners/mDNS reply. These are historical
+  measurements, not measurements of this UI build. Details are in VALIDATION.md.
+- The polished shell still needs a fresh physical iPhone check of picture, sound,
+  controls and final desktop appearance. No new physical acceptance is claimed.
+- Lock/unlock, Wi-Fi-loss recovery, 30-minute drift and glass-to-glass latency remain
+  unverified. The 120 ms playout setting is not an end-to-end latency measurement.
+- Local development build; distribution licensing remains unresolved. MSVC x64
+  runtime is required. No phone keys, captured media or private logs are committed.
+- Next: use the packaged build for a short physical phone/controls check. Source,
+  automated validation and packaging are complete; no additional phone action is
+  required to reproduce the native regression tests.

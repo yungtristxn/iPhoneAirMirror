@@ -54,11 +54,13 @@ fn main() {
         .cpp(true)
         .std("c++17")
         .flag("/EHsc")
+        .flag("/utf-8")
         .flag("/W4")
         .define("UNICODE", None)
         .define("_UNICODE", None)
         .define("NOMINMAX", None)
         .file("native/windows.cpp")
+        .file("native/phone_shell.cpp")
         .compile("windows_bridge");
     for lib in [
         "mfplat",
@@ -67,6 +69,13 @@ fn main() {
         "wmcodecdspuuid",
         "d3d11",
         "dxgi",
+        "dcomp",
+        "d2d1",
+        "dwrite",
+        "windowscodecs",
+        "gdiplus",
+        "dwmapi",
+        "comctl32",
         "ole32",
         "oleaut32",
         "user32",
