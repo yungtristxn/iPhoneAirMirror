@@ -7,6 +7,16 @@ use std::{
 };
 pub const MAX_BODY: usize = 64 * 1024;
 pub const MAX_HEADER: usize = 8192;
+/// Winsock accept() inherits nonblocking mode from our polling listeners.
+/// Restore blocking I/O so idle reads wait in the kernel; timeouts still let
+/// shutdown and record deadlines be checked promptly.
+pub fn configure_accepted_stream(stream: &TcpStream) -> Result<()> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_nodelay(true)?;
+    Ok(())
+}
 #[derive(Debug)]
 pub struct Request {
     pub method: String,
@@ -164,6 +174,26 @@ fn read_until(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn accepted_stream_waits_instead_of_spinning() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut accepted, _) = listener.accept().unwrap();
+        accepted.set_nonblocking(true).unwrap();
+        configure_accepted_stream(&accepted).unwrap();
+        let start = Instant::now();
+        let error = accepted.read(&mut [0; 1]).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ));
+        assert!(
+            start.elapsed() >= Duration::from_millis(50),
+            "idle receive must block rather than busy-poll"
+        );
+        drop(client);
+    }
     #[test]
     fn rejects_ambiguous_and_unbounded_framing() {
         for s in [

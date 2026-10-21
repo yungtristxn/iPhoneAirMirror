@@ -52,3 +52,25 @@ Updated: 2026-10-21
   does not count. Next: retry the redraw fix, measure uninterrupted five-minute
   A/V/working set, then live close. Lock/network loss and end-to-end latency still
   lack physical evidence.
+
+## Completed short live run and follow-up (2026-10-21)
+
+- User confirmed the resumed run stayed in sync without freezes. Resource samples
+  cover 11:50:12–11:55:11 UTC (299.5 seconds); the same session continued beyond it.
+- RTX 4070 SUPER, driver 32.0.16.1692; Ryzen 7 7800X3D (16 logical CPUs).
+  Windows per-process Video Decode counters measured 1.89–1.93% during iPhone video.
+- Host private memory 89.81→89.91 MiB, working set 76.51–79.45 MiB, handles 711→708.
+  Codec worker private memory 2.33→2.40 MiB and handles 153→153. No increasing
+  process/handle count or disconnect appeared during the sampled run.
+- The sample exposed ~200% of one CPU core in the host: Windows accepted TCP
+  sockets inherited nonblocking mode and the control/video readers busy-polled.
+  Both now explicitly use blocking reads with 100 ms cancellation/deadline checks.
+- An intermittent `streamConnectionID` rejection was also corrected: this opaque
+  identifier preserves all 64 bits even when the plist library represents it as
+  signed. Ordinary numeric fields still reject negatives; bounded 16-byte plist
+  encodings of u64 values are accepted.
+- 26 tests, clippy with warnings denied, release build and loopback lifecycle
+  checks pass after both fixes. The new package awaits a brief CPU verification.
+- Live window close took 177 ms; no receiver/worker, TCP listener, UDP endpoint
+  or mDNS service response remained. The reopened process handle did not retain
+  an exit code; the receiver logged clean shutdown with empty stderr.

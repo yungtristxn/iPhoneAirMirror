@@ -79,8 +79,14 @@ pub fn decode(data: &[u8]) -> Result<Value> {
                 ensure!(matches!(tag, 0 | 8 | 9 | 15), "plist primitive");
                 0
             }
-            1 | 2 => {
-                ensure!(len <= 3, "plist number");
+            1 => {
+                // Binary plists may encode a u64 with its high bit set as a
+                // zero-extended 16-byte integer. The reader still bounds it to u64.
+                ensure!(len <= 4, "plist integer width");
+                1 << len
+            }
+            2 => {
+                ensure!(matches!(len, 2 | 3), "plist real width");
                 1 << len
             }
             3 => {
@@ -108,6 +114,9 @@ pub fn decode(data: &[u8]) -> Result<Value> {
         let value = data
             .get(p..p + bytes)
             .ok_or_else(|| anyhow::anyhow!("truncated plist object"))?;
+        if kind == 1 && len == 4 {
+            ensure!(value[..8] == [0; 8], "plist integer exceeds u64");
+        }
         let cost = bytes * 3 + 64;
         ensure!(cost <= *byte_budget, "expanded plist allocation budget");
         *byte_budget -= cost;
@@ -159,6 +168,15 @@ pub fn num(v: &Value, k: &str) -> Result<u64> {
         .as_unsigned_integer()
         .ok_or_else(|| anyhow::anyhow!("invalid integer {k}"))
 }
+/// The stream ID is an opaque 64-bit bit pattern. Apple can encode it as
+/// signed i64; preserve those bits for the decimal AES key/IV derivation.
+/// Numeric fields such as lengths, ports and counts must continue to use num().
+pub fn stream_connection_id(v: &Value) -> Result<u64> {
+    let id = get(v, "streamConnectionID")?;
+    id.as_unsigned_integer()
+        .or_else(|| id.as_signed_integer().map(|n| n as u64))
+        .ok_or_else(|| anyhow::anyhow!("invalid stream connection identifier"))
+}
 pub fn bytes<const N: usize>(v: &Value, k: &str) -> Result<[u8; N]> {
     get(v, k)?
         .as_data()
@@ -172,6 +190,32 @@ mod tests {
     fn roundtrip() {
         let v = dict([("port", number(1234)), ("data", Value::Data(vec![3; 72]))]);
         assert_eq!(decode(&encode(&v).unwrap()).unwrap(), v);
+    }
+    #[test]
+    fn stream_identifier_preserves_all_64_bits() {
+        for value in [0u64, 1, i64::MAX as u64, 1u64 << 63, u64::MAX] {
+            for integer in [
+                Value::Integer(value.into()),
+                Value::Integer((value as i64).into()),
+            ] {
+                let decoded =
+                    decode(&encode(&dict([("streamConnectionID", integer)])).unwrap()).unwrap();
+                assert_eq!(stream_connection_id(&decoded).unwrap(), value);
+            }
+        }
+    }
+    #[test]
+    fn negative_numbers_remain_invalid_for_numeric_fields() {
+        let v =
+            decode(&encode(&dict([("port", Value::Integer((-1i64).into()))])).unwrap()).unwrap();
+        assert!(num(&v, "port").is_err());
+        for v in [
+            Value::Real(12.0),
+            Value::Data(vec![0; 8]),
+            Value::String("123".into()),
+        ] {
+            assert!(stream_connection_id(&dict([("streamConnectionID", v)])).is_err());
+        }
     }
     #[test]
     fn all_truncations_rejected() {

@@ -155,9 +155,7 @@ fn respond(
     Ok(())
 }
 pub fn serve(mut socket: TcpStream, shared: Arc<Shared>) -> Result<()> {
-    socket.set_read_timeout(Some(Duration::from_millis(100)))?;
-    socket.set_write_timeout(Some(Duration::from_secs(2)))?;
-    socket.set_nodelay(true)?;
+    framing::configure_accepted_stream(&socket)?;
     let peer = socket.peer_addr()?.ip();
     let local = socket.local_addr()?.ip();
     let id = shared.next.fetch_add(1, Ordering::AcqRel);
@@ -265,7 +263,7 @@ pub fn serve(mut socket: TcpStream, shared: Arc<Shared>) -> Result<()> {
                         let streams=streams.as_array().ok_or_else(||anyhow::anyhow!("stream list"))?;ensure!(!streams.is_empty()&&streams.len()<=2,"stream count");
                         let media=session.streams.as_mut().ok_or_else(||anyhow::anyhow!("stream SETUP before keys"))?;let mut replies=Vec::new();
                         for s in streams {match num(s,"type")? {
-                            110=>{let port=media.start_video(num(s,"streamConnectionID")?)?;replies.push(dict([("type",number(110)),("dataPort",number(port as u64))]));shared.log("video transport ready");}
+                            110=>{let port=media.start_video(plist::stream_connection_id(s)?)?;replies.push(dict([("type",number(110)),("dataPort",number(port as u64))]));shared.log("video transport ready");}
                             96=>{let codec=u8::try_from(num(s,"ct")?)?;let spf=u16::try_from(num(s,"spf")?)?;let format=num(s,"audioFormat")?;
                                 ensure!((codec==8&&format==1<<24)||(codec==4&&format==1<<22),"only stereo 44100Hz AAC-ELD/AAC-LC negotiated");
                                 let cport=u16::try_from(num(s,"controlPort")?)?;let(dp,cp)=media.start_audio(codec,spf,cport)?;

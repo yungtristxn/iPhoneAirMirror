@@ -278,8 +278,7 @@ fn video_loop(
             Err(e) => return Err(e.into()),
         }
     };
-    s.set_read_timeout(Some(Duration::from_millis(100)))?;
-    s.set_nodelay(true)?;
+    super::framing::configure_accepted_stream(&s)?;
     let mut cipher = video_cipher(&key, id);
     let mut config = Vec::new();
     while !stop.load(Ordering::Acquire) {
