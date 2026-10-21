@@ -9,13 +9,24 @@ Confirmed 2026-10-21: the user wants their own minimal, efficient Windows AirPla
   optional 1440/up-to-60 and H.264 1080/60. Sender chooses actual picture dimensions.
   Correct aspect ratio and portrait/landscape changes remain required.
 - Synchronized phone audio through Windows speakers using WASAPI. Audio and video
-  follow the sender's presentation timestamps on one mapped clock. Advertised
+  follow the sender's presentation timestamps on one mapped clock whenever an
+  audio transport is configured. Before audio SETUP and after audio teardown,
+  screen-only presentation may show fresh decoded frames promptly. Volume/mute
+  and silent passages do not change this policy. Advertised
   output latency defaults to 80 ms; 60–250 ms is configurable and is not added
   again to those timestamps. Keep advertisements consistent across /info and
   RECORD. Do not claim the hint as measured end-to-end latency. Optional 30 fps
   provides the earlier bandwidth tradeoff.
+- An optional bounded local display-aspect setting can request phone-proportioned
+  output at the selected resolution, avoiding a wide external-media canvas when
+  the sender honors it. Explicit display width overrides the saved aspect; codec
+  admission limits remain unchanged.
 - One active sender; a second sender must not silently replace the current one.
-- One frameless, rounded phone view, fitted to the actual mirrored video aspect.
+- One frameless, rounded phone view whose screen proportions are established by
+  the session's first presented frame. Matching-aspect screen rotations and
+  resolution changes update its shape; different-aspect media output is fitted
+  inside that established frame without cropping or rotating the source.
+  The receiver does not claim to know physical phone orientation from media alone.
   Drag the picture to move; bottom-right grip resizes proportionally. Default-size
   action fits native source pixels to the monitor without default upscaling;
   rotation/fullscreen retain sensible sizing. UI assets use monitor DPI separately.

@@ -227,3 +227,57 @@ from both audio and video preserves their relative timing while avoiding the
 duplicate wait. The --latency-ms option remains an advertisement to the sender;
 normal deadline scheduling and audio endpoint compensation remain. This corrects
 the earlier interpretation of the setting as an extra local playout buffer.
+
+### Photos scale: comparison with other receivers (2026-10-21)
+
+- [AirPlay-Windows renderer, af7a846](https://github.com/moieric11/AirPlay-Windows/blob/af7a84689b02bad56b55c5efd54f17cc3ebdd1c0/src/video/video_renderer.cpp#L391-L408)
+  fits the received frame with its aspect preserved. Its
+  [borderless window follows changing video dimensions](https://github.com/moieric11/AirPlay-Windows/blob/af7a84689b02bad56b55c5efd54f17cc3ebdd1c0/src/video/video_renderer.cpp#L893-L1011).
+  This does not reconstruct the phone UI when the sender provides a different view.
+- [uxplay-windows](https://github.com/leapbtw/uxplay-windows/blob/f76fe48400916449fd601b1c0444021aaf517082/src/mainwindow.cpp#L327-L364)
+  selects the GStreamer renderer. The pinned
+  [libuxplay pipeline](https://github.com/leapbtw/libuxplay/blob/79c620d0e3cd7c503418e1e39bf7b00a1cb16f24/renderers/video_renderer.c#L360-L388)
+  decodes, converts and scales the video; no Photos-specific crop was found there.
+  The [D3D11 sink](https://gstreamer.freedesktop.org/documentation/d3d11/d3d11videosink.html#d3d11videosink:force-aspect-ratio)
+  preserves aspect by default.
+- [Current UxPlay resolution documentation](https://github.com/FDH2/UxPlay/blob/dbb8a8f451597aa5f2e56c830ce41c4a655a8f98/README.md#L1390-L1398)
+  calls display dimensions advisory and describes height as controlling size,
+  with width adapting to the transmitted image. This is not proof of portrait locking.
+- [ApowerMirror's official iOS guide](https://www.apowersoft.com/faq/use-apowermirror-ios-app.html)
+  documents separate app-based Start Broadcast and AirPlay modes. Its
+  [FAQ](https://www.apowersoft.com/faq/common-issues-for-apowermirror.html)
+  documents AirPlay resolution controls, and its
+  [desktop guide](https://www.apowersoft.com/faq/how-to-use-apowermirror.html)
+  documents manual rotation and resizing. Those sources do not document a
+  Photos-specific AirPlay layout override; its proprietary implementation was not inspected.
+
+[Apple's external-display documentation](https://developer.apple.com/library/archive/documentation/WindowsViews/Conceptual/WindowAndScreenGuide/UsingExternalDisplay/UsingExternalDisplay.html)
+allows an iOS app to supply different external content instead of its device UI.
+That is consistent with the observed 994x2160-to-3840x2160 transition, but is not
+proof of Photos internals. Keeping the phone outline while fitting the entire
+wide feed explains the smaller photo; automatic cropping or zoom would not prove
+true-to-phone scale.
+
+The display experiment used --display-width 994 with the existing 2160 height,
+using the phone's observed screen dimensions as the display request. It left
+decoder caps, audio, timing and the normal default profile unchanged.
+
+The user subsequently confirmed that requesting 994x2160 made the full photo
+match the phone's scale. The live stream stayed 994x2160 instead of switching to
+3840x2160. This establishes the request on the tested phone, not every sender.
+It is persisted as a bounded local display aspect, independently of decoder caps.
+
+Photos still supplied timestamps up to about 320 ms ahead of arrival, including
+in the earlier wide-feed session. [UxPlay's documentation](https://github.com/FDH2/UxPlay/blob/dbb8a8f451597aa5f2e56c830ce41c4a655a8f98/README.md)
+recommends unsynchronized video for screen sharing without audio needing
+synchronization. AirMirrorLite
+uses negotiated audio ownership to make that decision automatically: screen-only
+sessions present fresh decoded frames; audio SETUP restores shared-clock video
+scheduling before PCM delivery. Audio teardown flushes old PCM before returning
+to interactive display. Muting and silence never trigger the change. A transition
+to synchronized playback can hold the current picture briefly while its deadline
+catches up; physical A/V acceptance remains separate from silent tests.
+On the final saved-aspect build, the user confirmed responsive, correctly sized
+Photos after the requested scrolling and rotation check. The live log also shows
+audio SETUP and teardown switching the presentation mode while retaining the
+screen session; it does not establish subjective sound quality or A/V sync.

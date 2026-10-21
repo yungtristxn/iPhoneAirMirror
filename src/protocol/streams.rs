@@ -143,6 +143,9 @@ impl Streams {
             }
         }));
         self.audio_ports = Some(ports);
+        // Publish only once sockets and the transport thread exist, before the
+        // caller acknowledges SETUP. Decoder initialization may still be pending.
+        self.shared.audio_started(self.epoch)?;
         Ok(ports)
     }
     pub fn stop_audio(&mut self) {
@@ -155,6 +158,7 @@ impl Streams {
         self.audio_ports = None;
         self.clock.lock().unwrap().clear_audio();
         self.shared.flush.fetch_add(1, Ordering::AcqRel);
+        self.shared.audio_stopped(self.epoch);
     }
 }
 impl Drop for Streams {

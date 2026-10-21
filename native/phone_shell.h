@@ -30,7 +30,8 @@ public:
     float dpi_scale() const;
     static int rim_pixels(float scale){return std::max(2,int(3*scale+.5f));}
     static float corner_radius(UINT width,UINT height,float scale);
-    static constexpr UINT WM_SHUTDOWN=WM_APP+1, WM_FORMAT=WM_APP+2, WM_REFRESH=WM_APP+3, WM_SHOW=WM_APP+4, WM_TEST=WM_APP+5;
+    static constexpr UINT WM_SHUTDOWN=WM_APP+1, WM_FORMAT=WM_APP+2, WM_REFRESH=WM_APP+3, WM_SHOW=WM_APP+4, WM_TEST=WM_APP+5,
+        WM_SOURCE_FORMAT=WM_APP+6, WM_SOURCE_RESET=WM_APP+7;
 private:
     HWND palette_=nullptr,tooltip_=nullptr;
     HICON small_icon_=nullptr,large_icon_=nullptr;
@@ -41,6 +42,9 @@ private:
     ULONGLONG hide_volume_deadline_=0;
     int hot_=-1, pressed_=-1, keyboard_focus_=-1, rail_x_=0, flyout_x_=0, palette_width_=96,arrow_x_=84;
     float aspect_=498.0f/1080.0f, last_nonzero_=1.0f;
+    float session_shape_=0; // first presented format's orientation-independent aspect
+    UINT_PTR source_generation_=1; // media-thread only
+    UINT_PTR ui_generation_=0; // UI-thread only; ignores delayed previous-session formats
     UINT display_w_=0,display_h_=0; // UI-thread source pixels
     UINT published_w_=0,published_h_=0; // media-thread only
     RECT restore_{},size_start_{};

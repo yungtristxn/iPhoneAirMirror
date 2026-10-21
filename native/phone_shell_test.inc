@@ -95,6 +95,30 @@ HRESULT PhoneShell::test_on_ui_thread(const wchar_t* directory){
         GetClientRect(window,&client);const int rim=2*rim_pixels(dpi_scale());
         UI_REQUIRE(client.right<client.bottom&&std::abs((client.right-rim)-994.0f/2160*(client.bottom-rim))<=2.0f&&user_sized_==manual);
     }
+    {
+        // Production source messages preserve an established phone frame when
+        // Photos supplies wide media. Only this hidden test uses synthetic epochs.
+        const UINT_PTR saved_generation=ui_generation_;const float saved_shape=session_shape_;
+        UINT_PTR generation=saved_generation;
+        auto source=[&](UINT w,UINT h,UINT_PTR epoch){main_proc(window,WM_SOURCE_FORMAT,epoch,MAKELPARAM(w,h));};
+        for(bool manual:{false,true}){
+            main_proc(window,WM_SOURCE_RESET,++generation,0);source(994,2160,generation);default_size();user_sized_=manual;
+            RECT phone;GetWindowRect(window,&phone);source(3840,2160,generation);GetWindowRect(window,&outer);
+            UI_REQUIRE(EqualRect(&phone,&outer)&&display_w_==994&&display_h_==2160&&user_sized_==manual);
+            source(2160,994,generation);UI_REQUIRE(std::abs(ratio()-2160.0f/994)<.01f);
+            source(498,1080,generation);UI_REQUIRE(display_w_==498&&display_h_==1080&&std::abs(ratio()-498.0f/1080)<.01f);
+            source(1920,1080,generation);key('0');
+            UI_REQUIRE(display_w_==498&&display_h_==1080&&std::abs(ratio()-498.0f/1080)<.01f);
+        }
+        const UINT_PTR old=generation;main_proc(window,WM_SOURCE_RESET,++generation,0);
+        source(1920,1080,old);UI_REQUIRE(display_w_==498&&display_h_==1080&&session_shape_==0);
+        source(300,600,generation);UI_REQUIRE(display_w_==300&&display_h_==600);
+        // A new session's frame may arrive before its reset is dispatched. A
+        // subsequent equal/older reset must not erase the newly learned shape.
+        source(1920,1080,++generation);main_proc(window,WM_SOURCE_RESET,generation,0);main_proc(window,WM_SOURCE_RESET,old,0);
+        source(994,2160,generation);UI_REQUIRE(display_w_==1920&&display_h_==1080&&std::abs(session_shape_-1080.0f/1920)<.001f);
+        ui_generation_=saved_generation;session_shape_=saved_shape;
+    }
     RECT work=work_area(window);
     for(POINT origin:{POINT{work.left,work.top},POINT{work.right-400,work.top},POINT{work.right-400,work.bottom-200}}){
         dismiss_volume();SetWindowPos(window,nullptr,origin.x,origin.y,328,188,SWP_NOZORDER|SWP_NOACTIVATE);

@@ -37,13 +37,16 @@ pub struct VideoProfile {
     pub hevc: bool,
 }
 impl VideoProfile {
-    pub fn new(height: u32, hevc_available: bool) -> Result<Self> {
-        let width = match height {
+    fn default_width(height: u32) -> Result<u32> {
+        Ok(match height {
             1080 => 1920,
             1440 => 2560,
             2160 => 3840,
             _ => bail!("resolution must be 1080, 1440 or 2160"),
-        };
+        })
+    }
+    pub fn new(height: u32, hevc_available: bool) -> Result<Self> {
+        let width = Self::default_width(height)?;
         ensure!(
             height == 1080 || hevc_available,
             "higher-resolution mirroring requires a native HEVC decoder and GPU support; use --resolution 1080 for compatibility"
@@ -58,6 +61,17 @@ impl VideoProfile {
     pub fn with_fps(mut self, fps: u32) -> Result<Self> {
         ensure!(matches!(fps, 30 | 60), "fps must be 30 or 60");
         self.fps = fps;
+        Ok(self)
+    }
+    pub fn with_display_width(mut self, width: u32) -> Result<Self> {
+        let maximum = Self::default_width(self.height)?;
+        ensure!(
+            (48..=maximum).contains(&width) && width.is_multiple_of(2),
+            "display width must be an even number from 48 to {maximum} for this resolution"
+        );
+        // Advisory display geometry only: no cropping, inferred orientation or
+        // change to codec admission limits. The sender chooses its actual stream.
+        self.width = width;
         Ok(self)
     }
     pub fn features(self) -> u64 {
@@ -532,6 +546,42 @@ mod tests {
         assert_eq!(legacy.features(), FEATURES);
         assert!(legacy.features_text().ends_with(",0x0"));
         assert_eq!(VideoProfile::new(1440, true).unwrap().width, 2560);
+    }
+    #[test]
+    fn optional_display_width_preserves_profile_and_native_limits() {
+        let high = VideoProfile::new(2160, true).unwrap().with_fps(30).unwrap();
+        let portrait = high.with_display_width(994).unwrap();
+        assert_eq!(
+            (portrait.width, portrait.height, portrait.fps),
+            (994, 2160, 30)
+        );
+        assert!(portrait.hevc);
+        assert_eq!(portrait.features(), high.features());
+        assert_eq!(high.width, 3840);
+        for (height, maximum) in [(1080, 1920), (1440, 2560), (2160, 3840)] {
+            let profile = VideoProfile::new(height, true).unwrap();
+            for width in [48, 994, maximum] {
+                let narrowed = profile.with_display_width(width).unwrap();
+                assert_eq!(narrowed.width, width);
+                assert_eq!(narrowed.height, profile.height);
+                assert_eq!(narrowed.fps, profile.fps);
+                assert_eq!(narrowed.hevc, profile.hevc);
+            }
+            for width in [0, 46, 47, 49, maximum + 2, u32::MAX] {
+                assert!(profile.with_display_width(width).is_err());
+            }
+            // Replacing the hint is still bounded by this resolution's original
+            // default width, rather than the previously selected advisory width.
+            assert_eq!(
+                profile
+                    .with_display_width(994)
+                    .unwrap()
+                    .with_display_width(maximum)
+                    .unwrap()
+                    .width,
+                maximum
+            );
+        }
     }
     #[test]
     fn default_audio_mode_notification() {

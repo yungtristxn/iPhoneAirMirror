@@ -89,14 +89,14 @@ struct App {
     uint64_t source_shape_changes=0,presented_shape_changes=0;
     std::deque<VideoFrame> video; std::deque<AudioFrame> sound;
     VideoFrame last_frame{};
-    bool video_slot_reserved=false;
+    bool video_slot_reserved=false,video_sync=true;
     bool high_resolution_timer=false;
     double present_retry_at=0;
     ComPtr<ID3D11Texture2D> paused_texture;
     uint64_t decoder_instances=0;
     uint64_t decoded = 0, presented = 0, gpu_frames = 0, decoder_surfaces = 0, late_frames = 0, audio_frames = 0, underruns = 0;
     size_t video_high_water=0,audio_high_water=0;
-    uint64_t video_waits=0,present_busy=0,submit_calls=0;
+    uint64_t video_waits=0,present_busy=0,submit_calls=0,interactive_skips=0;
     double submit_seconds=0,submit_max_seconds=0,present_seconds=0,present_max_seconds=0;
     StageTiming output_ahead,presentation_late,decoder_residence;
     struct DecodePending {LONGLONG pts=0;double began=0;bool active=false;};
@@ -232,7 +232,7 @@ struct App {
     }
     void queue_video_frame(VideoFrame frame) {
         if(source_width!=frame.width||source_height!=frame.height){source_width=frame.width;source_height=frame.height;++source_shape_changes;}
-        if(video.size()==(codec==265?4:8)){video.pop_front();++late_frames;}
+        if(video.size()==(codec==265?4:8)){video.pop_front();if(video_sync)++late_frames;else ++interactive_skips;}
         video.push_back(std::move(frame));video_high_water=std::max(video_high_water,video.size());
     }
     HRESULT output() {
@@ -275,7 +275,7 @@ struct App {
         *slot={LONGLONG(pts*1e7),accepted,true};CHECK(output());
         const double elapsed=now_seconds()-began;++submit_calls;submit_seconds+=elapsed;submit_max_seconds=std::max(submit_max_seconds,elapsed);return S_OK;
     }
-    HRESULT draw(IMFSample* frame, UINT width, UINT height) {
+    HRESULT draw(IMFSample* frame, UINT width, UINT height,ID3D11Texture2D* synthetic_probe_copy=nullptr) {
         // Decoder output can run ahead of its PTS. Publish only the frame selected for display.
         shell.video_size(width,height);
         CHECK(chrome.layout(shell));UINT vw=chrome.video_width,vh=chrome.video_height;
@@ -330,6 +330,14 @@ struct App {
             context->CopySubresourceRegion(paused_texture.Get(),0,0,0,0,texture.Get(),slice,nullptr);
         }
         last_frame.width=width;last_frame.height=height;
+        if(synthetic_probe_copy){
+            // Private synthetic-test hook only. Copy before Present rotates the logical flip buffer.
+            // No exported capture API or runtime caller supplies this argument.
+            D3D11_TEXTURE2D_DESC copy_desc{},target_desc{};synthetic_probe_copy->GetDesc(&copy_desc);target->GetDesc(&target_desc);
+            if(copy_desc.Width!=target_desc.Width||copy_desc.Height!=target_desc.Height||copy_desc.Format!=target_desc.Format
+                ||copy_desc.Usage!=D3D11_USAGE_STAGING||copy_desc.CPUAccessFlags!=D3D11_CPU_ACCESS_READ)return E_INVALIDARG;
+            context->CopyResource(synthetic_probe_copy,target.Get());
+        }
         // Audio shares this thread: a display queue must never block its deadline.
         const double began=now_seconds();HRESULT present=swap->Present(0,DXGI_PRESENT_DO_NOT_WAIT);
         const double elapsed=now_seconds()-began;present_seconds+=elapsed;present_max_seconds=std::max(present_max_seconds,elapsed);
@@ -370,7 +378,7 @@ struct App {
         if(shell.quit||shell.disconnect)return S_OK;
         HANDLE handles[4]={wake.h,audio_event.h};DWORD count=2,timeout=std::min(wait_ms,1000u);
         DWORD slot_index=MAXDWORD;double deadline=0;const double now=now_seconds();
-        const bool due=!video.empty()&&video.front().pts<=now;
+        const bool due=!video.empty()&&(!video_sync||video.front().pts<=now);
         const bool redraw=shell.redraw&&last_frame.sample;
         if(due||redraw){
             if(video_slot_reserved){if(present_retry_at>now)deadline=present_retry_at;else timeout=0;}
@@ -393,8 +401,8 @@ struct App {
     }
     HRESULT tick() {
         CHECK(tick_audio());CHECK(chrome.layout(shell)); double n = now_seconds();bool redraw_needed=shell.redraw.exchange(false);
-        while (video.size() > 1 && video[1].pts <= n) { video.pop_front(); ++late_frames; }
-        const bool due=!video.empty()&&video.front().pts<=n;
+        while (video.size() > 1 && (!video_sync||video[1].pts <= n)) {video.pop_front();if(video_sync)++late_frames;else ++interactive_skips;}
+        const bool due=!video.empty()&&(!video_sync||video.front().pts<=n);
         if(!due&&!(redraw_needed&&last_frame.sample))return S_OK;
         if(present_retry_at>n){if(redraw_needed)shell.redraw=true;return S_OK;}
         // Poll only when drawing is useful. A permanently ready display must not spin the idle pump.
@@ -405,7 +413,7 @@ struct App {
             video_slot_reserved=true;
         }
         if(due){auto& frame=video.front();const auto before=presented;HRESULT hr=draw(frame.sample.Get(),frame.width,frame.height);CHECK(hr);
-            if(hr==S_OK){if(presented>before)presentation_late.add(now_seconds()-frame.pts);video.pop_front();}}
+            if(hr==S_OK){if(presented>before&&video_sync)presentation_late.add(now_seconds()-frame.pts);video.pop_front();}}
         else {HRESULT hr=draw(last_frame.sample.Get(),last_frame.width,last_frame.height);CHECK(hr);if(hr==S_FALSE)shell.redraw=true;}
         return S_OK;
     }
@@ -518,6 +526,15 @@ int am_pump(void* p, unsigned wait_ms) {
     if (a->shell.disconnect.exchange(false)) return 2; return 1;
 }
 unsigned long long am_presented(void* p){return static_cast<App*>(p)->presented;}
+void am_flush_audio(void* p);
+void am_video_sync(void* p,int enabled){
+    // Media-thread policy supplied by negotiated audio ownership, never by mute or silence.
+    auto a=static_cast<App*>(p);const bool sync=enabled!=0;
+    // No residual PCM may play in interactive mode, including at a teardown boundary.
+    if(!sync&&(a->audio_running||!a->sound.empty()))am_flush_audio(p);
+    if(a->video_sync==sync)return;
+    a->video_sync=sync;CancelWaitableTimer(a->presentation_timer.h);SetEvent(a->wake.h);
+}
 int am_prepare_video(void* p,unsigned codec,unsigned width,unsigned height,unsigned fps){
     auto a=static_cast<App*>(p);if((codec!=264&&codec!=265)||(fps!=30&&fps!=60))return 0;
     a->expected_fps=fps;if(a->decoder_ready&&a->codec==codec)return 1;
@@ -538,6 +555,8 @@ int am_audio(void* p, const int16_t* pcm, unsigned samples, double pts) {
         sprintf_s(detail,"audio queue full padding=%u capacity=%u latency=%.4f now=%.4f first_pts=%.4f played=%llu",padding,a->audio_capacity,a->audio_latency,now_seconds(),a->sound.front().pts,(unsigned long long)a->audio_frames);
         error_hr(detail,E_FAIL);return 0;
     }
+    // This native boundary also enforces synchronization before starting playback.
+    am_video_sync(p,1);
     a->sound.push_back({std::vector<int16_t>(pcm, pcm+samples), 0, pts});
     a->audio_high_water=std::max(a->audio_high_water,a->sound.size());
     if (!a->audio_running) { HRESULT hr=a->audio->Start(); if (FAILED(hr)) {error_hr("WASAPI start",hr);return 0;} a->audio_running=true; }
@@ -551,7 +570,8 @@ int am_reset(void* p) {
     a->last_frame.sample.Reset();
     a->shell.reset_video();
     a->reset_video_decoder();a->output_ahead={};a->presentation_late={};a->decoder_residence={};
-    a->source_width=a->source_height=a->presented_width=a->presented_height=0;a->source_shape_changes=a->presented_shape_changes=0;return 1;
+    a->source_width=a->source_height=a->presented_width=a->presented_height=0;a->source_shape_changes=a->presented_shape_changes=0;
+    a->video_sync=true;a->interactive_skips=0;return 1;
 }
 const char* am_stats(void* p) {
     auto a = static_cast<App*>(p); static thread_local std::string text;
@@ -567,6 +587,7 @@ const char* am_stats(void* p) {
         + " audio_capacity="+std::to_string(a->audio_capacity)+" audio_latency_ms="+std::to_string(a->audio_latency*1000)
         + " video_queue_max="+std::to_string(a->video_high_water)+" audio_queue_max="+std::to_string(a->audio_high_water)
         + " video_waits="+std::to_string(a->video_waits)+" present_busy="+std::to_string(a->present_busy)
+        + " video_sync="+std::to_string(a->video_sync)+" interactive_skips="+std::to_string(a->interactive_skips)
         + " submit_avg_ms="+std::to_string(a->submit_calls?a->submit_seconds*1000/a->submit_calls:0)
         + " submit_max_ms="+std::to_string(a->submit_max_seconds*1000)
         + " present_avg_ms="+std::to_string(a->presented+a->present_busy?a->present_seconds*1000/(a->presented+a->present_busy):0)

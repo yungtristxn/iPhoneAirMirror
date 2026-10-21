@@ -12,13 +12,23 @@ root = pathlib.Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--exe", type=pathlib.Path, default=root / "target/release/airmirror-lite.exe")
 parser.add_argument("--latency-ms", type=int, default=80)
+parser.add_argument("--display-width", type=int)
+parser.add_argument("--display-aspect", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"))
 args = parser.parse_args()
 if not 60 <= args.latency_ms <= 250:
     parser.error("--latency-ms must be 60..250")
+if args.display_width is not None and (not 48 <= args.display_width <= 1920 or args.display_width % 2):
+    parser.error("--display-width must be even and 48..1920 to test all three profiles")
+if args.display_aspect and not all(48 <= value <= 3840 for value in args.display_aspect):
+    parser.error("--display-aspect dimensions must be 48..3840")
 data = root / "local/profile-test"
 data.mkdir(parents=True, exist_ok=True)
 result = data / "result.json"
 result.unlink(missing_ok=True)
+aspect_fixture = data / "display-aspect.txt"
+aspect_fixture.unlink(missing_ok=True)
+if args.display_aspect:
+    aspect_fixture.write_text("{} {}\n".format(*args.display_aspect), encoding="ascii")
 exe = args.exe.resolve(strict=True)
 executable_hash = hashlib.sha256(exe.read_bytes()).hexdigest().upper()
 checked = []
@@ -30,11 +40,18 @@ def require(condition, message):
 
 
 for height, width, fps, high in [(1080, 1920, 60, False), (1440, 2560, 60, True), (2160, 3840, 60, True)]:
+    extra = []
+    if args.display_width is not None:
+        width = args.display_width
+        extra = ["--display-width", str(width)]
+    elif args.display_aspect:
+        reference_w, reference_h = args.display_aspect
+        width = ((reference_w * height + reference_h) // (2 * reference_h)) * 2
     with (data / f"{height}-out.txt").open("w") as out, (data / f"{height}-err.txt").open("w") as err:
         process = subprocess.Popen([str(exe), "--hidden", "--no-discovery", "--bind", "127.0.0.1",
                                     "--port", "17003", "--seconds", "3", "--resolution", str(height),
                                     "--latency-ms", str(args.latency_ms),
-                                    "--data-dir", str(data)], stdin=subprocess.DEVNULL,
+                                    "--data-dir", str(data)] + extra, stdin=subprocess.DEVNULL,
                                    stdout=out, stderr=err, creationflags=subprocess.CREATE_NO_WINDOW)
         try:
             deadline = time.monotonic() + 8
@@ -68,12 +85,14 @@ for height, width, fps, high in [(1080, 1920, 60, False), (1440, 2560, 60, True)
                 require(bool(info["features"] & (1 << 42)) == high, "HEVC capability flag is incorrect")
             require(process.wait(timeout=10) == 0, "Receiver exit failed")
             checked.append({"width": width, "height": height, "fps": fps, "hevc": high})
-            print(f"PASS: /info {width}x{height} at {fps} fps; HEVC={high}; playout={args.latency_ms}ms; clean silent exit")
+            print(f"PASS: /info {width}x{height} at {fps} fps; HEVC={high}; advertised_latency={args.latency_ms}ms; clean silent exit")
         finally:
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=5)
 result.write_text(json.dumps({"executable": str(exe), "sha256": executable_hash,
                              "playout_ms": args.latency_ms,
+                             "display_aspect": args.display_aspect,
                              "profiles": checked,
                              "evidence": "Silent loopback /info and timed exit. No phone acceptance."}, indent=2))
+aspect_fixture.unlink(missing_ok=True)

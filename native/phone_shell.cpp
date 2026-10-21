@@ -103,11 +103,14 @@ void PhoneShell::set_status(const std::wstring& title){
     if(status.exchange(state)!=state){chrome_dirty=true;PostMessageW(window,WM_REFRESH,0,0);if(wake_)SetEvent(wake_);}
 }
 void PhoneShell::video_size(UINT w,UINT h){
-    if(!w||!h)return;
+    if(!w||!h||w>3840||h>3840)return;
     if(!has_video.exchange(true)){status=2;chrome_dirty=true;signal();}
-    if(published_w_!=w||published_h_!=h){published_w_=w;published_h_=h;PostMessageW(window,WM_FORMAT,w,h);}
+    if(published_w_!=w||published_h_!=h){published_w_=w;published_h_=h;PostMessageW(window,WM_SOURCE_FORMAT,source_generation_,MAKELPARAM(w,h));}
 }
-void PhoneShell::reset_video(){has_video=false;status=0;published_w_=published_h_=0;signal();PostMessageW(window,WM_REFRESH,0,0);}
+void PhoneShell::reset_video(){
+    has_video=false;status=0;published_w_=published_h_=0;++source_generation_;
+    PostMessageW(window,WM_SOURCE_RESET,source_generation_,0);signal();PostMessageW(window,WM_REFRESH,0,0);
+}
 void PhoneShell::shape_window(){
     if(!window)return;
     if(fullscreen){SetWindowRgn(window,nullptr,TRUE);return;}
@@ -287,6 +290,22 @@ LRESULT CALLBACK PhoneShell::main_proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         if(w>max_w){w=max_w;height=(w-border)/a->aspect_+border;}
         r->right=r->left+LONG(w);r->bottom=r->top+LONG(height);a->user_sized_=true;return TRUE;}
     case WM_GETMINMAXINFO:{auto m=reinterpret_cast<MINMAXINFO*>(lp);float s=a->dpi_scale();float height=a->aspect_<1?360*s:180*s;m->ptMinTrackSize={LONG((height-2*rim_pixels(s))*a->aspect_+2*rim_pixels(s)),LONG(height)};m->ptMaxTrackSize={4096,4096};return 0;}
+    case WM_SOURCE_RESET:
+        if(wp>a->ui_generation_){a->ui_generation_=wp;a->session_shape_=0;}
+        return 0;
+    case WM_SOURCE_FORMAT:{
+        if(wp<a->ui_generation_)return 0;
+        if(wp>a->ui_generation_){a->ui_generation_=wp;a->session_shape_=0;}
+        const UINT width=LOWORD(lp),height=HIWORD(lp);const float next=float(width)/float(height);
+        if(!width||!height||width>3840||height>3840||next<=.2f||next>=5.0f)return 0;
+        const float shape=std::min(next,1.0f/next);
+        if(a->session_shape_==0)a->session_shape_=shape;
+        // AirPlay Photos/video may replace screen-shaped output with media of a
+        // different aspect. Keep the established shell and let the GPU fit it.
+        // Matching ratios can still change resolution or rotate the phone view.
+        if(std::abs(shape-a->session_shape_)>a->session_shape_*.01f)return 0;
+        return main_proc(h,WM_FORMAT,width,height);}
+    // UI geometry application, also used directly by hidden artwork diagnostics.
     case WM_FORMAT:{float next=float(wp)/float(lp);if(std::isfinite(next)&&next>.2f&&next<5.0f&&wp<=3840&&lp<=3840){
         bool changed=a->display_w_!=wp||a->display_h_!=UINT(lp);RECT r;GetWindowRect(h,&r);
         a->aspect_=next;a->display_w_=UINT(wp);a->display_h_=UINT(lp);

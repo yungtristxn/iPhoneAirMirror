@@ -12,11 +12,16 @@ Control Center → Screen Mirroring, and play a local non-DRM video with sound.
 Both devices must be on the same trusted private LAN. Normal operation requires
 no administrator rights, Bonjour service, account or cloud connection.
 
-- Frameless, rounded phone view that follows the mirrored video’s aspect ratio.
+- Frameless, rounded phone view that learns the screen's proportions from the
+  first mirrored frame. Matching screen rotations and resolution changes resize
+  it; different-aspect photo/video output fits inside the established frame.
   Drag the picture to move; drag the curved bottom-right grip to resize. Default
   size preserves source pixels when they fit the monitor, avoiding unnecessary
   shrinking or enlargement. The separate HEVC negotiation now requests a higher
   transmitted resolution when native support is available.
+- Start mirroring from the Home screen or Settings to establish the phone frame.
+  If a session starts directly with an optimized media feed, its initial shape
+  is used because the receiver cannot infer the phone's physical orientation.
 - Side controls: speaker, default size, fullscreen and close. Pause over the
   speaker for a horizontal volume slider; click to mute/unmute. Buttons stay
   fixed as the flyout opens. Volume changes only PC playback.
@@ -54,10 +59,20 @@ AirMirrorLite, use `--resolution 1440` (2560×1440 / up to 60 fps) or
 needed after changing the request. `--fps 30` restores the lower-bandwidth frame
 rate. `--latency-ms` sets the output-latency hint advertised to the sender
 (default 80 ms; allowed 60–250). Both playback paths follow the sender's
-presentation timestamps on one synchronized clock; this hint is not added
-again as a local delay. It is not measured phone-to-screen latency.
+presentation timestamps on one synchronized clock when an audio stream is
+configured; this hint is not added again as a local delay. Screen-only sessions
+present fresh decoded frames promptly. Mute and silent passages do not disable
+synchronization in a configured audio session. The hint is not measured
+phone-to-screen latency.
 Hosts without native HEVC support default to
 1080; explicitly selecting a higher mode requires native HEVC and GPU support.
+
+To keep Photos proportional to the phone, the local data directory can contain
+`display-aspect.txt` with a reference width and height, for example `994 2160`.
+The receiver scales this ratio to the selected resolution and requests that
+display geometry from the sender. The validated local installation uses this
+setting. `--display-width N` overrides it for one launch; without either setting,
+the usual widescreen request is used. Native decoder limits remain unchanged.
 
 The executable includes its own multi-size icon for Explorer, the taskbar and
 Alt-Tab; no separate icon installation is needed.

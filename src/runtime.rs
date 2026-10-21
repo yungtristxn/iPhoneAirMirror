@@ -116,6 +116,34 @@ fn pump_wait_ms(discovery_ready: bool, backlog_possible: bool) -> u32 {
         1000
     }
 }
+#[derive(Default)]
+struct AudioOwnership(AtomicU64);
+impl AudioOwnership {
+    fn activate(&self, epoch: u64) -> Result<bool> {
+        ensure!(epoch != 0, "audio transport requires an active session");
+        match self
+            .0
+            .compare_exchange(0, epoch, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => Ok(true),
+            Err(current) if current == epoch => Ok(false),
+            Err(_) => anyhow::bail!("audio transport belongs to another session"),
+        }
+    }
+    fn clear(&self, epoch: u64) -> bool {
+        epoch != 0
+            && self
+                .0
+                .compare_exchange(epoch, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
+    fn synchronized(&self, owner: u64) -> bool {
+        owner == 0 || self.owns(owner)
+    }
+    fn owns(&self, epoch: u64) -> bool {
+        epoch != 0 && self.0.load(Ordering::Acquire) == epoch
+    }
+}
 impl Media {
     fn epoch(&self) -> u64 {
         match self {
@@ -146,6 +174,7 @@ pub struct Shared {
     pub flush: AtomicU64,
     pub volume_db: AtomicU32,
     pub owner: AtomicU64,
+    audio_owner: AudioOwnership,
     pub owner_started: AtomicU64,
     // Negotiation hint only; wire presentation timestamps are mapped unchanged.
     pub playout_ms: u32,
@@ -162,6 +191,21 @@ pub struct Shared {
     wake: native::Wake,
 }
 impl Shared {
+    pub fn audio_started(&self, epoch: u64) -> Result<()> {
+        ensure!(
+            self.owner.load(Ordering::Acquire) == epoch,
+            "audio session ownership changed"
+        );
+        if self.audio_owner.activate(epoch)? {
+            self.wake.signal();
+        }
+        Ok(())
+    }
+    pub fn audio_stopped(&self, epoch: u64) {
+        if self.audio_owner.clear(epoch) {
+            self.wake.signal();
+        }
+    }
     pub fn log(&self, text: &str) {
         let text: String = text
             .chars()
@@ -305,6 +349,7 @@ impl ReceiverApp {
             flush: AtomicU64::new(0),
             volume_db: AtomicU32::new(0.0f32.to_bits()),
             owner: AtomicU64::new(0),
+            audio_owner: AudioOwnership::default(),
             owner_started: AtomicU64::new(0),
             playout_ms,
             next: AtomicU64::new(1),
@@ -433,6 +478,10 @@ impl ReceiverApp {
                 }
             }
             let owner = self.shared.owner.load(Ordering::Acquire);
+            // A teardown publishes its flush before clearing audio ownership.
+            // Read ownership first so an observed interactive transition also
+            // observes and flushes the previous audio before changing mode.
+            let video_synchronized = self.shared.audio_owner.synchronized(owner);
             let next_flush = self.shared.flush.load(Ordering::Acquire);
             if next_flush != flush {
                 app.flush_audio();
@@ -448,6 +497,9 @@ impl ReceiverApp {
                 got_audio = false;
                 reported = false;
             }
+            // Negotiated transport ownership decides synchronization. Muting,
+            // volume and silence never move an audio session to interactive mode.
+            app.video_sync(video_synchronized);
             let changed_status = {
                 let status = self.shared.status.lock().unwrap();
                 (status.as_str() != last_title).then(|| status.clone())
@@ -470,8 +522,16 @@ impl ReceiverApp {
                         serial,
                         mut pcm,
                         pts,
-                    }) if epoch == owner && owner != 0 && serial == flush => {
+                    }) if epoch == owner && self.shared.audio_owner.owns(epoch) => {
                         audio_drain.consumed();
+                        let next_flush = self.shared.flush.load(Ordering::Acquire);
+                        if next_flush != flush {
+                            app.flush_audio();
+                            flush = next_flush;
+                        }
+                        if serial != flush {
+                            continue;
+                        }
                         let db = f32::from_bits(self.shared.volume_db.load(Ordering::Relaxed));
                         let gain = if db <= -144.0 {
                             0.0
@@ -483,6 +543,9 @@ impl ReceiverApp {
                                 *s = (f32::from(*s) * gain) as i16;
                             }
                         }
+                        // Audio may have been configured while the main thread
+                        // was waiting. Synchronize before its first PCM is queued.
+                        app.video_sync(true);
                         if let Err(e) = app.audio(&pcm, pts) {
                             self.shared.log(&e.to_string());
                             self.shared.disconnect.fetch_add(1, Ordering::AcqRel);
@@ -581,6 +644,15 @@ impl ReceiverApp {
                 || pending_audio.is_some()
                 || pending_video.is_some()
                 || self.shared.owner.load(Ordering::Acquire) != owner;
+            // SETUP can prepare audio while queues are draining. Recheck before
+            // presentation so the first audio packets use the shared deadlines.
+            let video_synchronized = self.shared.audio_owner.synchronized(owner);
+            let next_flush = self.shared.flush.load(Ordering::Acquire);
+            if next_flush != flush {
+                app.flush_audio();
+                flush = next_flush;
+            }
+            app.video_sync(video_synchronized);
             match app.pump(pump_wait_ms(discovery_ready, backlog_possible))? {
                 0 => break,
                 2 => {
@@ -763,5 +835,38 @@ mod tests {
         assert_eq!(pump_wait_ms(false, true), 0);
         // Backpressure without consumed messages waits for the native deadline.
         assert_eq!(pump_wait_ms(true, DrainBudget::new(2).exhausted()), 1000);
+    }
+    #[test]
+    fn negotiated_audio_owns_sync_until_explicit_teardown() {
+        let audio = AudioOwnership::default();
+        assert!(audio.synchronized(0));
+        assert!(!audio.synchronized(1));
+        assert!(audio.activate(1).unwrap());
+        assert!(!audio.activate(1).unwrap());
+        // No packet arrival, volume or mute state is involved in this decision.
+        for _ in 0..4 {
+            assert!(audio.synchronized(1));
+        }
+        assert!(audio.clear(1));
+        assert!(!audio.clear(1));
+        assert!(!audio.synchronized(1));
+        assert!(audio.synchronized(0));
+    }
+    #[test]
+    fn stale_audio_teardown_cannot_clear_new_session() {
+        let audio = AudioOwnership::default();
+        assert!(audio.activate(1).unwrap());
+        assert!(audio.activate(2).is_err());
+        assert!(audio.synchronized(1));
+        assert!(audio.clear(1));
+        assert!(audio.activate(2).unwrap());
+        assert!(!audio.clear(1));
+        assert!(audio.synchronized(2));
+        assert!(!audio.synchronized(3));
+        assert!(audio.clear(2));
+        assert!(audio.synchronized(0));
+        assert!(!audio.synchronized(3));
+        assert!(audio.activate(0).is_err());
+        assert!(!audio.clear(0));
     }
 }

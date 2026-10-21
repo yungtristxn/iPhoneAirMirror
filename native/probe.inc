@@ -25,6 +25,8 @@ static HRESULT probe_media_wait(App* app) {
     return S_OK;
 }
 static HRESULT probe_video(App* app, UINT width, UINT height,UINT codec=264) {
+    // These independent encoder fixtures represent separate phones/sessions.
+    app->shell.reset_video();
     CHECK(app->init_decoder(codec,width,height));
     if(app->low_latency_attribute!=1||(SUCCEEDED(app->low_latency_get)&&app->low_latency_value!=1))return E_FAIL;
     ComPtr<IMFTransform> enc;if(codec==265){CHECK(create_hevc_transform(true,&enc));}else{CHECK(CoCreateInstance(CLSID_CMSH264EncoderMFT,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&enc)));}
@@ -99,26 +101,92 @@ static HRESULT probe_video(App* app, UINT width, UINT height,UINT codec=264) {
     if(app->presented!=shown+1||!app->video.empty()||app->late_frames!=late+2)return E_FAIL;
     return S_OK;
 }
+static HRESULT probe_letterbox_pixels(App* app) {
+    // This readback is restricted to a freshly generated diagnostic pattern, never sender media.
+    constexpr UINT width=640,height=360,border=16;
+    std::vector<uint8_t> pixels(width*height*3/2,128);
+    const uint8_t levels[2][2]={{64,112},{160,208}};
+    for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x)
+        pixels[y*width+x]=(x<border||y<border||x>=width-border||y>=height-border)?235:levels[y>=height/2][x>=width/2];
+    D3D11_TEXTURE2D_DESC pattern_desc{};pattern_desc.Width=width;pattern_desc.Height=height;pattern_desc.MipLevels=1;pattern_desc.ArraySize=1;
+    pattern_desc.Format=DXGI_FORMAT_NV12;pattern_desc.SampleDesc.Count=1;pattern_desc.Usage=D3D11_USAGE_DEFAULT;
+    pattern_desc.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;
+    D3D11_SUBRESOURCE_DATA initial{pixels.data(),width,UINT(pixels.size())};ComPtr<ID3D11Texture2D> pattern;
+    CHECK(app->device->CreateTexture2D(&pattern_desc,&initial,&pattern));
+    ComPtr<IMFMediaBuffer> buffer;CHECK(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D),pattern.Get(),0,FALSE,&buffer));
+    ComPtr<IMFSample> sample;CHECK(MFCreateSample(&sample));CHECK(sample->AddBuffer(buffer.Get()));
+    CHECK(app->chrome.layout(app->shell));
+    if(app->vieww!=app->chrome.video_width||app->viewh!=app->chrome.video_height||app->vieww>=app->viewh)return E_FAIL;
+    // Read the generated pattern before Present rotates the logical back buffer. Holding
+    // a D3D11 buffer0 interface across Present does not preserve its former pixel contents.
+    D3D11_TEXTURE2D_DESC read_desc{};read_desc.Width=app->vieww;read_desc.Height=app->viewh;read_desc.MipLevels=1;read_desc.ArraySize=1;
+    read_desc.Format=DXGI_FORMAT_B8G8R8A8_UNORM;read_desc.SampleDesc.Count=1;read_desc.Usage=D3D11_USAGE_STAGING;read_desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> readback;CHECK(app->device->CreateTexture2D(&read_desc,nullptr,&readback));
+    const uint64_t before=app->presented;
+    const ULONGLONG deadline=GetTickCount64()+1000;
+    while(app->presented==before&&GetTickCount64()<deadline){
+        if(!app->video_slot_reserved){DWORD ready=WaitForSingleObject(app->video_event.h,20);if(ready==WAIT_TIMEOUT)continue;if(ready!=WAIT_OBJECT_0)return E_FAIL;app->video_slot_reserved=true;}
+        CHECK(app->draw(sample.Get(),width,height,readback.Get()));if(app->presented==before)Sleep(1);
+    }
+    if(app->presented!=before+1||!app->video.empty()||app->presented_width!=width||app->presented_height!=height)return E_FAIL;
+    if(app->vieww!=read_desc.Width||app->viewh!=read_desc.Height)return E_FAIL;
+    D3D11_MAPPED_SUBRESOURCE mapped{};CHECK(app->context->Map(readback.Get(),0,D3D11_MAP_READ,0,&mapped));
+    auto gray=[&](UINT x,UINT y,int expected,int tolerance) {
+        auto p=static_cast<const uint8_t*>(mapped.pData)+size_t(y)*mapped.RowPitch+size_t(x)*4;
+        if(std::abs(int(p[0])-expected)<=tolerance&&std::abs(int(p[1])-expected)<=tolerance
+            &&std::abs(int(p[2])-expected)<=tolerance&&p[3]>=250)return true;
+        char detail[180];sprintf_s(detail,"synthetic letterbox pixel (%u,%u) BGRA=%u,%u,%u,%u expected_gray=%d",x,y,p[0],p[1],p[2],p[3],expected);error_hr(detail,E_FAIL);return false;
+    };
+    const UINT dw=read_desc.Width,dh=UINT(double(dw)*height/width),top=(read_desc.Height-dh)/2;
+    bool valid=top>8&&dh>32;
+    if(valid){
+        // Border corners survive scaling: a center crop would lose these markers.
+        for(double x:{.01,.99})for(double y:{.02,.98})valid=gray(UINT(x*(dw-1)),top+UINT(y*(dh-1)),255,25)&&valid;
+        const int expected[2][2]={{56,112},{168,224}};
+        for(UINT y=0;y<2;++y)for(UINT x=0;x<2;++x)valid=gray(UINT((x?.75:.25)*(dw-1)),top+UINT((y?.75:.25)*(dh-1)),expected[y][x],20)&&valid;
+        for(double x:{.1,.5,.9}){
+            valid=gray(UINT(x*(dw-1)),top/2,0,8)&&valid;
+            valid=gray(UINT(x*(dw-1)),read_desc.Height-1-top/2,0,8)&&valid;
+        }
+    }
+    app->context->Unmap(readback.Get(),0);return valid?S_OK:E_FAIL;
+}
 static HRESULT probe_shape_schedule(App* app) {
     if(!app->last_frame.sample||app->shell.fullscreen)return E_FAIL;
     // Reuse a synthetic private NV12 surface. Both aspect crops remain within its real bounds.
     auto sample=app->last_frame.sample;const UINT original_w=app->last_frame.width,original_h=app->last_frame.height;
+    app->shell.reset_video();
     ComPtr<IMFMediaBuffer> buffer;CHECK(sample->GetBufferByIndex(0,&buffer));ComPtr<IMFDXGIBuffer> dxgi;CHECK(buffer.As(&dxgi));
     ComPtr<ID3D11Texture2D> texture;CHECK(dxgi->GetResource(IID_PPV_ARGS(&texture)));D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);
     const UINT edge=(std::min(desc.Width,desc.Height)/4)&~1u;if(edge<48)return E_FAIL;
-    auto settled=[&](UINT width,UINT height) {
+    auto settled=[&](UINT width,UINT height,double frame_aspect) {
         RECT client{};if(!GetClientRect(app->window,&client))return false;const int rim=PhoneShell::rim_pixels(app->shell.dpi_scale());
         const int w=client.right-2*rim,h=client.bottom-2*rim;
         return app->presented_width==width&&app->presented_height==height&&w>0&&h>0
-            &&std::abs(double(w)/h-double(width)/height)<.02;
+            &&std::abs(double(w)/h-frame_aspect)<.02;
     };
-    auto show=[&](UINT width,UINT height,double pts) -> HRESULT {
+    auto show=[&](UINT width,UINT height,double pts,double frame_aspect) -> HRESULT {
         app->queue_video_frame({sample,pts,width,height});const ULONGLONG deadline=GetTickCount64()+1000;
-        do {if(am_pump(app,20)<0)return E_FAIL;if(app->video.empty()&&settled(width,height))return S_OK;}while(GetTickCount64()<deadline);
+        do {if(am_pump(app,20)<0)return E_FAIL;if(app->video.empty()&&settled(width,height,frame_aspect))return S_OK;}while(GetTickCount64()<deadline);
         return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
     };
-    CHECK(show(edge,edge*2,now_seconds()));
+    CHECK(show(edge,edge*2,now_seconds(),.5));
     RECT portrait{};if(!GetClientRect(app->window,&portrait))return HRESULT_FROM_WIN32(GetLastError());
+    // A media-only 16:9 feed is fully drawn inside the learned portrait phone frame.
+    const UINT unit=std::min(desc.Width/16,desc.Height/9)&~1u;if(unit<2)return E_FAIL;
+    CHECK(show(unit*16,unit*9,now_seconds(),.5));
+    RECT media_client{},destination{};BOOL destination_enabled=FALSE;
+    const double media_until=now_seconds()+.05;
+    do {
+        if(am_pump(app,10)<0)return E_FAIL;
+        if(!GetClientRect(app->window,&media_client)||media_client.right!=portrait.right||media_client.bottom!=portrait.bottom)return E_FAIL;
+    } while(now_seconds()<media_until);
+    app->vcontext->VideoProcessorGetStreamDestRect(app->processor.Get(),0,&destination_enabled,&destination);
+    if(!destination_enabled||destination.top<=0||destination.bottom>=LONG(app->chrome.video_height)
+        ||destination.right<=destination.left||destination.bottom<=destination.top
+        ||std::abs(double(destination.right-destination.left)/(destination.bottom-destination.top)-16.0/9)>.02)return E_FAIL;
+    CHECK(probe_letterbox_pixels(app));
+    CHECK(show(edge,edge*2,now_seconds(),.5));
     const auto shape_changes=app->presented_shape_changes;const double future=now_seconds()+.25;
     app->queue_video_frame({sample,future,edge*2,edge});
     const double inspect_until=now_seconds()+.05;
@@ -127,15 +195,42 @@ static HRESULT probe_shape_schedule(App* app) {
         RECT before_due{};if(!GetClientRect(app->window,&before_due))return HRESULT_FROM_WIN32(GetLastError());
         if(now_seconds()>=future)return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
         if(before_due.right!=portrait.right||before_due.bottom!=portrait.bottom
-            ||app->presented_shape_changes!=shape_changes||!settled(edge,edge*2))return E_FAIL;
+            ||app->presented_shape_changes!=shape_changes||!settled(edge,edge*2,.5))return E_FAIL;
     } while(now_seconds()<inspect_until);
     if(app->source_width!=edge*2||app->source_height!=edge)return E_FAIL;
     ULONGLONG deadline=GetTickCount64()+1000;
-    while((!app->video.empty()||!settled(edge*2,edge))&&GetTickCount64()<deadline)if(am_pump(app,20)<0)return E_FAIL;
-    if(!app->video.empty()||!settled(edge*2,edge))return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
-    CHECK(show(edge,edge*2,now_seconds()));
+    while((!app->video.empty()||!settled(edge*2,edge,2))&&GetTickCount64()<deadline)if(am_pump(app,20)<0)return E_FAIL;
+    if(!app->video.empty()||!settled(edge*2,edge,2))return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+    CHECK(show(edge,edge*2,now_seconds(),.5));
     if(app->presented_shape_changes!=shape_changes+2)return E_FAIL;
-    CHECK(show(original_w,original_h,now_seconds()));return S_OK;
+    app->shell.reset_video();CHECK(show(original_w,original_h,now_seconds(),double(original_w)/original_h));return S_OK;
+}
+static HRESULT probe_interactive_video(App* app) {
+    if(!app->video_sync||!app->video.empty()||!app->last_frame.sample||app->audio_running||!app->sound.empty())return E_FAIL;
+    struct RestoreSync {App* app;~RestoreSync(){am_video_sync(app,1);}} restore{app};
+    auto sample=app->last_frame.sample;const UINT width=app->last_frame.width,height=app->last_frame.height;
+    const uint64_t before=app->presented,late=app->late_frames,skips=app->interactive_skips,lateness=app->presentation_late.count,instances=app->decoder_instances;
+    const size_t limit=app->codec==265?4:8,count=limit+2;const double began=now_seconds(),future=began+1;
+    app->shell.redraw=false;am_video_sync(app,0);
+    // Decoded-only overload: queue limits remain intact, while the freshest picture wins.
+    for(size_t i=0;i<count;++i){app->queue_video_frame({sample,future+i*.01,width-UINT((count-1-i)*2),height});if(app->video.size()>limit)return E_FAIL;}
+    ULONGLONG deadline=GetTickCount64()+700;
+    while(app->presented==before&&GetTickCount64()<deadline)if(am_pump(app,100)<0)return E_FAIL;
+    if(app->presented!=before+1||!app->video.empty()||app->presented_width!=width||now_seconds()>=future
+        ||app->interactive_skips!=skips+count-1||app->late_frames!=late||app->presentation_late.count!=lateness)return E_FAIL;
+    // Returning to audio synchronization keeps queued PTS and decoder state intact.
+    app->shell.redraw=false;const double scheduled=now_seconds()+.2;app->queue_video_frame({sample,scheduled,width,height});
+    am_video_sync(app,1);
+    if(app->video.size()!=1||app->video.front().pts!=scheduled||app->decoder_instances!=instances)return E_FAIL;
+    const uint64_t shown=app->presented;const double inspect_until=now_seconds()+.04;
+    do {
+        if(am_pump(app,5)<0)return E_FAIL;
+        if(app->video.size()!=1||app->video.front().pts!=scheduled||app->presentation_late.count!=lateness||now_seconds()>=scheduled)return E_FAIL;
+    }while(now_seconds()<inspect_until);
+    deadline=GetTickCount64()+1000;
+    while(!app->video.empty()&&GetTickCount64()<deadline)if(am_pump(app,100)<0)return E_FAIL;
+    if(app->presented<shown+1||!app->video.empty()||app->presentation_late.count!=lateness+1||app->audio_frames)return E_FAIL;
+    return S_OK;
 }
 extern "C" int am_video_probe(void* p) {
     auto app=static_cast<App*>(p);uint64_t before=app->decoder_surfaces;
@@ -151,6 +246,7 @@ extern "C" int am_video_probe(void* p) {
         if(SUCCEEDED(hr)&&(app->width!=992||app->height!=2160))hr=E_FAIL;
     }
     if(SUCCEEDED(hr))hr=probe_shape_schedule(app);
+    if(SUCCEEDED(hr))hr=probe_interactive_video(app);
     if(FAILED(hr)){error_hr("synthetic GPU probe",hr);return 0;}
     if(app->decoder_surfaces-before<60){error_hr("insufficient hardware decoder surfaces",E_FAIL);return 0;}return 1;
 }

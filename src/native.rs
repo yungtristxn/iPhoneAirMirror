@@ -33,6 +33,7 @@ unsafe extern "C" {
         height: u32,
     ) -> i32;
     fn am_video_ready(app: *mut c_void) -> i32;
+    fn am_video_sync(app: *mut c_void, synchronized: i32);
     fn am_audio(app: *mut c_void, data: *const i16, samples: u32, pts: f64) -> i32;
     fn am_reset(app: *mut c_void) -> i32;
     fn am_stats(app: *mut c_void) -> *const c_char;
@@ -109,6 +110,9 @@ impl Drop for Wake {
     }
 }
 impl App {
+    pub fn video_sync(&self, synchronized: bool) {
+        unsafe { am_video_sync(self.0.as_ptr(), synchronized.into()) }
+    }
     pub fn ui_probe(&self, directory: &str) -> Result<()> {
         let path = CString::new(directory)?;
         if unsafe { am_ui_probe(self.0.as_ptr(), path.as_ptr()) } == 0 {

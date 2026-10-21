@@ -12,6 +12,7 @@ cargo test --locked --offline
 cargo build --release --locked --offline
 ./scripts/Test-Media.ps1
 ./scripts/Test-Control.ps1 -Executable "$PWD/target/release/airmirror-lite.exe"
+python -O scripts/Test-VideoProfiles.py --display-aspect 994 2160
 ```
 
 Native ASan harness (no phone/network/UI):
@@ -318,3 +319,85 @@ Validated header dimensions and decoded/presented/window shapes are logged to
 distinguish a remaining sender-format change from a window geometry problem.
 These fields are diagnostic only; no physical-phone orientation is inferred
 from an image aspect ratio or an undocumented header.
+
+## Stable phone frame during Photos output
+
+The user confirmed lower delay on `7ac11f7`, but the photo case still switched
+the PC to landscape. The new diagnostics resolved the cause: the sender changed
+both configuration dimension pairs from 994x2160 to 3840x2160, and the decoded
+and presented dimensions agreed. The client window changed from 622x1344 to
+2385x1344. This was an actual wider feed from the phone, not a receiver pixel
+rotation or a stale window-size message.
+
+The shell now learns an orientation-independent aspect from the first presented
+frame of a session. Matching ratios within 1% may change resolution or orientation;
+different-aspect media retains the established frame dimensions. The existing GPU
+video processor fits the complete image with letterboxing. Default size continues
+to use the established frame; session-tagged messages prevent delayed prior formats
+or resets from corrupting the next session's choice. The reference does not drift
+across successive format changes.
+
+The receiver cannot identify physical phone orientation from a media feed alone.
+Start from Home or Settings to establish the screen proportions. A session begun
+directly in optimized media may establish that media's proportions instead; no
+undocumented metadata or device-model guess is used to override it.
+
+Focused hidden tests cover photo preservation in automatic/manual-sized windows,
+same-aspect rotation, resolution tolerance, reset size, and old/reordered session
+messages. The synthetic GPU test presents 16:9 content inside a retained portrait
+viewport, verifies its letterbox destination and unchanged window, then checks
+genuine reciprocal rotation. No screen capture or audio playback is involved.
+
+## Accepted Photos sizing and interactive presentation (2026-10-21)
+
+Keeping a portrait frame alone did not meet acceptance: the user reported a
+small photo, consistent with fitting the entire 3840x2160 feed inside it. The
+next experiment requested a phone-shaped 994x2160 external display. The user
+confirmed the photo then matched the phone, and the source stayed 994x2160.
+The saved local aspect now preserves this request across normal launches and
+scales to the selected resolution; it is advisory and tested on this phone.
+
+The user then reported increased delay while scrolling Photos. Logs showed
+sender timestamps up to approximately 320 ms ahead of arrival, also present in
+the earlier wide-feed session, while MF residence averaged about 0.27 ms.
+Screen-only presentation now takes the freshest decoded frame without waiting
+for that future deadline. Compressed decoding, timestamps and queue limits are
+unchanged. Negotiated audio ownership restores shared-clock scheduling before
+PCM delivery; explicit audio teardown flushes old PCM before interactive mode.
+Mute and silent audio do not disable synchronization. Native guards additionally
+restore synchronization on PCM admission and flush residual audio on disabling it.
+
+On executable SHA-256
+`A89C05D194657E7C73BB4E870C71F811DDA943B1E2B1B7074644E9172477C307`,
+56 Rust tests, fmt, strict clippy, release build, loopback control and all three
+saved-aspect profiles passed. The silent native suite produced 100 decoder-bound
+GPU surfaces, two decoder instances and 125 presentations, with audio_samples=0.
+The synthetic pixel check copies only a generated marker image before Present;
+it verifies all corner markers, quadrant ordering and opaque letterbox margins.
+Timing tests cover prompt screen-only display and restoration of future-frame
+deadlines. The isolated worker decoded 360 AAC-ELD frames with repeat hashes and
+sandbox checks, without submitting PCM to WASAPI. No Computer Use was used.
+
+The final packaged build loaded `local/display-aspect.txt` with no command-line
+width override. The user reported **responsive and correctly sized** after the
+requested Photos scrolling, Settings return and brief rotation check. The log
+shows HEVC 994x2160 throughout, 1,156 decoder surfaces, 1,131 presentations, zero
+late drops and 26 interactive superseded-frame skips. It does not independently
+show a landscape stream during that requested rotation check. First presentation
+was 177.9 ms after session claim. Before audio activation, receive-to-submit
+averaged 0.052 ms and MF residence 0.222 ms; these are local pipeline observations,
+not glass-to-glass latency or display scanout measurements.
+
+During this user interaction, the phone independently negotiated AAC-ELD. The log
+shows video_sync=0 -> 1, 147,068 audio samples, then explicit audio teardown and
+video_sync=0 while keeping screen mirroring. This is real transport/mode-transition
+evidence, not a user-confirmed sound-quality or A/V-sync result. No sound playback
+was requested, and all automated tests were silent. The app subsequently closed
+with all session threads joined. Older five-minute A/V acceptance remains separate.
+
+Evidence: `work/photo-final-{tests,clippy,build,media,profiles,control}.log`,
+`local/{media-test,control-test,profile-test}/result.json` and the bounded ignored
+package log. All test summaries match the final executable hash. No sender media,
+keys or raw private logs are committed. Current physical A/V synchronization,
+numeric end-to-end latency, extended drift and adverse-network recovery remain
+outside this completed Photos check.

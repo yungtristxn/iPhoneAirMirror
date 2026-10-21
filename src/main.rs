@@ -2,6 +2,7 @@
 mod native;
 mod protocol;
 mod runtime;
+mod settings;
 use anyhow::{Context, Result, bail};
 use std::{net::IpAddr, path::PathBuf};
 fn main() {
@@ -25,13 +26,14 @@ fn run() -> Result<()> {
     }
     if args.iter().any(|s| s == "--help") {
         println!(
-            "AirMirrorLite\n  --ui-test           silent native UI and GPU tests\n  --self-test         full media tests, including an audible test tone\n  --ui-test-dir PATH  with --ui-test or --self-test, render idle/control artwork diagnostics\n  --ui-preview        synthetic video preview; no discovery or network\n  --no-discovery      run without DNS-SD (local integration tests)\n  --fps N            request 30 or 60 fps (default: 60)\n  --latency-ms N     advertised output latency, 60..250 ms (default: 80)\n  --resolution N     request 1080, 1440 or 2160 lines (default: highest native support)\n  --bind IP           bind a specific local IPv4 address (default: 0.0.0.0)\n  --port PORT         control port (default: 7000)\n  --seconds N         stop after N seconds (validation)\n  --data-dir PATH     receiver identity and bounded log (default: EXE/local)\n  --hidden            hide window during automated validation\n\nWindow: drag to move; bottom-right resize; 0 default size; C hide/show controls; M mute; Up/Down volume; F11 fullscreen; D disconnect; Escape leaves fullscreen/disconnects; close exits."
+            "AirMirrorLite\n  --ui-test           silent native UI and GPU tests\n  --self-test         full media tests, including an audible test tone\n  --ui-test-dir PATH  with --ui-test or --self-test, render idle/control artwork diagnostics\n  --ui-preview        synthetic video preview; no discovery or network\n  --no-discovery      run without DNS-SD (local integration tests)\n  --fps N            request 30 or 60 fps (default: 60)\n  --latency-ms N     advertised output latency, 60..250 ms (default: 80)\n  --resolution N     request 1080, 1440 or 2160 lines (default: highest native support)\n  --display-width N  display width hint override, even pixels\n  --bind IP           bind a specific local IPv4 address (default: 0.0.0.0)\n  --port PORT         control port (default: 7000)\n  --seconds N         stop after N seconds (validation)\n  --data-dir PATH     receiver identity and bounded log (default: EXE/local)\n  --hidden            hide window during automated validation\n\nWindow: drag to move; bottom-right resize; 0 default size; C hide/show controls; M mute; Up/Down volume; F11 fullscreen; D disconnect; Escape leaves fullscreen/disconnects; close exits."
         );
         return Ok(());
     }
     let mut bind: IpAddr = "0.0.0.0".parse()?;
     let mut port = 7000;
     let mut resolution = None;
+    let mut display_width = None;
     let mut fps = 60;
     let mut playout_ms = protocol::clock::DEFAULT_PLAYOUT_MS;
     let mut seconds = None;
@@ -79,6 +81,18 @@ fn run() -> Result<()> {
                     "resolution must be 1080, 1440 or 2160"
                 );
                 resolution = Some(requested);
+            }
+            "--display-width" => {
+                i += 1;
+                let requested = args
+                    .get(i)
+                    .context("--display-width requires an even pixel width")?
+                    .parse::<u32>()?;
+                anyhow::ensure!(
+                    (48..=3840).contains(&requested) && requested.is_multiple_of(2),
+                    "display width must be even and between 48 and 3840 pixels"
+                );
+                display_width = Some(requested);
             }
             "--port" => {
                 i += 1;
@@ -169,11 +183,16 @@ fn run() -> Result<()> {
         }
         return Ok(());
     }
-    let profile = protocol::VideoProfile::new(
+    let mut profile = protocol::VideoProfile::new(
         resolution.unwrap_or(if app.hevc_available() { 2160 } else { 1080 }),
         app.hevc_available(),
     )?
     .with_fps(fps)?;
+    if let Some(width) = display_width {
+        profile = profile.with_display_width(width)?;
+    } else if let Some(aspect) = settings::load_display_aspect(&data.join("display-aspect.txt"))? {
+        profile = profile.with_display_width(aspect.width_for(profile.height)?)?;
+    }
     let mut receiver = runtime::ReceiverApp::new(
         &data,
         bind,
