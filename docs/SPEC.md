@@ -8,10 +8,12 @@ Confirmed 2026-10-21: the user wants their own minimal, efficient Windows AirPla
   mirroring. Default request 3840x2160/up-to-60 when native HEVC/GPU support exists;
   optional 1440/up-to-60 and H.264 1080/60. Sender chooses actual picture dimensions.
   Correct aspect ratio and portrait/landscape changes remain required.
-- Synchronized phone audio through Windows speakers using WASAPI. A common,
-  bounded playout target defaults to 80 ms; 60–250 ms is configurable. Keep latency
-  advertisements and audio/video clocks consistent. Do not claim this as measured
-  end-to-end latency. Optional 30 fps provides the earlier bandwidth tradeoff.
+- Synchronized phone audio through Windows speakers using WASAPI. Audio and video
+  follow the sender's presentation timestamps on one mapped clock. Advertised
+  output latency defaults to 80 ms; 60–250 ms is configurable and is not added
+  again to those timestamps. Keep advertisements consistent across /info and
+  RECORD. Do not claim the hint as measured end-to-end latency. Optional 30 fps
+  provides the earlier bandwidth tradeoff.
 - One active sender; a second sender must not silently replace the current one.
 - One frameless, rounded phone view, fitted to the actual mirrored video aspect.
   Drag the picture to move; bottom-right grip resizes proportionally. Default-size

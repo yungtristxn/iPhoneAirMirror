@@ -196,3 +196,34 @@ Overlapped operations are cancelled and completed before their buffers leave
 scope. Fixed IPC scratch storage avoids repeated allocations; returned PCM
 still owns its bounded queue entry. None of these local changes establishes
 numeric phone-to-screen latency.
+
+### Frame-deadline scheduling
+
+[Windows high-resolution waitable timers](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createwaitabletimerexw)
+are available from Windows 10 version 1803. Use a per-instance one-shot timer
+for the next frame's PTS, alongside audio, media-arrival and UI wake events.
+The display-slot event is included only when useful; consuming it reserves that
+slot for the ensuing draw. Older systems can use a regular waitable timer.
+This avoids fixed polling and does not change global timer resolution.
+
+[The codec low-latency API](https://learn.microsoft.com/en-us/windows/win32/medfound/codecapi-avlowlatencymode)
+has an H.264 decoder exception: its VARIANT is VT_UI4; HEVC uses VT_BOOL.
+Read back the codec and MF attribute settings rather than equating a fast submit
+call with low pipeline latency. Track timestamp age at receipt, host queue time,
+output readiness and presentation submission lateness separately. These are
+receiver-stage measurements; they do not measure physical capture/display delay.
+
+### Presentation timestamps already include the sender's scheduling
+
+The [reverse-engineered stream format](https://openairplay.github.io/airplay-spec/screen_mirroring/stream_packets.html)
+identifies the video NTP field as a presentation timestamp. The pinned UxPlay
+implementation converts remote to local clock time and submits it directly to
+the synchronized renderer; audio uses its RTP/NTP anchor on the same clock.
+It does not add the advertised receiver latency a second time.
+
+The live 60 ms trial showed timestamps about 75–85 ms ahead of receipt, followed
+by another 60 ms of receiver delay. Removing that unconditional common offset
+from both audio and video preserves their relative timing while avoiding the
+duplicate wait. The --latency-ms option remains an advertisement to the sender;
+normal deadline scheduling and audio endpoint compensation remain. This corrects
+the earlier interpretation of the setting as an extra local playout buffer.

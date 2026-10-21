@@ -315,6 +315,23 @@ fn wait_video_clock(
         thread::sleep(Duration::from_millis(5));
     }
 }
+fn configuration_header_size(header: &[u8], offset: usize) -> Option<(u32, u32)> {
+    let bytes = header.get(offset..offset.checked_add(8)?)?;
+    let width = f32::from_le_bytes(bytes[..4].try_into().ok()?);
+    let height = f32::from_le_bytes(bytes[4..].try_into().ok()?);
+    if [width, height]
+        .iter()
+        .all(|value| value.is_finite() && (48.0..=3840.0).contains(value) && value.fract() == 0.0)
+    {
+        Some((width as u32, height as u32))
+    } else {
+        None
+    }
+}
+fn size_label(size: Option<(u32, u32)>) -> String {
+    size.map(|(width, height)| format!("{width}x{height}"))
+        .unwrap_or_else(|| "unknown".into())
+}
 #[allow(clippy::too_many_arguments)]
 fn video_loop(
     listener: TcpListener,
@@ -383,6 +400,7 @@ fn video_loop(
         )? {
             break;
         }
+        let payload_received_at = native::now();
         match kind {
             0 => {
                 cipher.apply_keystream(&mut payload);
@@ -402,6 +420,7 @@ fn video_loop(
                     joined.extend_from_slice(&payload);
                     payload = joined;
                 }
+                let ready_at = native::now();
                 let raw = u64::from_le_bytes(header[8..16].try_into()?);
                 let Some(pts) = wait_video_clock(&clock, raw, &stop, Duration::from_millis(1500))?
                 else {
@@ -418,6 +437,8 @@ fn video_loop(
                     height: dimensions.1,
                     data: payload,
                     pts,
+                    payload_received_at,
+                    ready_at,
                 })?;
             }
             1 => {
@@ -434,12 +455,24 @@ fn video_loop(
                     ensure!(shared.video_profile.hevc, "HEVC not advertised");
                     let parsed = super::hevc::config(&payload)?;
                     dimensions = (parsed.width, parsed.height);
+                    shared.log(&format!(
+                        "HEVC SPS max_num_reorder_pics={}",
+                        parsed.max_num_reorder_pics
+                    ));
                     config = parsed.annex_b;
                 } else {
                     config = h264::avcc_config(&payload)?;
                 }
                 codec = Some(next);
                 shared.log(&format!("H.{next} configuration accepted"));
+                // These observed header fields are diagnostics only. Codec SPS
+                // dimensions remain authoritative for video; none of these fields
+                // establish the phone's physical orientation.
+                shared.log(&format!(
+                    "video configuration header source={} display={} (diagnostic only)",
+                    size_label(configuration_header_size(&header, 40)),
+                    size_label(configuration_header_size(&header, 56)),
+                ));
                 shared.send_video(Media::VideoConfig {
                     epoch,
                     codec: next,
@@ -926,5 +959,30 @@ mod tests {
         assert!(audio_packet(&p).is_ok());
         p[0] = 0x90;
         assert!(audio_packet(&p).is_err());
+    }
+    #[test]
+    fn configuration_header_sizes_are_bounded_optional_diagnostics() {
+        let mut header = [0; 128];
+        header[40..44].copy_from_slice(&994f32.to_le_bytes());
+        header[44..48].copy_from_slice(&2160f32.to_le_bytes());
+        header[56..60].copy_from_slice(&2160f32.to_le_bytes());
+        header[60..64].copy_from_slice(&994f32.to_le_bytes());
+        assert_eq!(configuration_header_size(&header, 40), Some((994, 2160)));
+        assert_eq!(configuration_header_size(&header, 56), Some((2160, 994)));
+        for invalid in [f32::NAN, f32::INFINITY, -1.0, 0.0, 47.0, 994.5, 3841.0] {
+            header[40..44].copy_from_slice(&invalid.to_le_bytes());
+            assert_eq!(configuration_header_size(&header, 40), None);
+            assert_eq!(configuration_header_size(&header, 56), Some((2160, 994)));
+        }
+        assert_eq!(configuration_header_size(&header[..47], 40), None);
+        assert_eq!(configuration_header_size(&header, usize::MAX), None);
+        assert_eq!(size_label(None), "unknown");
+        for valid in [48f32, 3840f32] {
+            header[40..44].copy_from_slice(&valid.to_le_bytes());
+            assert_eq!(
+                configuration_header_size(&header, 40),
+                Some((valid as u32, 2160))
+            );
+        }
     }
 }

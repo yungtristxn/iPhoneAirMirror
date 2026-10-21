@@ -1,7 +1,32 @@
 // Diagnostic only: OS H.264 encoder makes synthetic bars in memory.
 // No capture, recording or network traffic. Exercise the actual decoder/render path.
+static HRESULT probe_media_wait(App* app) {
+    Handle wake,audio,slot;wake.h=CreateEventW(nullptr,FALSE,FALSE,nullptr);audio.h=CreateEventW(nullptr,FALSE,FALSE,nullptr);slot.h=CreateEventW(nullptr,FALSE,TRUE,nullptr);
+    if(!wake.h||!audio.h||!slot.h)return HRESULT_FROM_WIN32(GetLastError());
+    struct Restore {
+        App* app;HANDLE wake,audio,slot;bool reserved,redraw;double retry;
+        ~Restore(){app->wake.h=wake;app->audio_event.h=audio;app->video_event.h=slot;app->video_slot_reserved=reserved;app->shell.redraw=redraw;app->present_retry_at=retry;app->video.clear();CancelWaitableTimer(app->presentation_timer.h);}
+    } restore{app,app->wake.h,app->audio_event.h,app->video_event.h,app->video_slot_reserved,app->shell.redraw,app->present_retry_at};
+    app->wake.h=wake.h;app->audio_event.h=audio.h;app->video_event.h=slot.h;app->video_slot_reserved=false;app->shell.redraw=false;app->present_retry_at=0;
+    double began=now_seconds();CHECK(app->wait_for_media(30));
+    if(now_seconds()-began<.015||app->video_slot_reserved||WaitForSingleObject(slot.h,0)!=WAIT_OBJECT_0)return E_FAIL;
+    const double due=now_seconds()+.04;app->video.push_back({{},due,16,16});
+    CHECK(app->wait_for_media(0));
+    if(app->video_slot_reserved)return E_FAIL;
+    CHECK(app->wait_for_media(1000));if(now_seconds()<due-.001||app->video_slot_reserved)return E_FAIL;
+    while(now_seconds()<due)CHECK(app->wait_for_media(1000));
+    // A due-frame slot signal must be transferred to tick, never consumed twice.
+    SetEvent(slot.h);CHECK(app->wait_for_media(1000));
+    if(!app->video_slot_reserved||WaitForSingleObject(slot.h,0)!=WAIT_TIMEOUT)return E_FAIL;
+    // Audio/close notifications interrupt a future video deadline.
+    app->video_slot_reserved=false;app->video.front().pts=now_seconds()+1;SetEvent(audio.h);CHECK(app->wait_for_media(1000));
+    if(WaitForSingleObject(audio.h,0)!=WAIT_TIMEOUT)return E_FAIL;
+    SetEvent(wake.h);CHECK(app->wait_for_media(1000));if(WaitForSingleObject(wake.h,0)!=WAIT_TIMEOUT)return E_FAIL;
+    return S_OK;
+}
 static HRESULT probe_video(App* app, UINT width, UINT height,UINT codec=264) {
     CHECK(app->init_decoder(codec,width,height));
+    if(app->low_latency_attribute!=1||(SUCCEEDED(app->low_latency_get)&&app->low_latency_value!=1))return E_FAIL;
     ComPtr<IMFTransform> enc;if(codec==265){CHECK(create_hevc_transform(true,&enc));}else{CHECK(CoCreateInstance(CLSID_CMSH264EncoderMFT,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&enc)));}
     ComPtr<IMFMediaType> output; CHECK(MFCreateMediaType(&output));
     CHECK(output->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video)); CHECK(output->SetGUID(MF_MT_SUBTYPE, codec==265?MFVideoFormat_HEVC:MFVideoFormat_H264));
@@ -57,7 +82,60 @@ static HRESULT probe_video(App* app, UINT width, UINT height,UINT codec=264) {
     if((GetWindowLongPtrW(app->window,GWL_STYLE)&WS_CAPTION)||app->shell.fullscreen)return E_FAIL;
     CHECK(redraw_paused());
     if(!SetWindowPos(app->window,nullptr,original.left,original.top,original.right-original.left,original.bottom-original.top,SWP_NOZORDER|SWP_NOACTIVATE))return HRESULT_FROM_WIN32(GetLastError());
-    CHECK(redraw_paused());return S_OK;
+    CHECK(redraw_paused());
+    // A queued future picture cannot be shown early, and wait0 still services already-due work.
+    app->shell.redraw=false;const auto before=app->presented;const double due=now_seconds()+.06;
+    app->video.push_back({app->last_frame.sample,due,app->last_frame.width,app->last_frame.height});
+    if(am_pump(app,0)<0)return E_FAIL;
+    if(app->presented>before&&now_seconds()<due)return E_FAIL;
+    ULONGLONG deadline=GetTickCount64()+1000;
+    while(app->presented==before&&GetTickCount64()<deadline)if(am_pump(app,100)<0)return E_FAIL;
+    if(app->presented!=before+1||!app->video.empty())return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+    const auto late=app->late_frames,shown=app->presented;const double now=now_seconds();
+    for(int i=0;i<3;++i)app->video.push_back({app->last_frame.sample,now-.03+i*.01,app->last_frame.width,app->last_frame.height});
+    if(am_pump(app,0)<0)return E_FAIL;
+    deadline=GetTickCount64()+1000;
+    while(app->presented==shown&&GetTickCount64()<deadline)if(am_pump(app,100)<0)return E_FAIL;
+    if(app->presented!=shown+1||!app->video.empty()||app->late_frames!=late+2)return E_FAIL;
+    return S_OK;
+}
+static HRESULT probe_shape_schedule(App* app) {
+    if(!app->last_frame.sample||app->shell.fullscreen)return E_FAIL;
+    // Reuse a synthetic private NV12 surface. Both aspect crops remain within its real bounds.
+    auto sample=app->last_frame.sample;const UINT original_w=app->last_frame.width,original_h=app->last_frame.height;
+    ComPtr<IMFMediaBuffer> buffer;CHECK(sample->GetBufferByIndex(0,&buffer));ComPtr<IMFDXGIBuffer> dxgi;CHECK(buffer.As(&dxgi));
+    ComPtr<ID3D11Texture2D> texture;CHECK(dxgi->GetResource(IID_PPV_ARGS(&texture)));D3D11_TEXTURE2D_DESC desc{};texture->GetDesc(&desc);
+    const UINT edge=(std::min(desc.Width,desc.Height)/4)&~1u;if(edge<48)return E_FAIL;
+    auto settled=[&](UINT width,UINT height) {
+        RECT client{};if(!GetClientRect(app->window,&client))return false;const int rim=PhoneShell::rim_pixels(app->shell.dpi_scale());
+        const int w=client.right-2*rim,h=client.bottom-2*rim;
+        return app->presented_width==width&&app->presented_height==height&&w>0&&h>0
+            &&std::abs(double(w)/h-double(width)/height)<.02;
+    };
+    auto show=[&](UINT width,UINT height,double pts) -> HRESULT {
+        app->queue_video_frame({sample,pts,width,height});const ULONGLONG deadline=GetTickCount64()+1000;
+        do {if(am_pump(app,20)<0)return E_FAIL;if(app->video.empty()&&settled(width,height))return S_OK;}while(GetTickCount64()<deadline);
+        return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+    };
+    CHECK(show(edge,edge*2,now_seconds()));
+    RECT portrait{};if(!GetClientRect(app->window,&portrait))return HRESULT_FROM_WIN32(GetLastError());
+    const auto shape_changes=app->presented_shape_changes;const double future=now_seconds()+.25;
+    app->queue_video_frame({sample,future,edge*2,edge});
+    const double inspect_until=now_seconds()+.05;
+    do {
+        if(am_pump(app,5)<0)return E_FAIL;
+        RECT before_due{};if(!GetClientRect(app->window,&before_due))return HRESULT_FROM_WIN32(GetLastError());
+        if(now_seconds()>=future)return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+        if(before_due.right!=portrait.right||before_due.bottom!=portrait.bottom
+            ||app->presented_shape_changes!=shape_changes||!settled(edge,edge*2))return E_FAIL;
+    } while(now_seconds()<inspect_until);
+    if(app->source_width!=edge*2||app->source_height!=edge)return E_FAIL;
+    ULONGLONG deadline=GetTickCount64()+1000;
+    while((!app->video.empty()||!settled(edge*2,edge))&&GetTickCount64()<deadline)if(am_pump(app,20)<0)return E_FAIL;
+    if(!app->video.empty()||!settled(edge*2,edge))return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+    CHECK(show(edge,edge*2,now_seconds()));
+    if(app->presented_shape_changes!=shape_changes+2)return E_FAIL;
+    CHECK(show(original_w,original_h,now_seconds()));return S_OK;
 }
 extern "C" int am_video_probe(void* p) {
     auto app=static_cast<App*>(p);uint64_t before=app->decoder_surfaces;
@@ -72,6 +150,7 @@ extern "C" int am_video_probe(void* p) {
         if(SUCCEEDED(hr))hr=probe_video(app,992,2160,265);
         if(SUCCEEDED(hr)&&(app->width!=992||app->height!=2160))hr=E_FAIL;
     }
+    if(SUCCEEDED(hr))hr=probe_shape_schedule(app);
     if(FAILED(hr)){error_hr("synthetic GPU probe",hr);return 0;}
     if(app->decoder_surfaces-before<60){error_hr("insufficient hardware decoder surfaces",E_FAIL);return 0;}return 1;
 }
@@ -81,6 +160,7 @@ extern "C" int am_ui_probe(void* p,const char* directory) {
         if(am_discovery_status(&d)!=1||am_discovery_status(&d)!=1){error_hr("discovery completion must remain signaled",E_FAIL);return 0;}
         ResetEvent(d.done.h);d.status=ERROR_IO_PENDING;if(am_discovery_status(&d)!=0)return 0;}
     auto app=static_cast<App*>(p);
+    HRESULT wait_probe=probe_media_wait(app);if(FAILED(wait_probe)){error_hr("deadline-driven media wait regression",wait_probe);return 0;}
     // Exercise transport deadlines with local pipe ends that deliberately never drain/reply.
     // No worker codec, audio endpoint, desktop input or network is involved.
     {

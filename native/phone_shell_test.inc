@@ -75,6 +75,26 @@ HRESULT PhoneShell::test_on_ui_thread(const wchar_t* directory){
     click(2);UI_REQUIRE(fullscreen);main_proc(window,WM_FORMAT,1920,1080);key(VK_ESCAPE);
     UI_REQUIRE(!fullscreen&&std::abs(ratio()-1920.0f/1080)<.01f);
     UI_REQUIRE((GetWindowLongPtrW(window,GWL_STYLE)&WS_CAPTION)==0);
+    // Rapid Photos-style format changes must restore the final portrait shape
+    // without pressing Default size, including the user-sized/fullscreen paths.
+    for(bool manual:{false,true}){
+        main_proc(window,WM_FORMAT,994,2160);default_size();user_sized_=manual;
+        for(auto format:{std::pair<UINT,UINT>{2160,994},{994,2160},{2160,994},{994,2160}}){
+            main_proc(window,WM_FORMAT,format.first,format.second);
+            UI_REQUIRE(std::abs(ratio()-float(format.first)/format.second)<.01f);
+            UI_REQUIRE(user_sized_==manual);
+        }
+        click(2);UI_REQUIRE(fullscreen);main_proc(window,WM_FORMAT,2160,994);main_proc(window,WM_FORMAT,994,2160);key(VK_ESCAPE);
+        UI_REQUIRE(!fullscreen&&std::abs(ratio()-994.0f/2160)<.01f&&user_sized_==manual);
+        // Exercise a normal uniformly scaled suggestion without changing the
+        // desktop DPI. This checks handler geometry, not multi-monitor evidence.
+        RECT suggestion;GetWindowRect(window,&suggestion);
+        suggestion.right=suggestion.left+(suggestion.right-suggestion.left)*4/5;
+        suggestion.bottom=suggestion.top+(suggestion.bottom-suggestion.top)*4/5;
+        UINT dpi=GetDpiForWindow(window);main_proc(window,WM_DPICHANGED,MAKELONG(dpi,dpi),reinterpret_cast<LPARAM>(&suggestion));
+        GetClientRect(window,&client);const int rim=2*rim_pixels(dpi_scale());
+        UI_REQUIRE(client.right<client.bottom&&std::abs((client.right-rim)-994.0f/2160*(client.bottom-rim))<=2.0f&&user_sized_==manual);
+    }
     RECT work=work_area(window);
     for(POINT origin:{POINT{work.left,work.top},POINT{work.right-400,work.top},POINT{work.right-400,work.bottom-200}}){
         dismiss_volume();SetWindowPos(window,nullptr,origin.x,origin.y,328,188,SWP_NOZORDER|SWP_NOACTIVATE);

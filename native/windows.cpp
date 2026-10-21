@@ -67,9 +67,14 @@ static HRESULT create_hevc_transform(bool encoder,IMFTransform** transform) {
 }
 struct VideoFrame { ComPtr<IMFSample> sample; double pts; UINT width; UINT height; };
 struct AudioFrame { std::vector<int16_t> pcm; size_t pos = 0; double pts = 0; };
+struct StageTiming {
+    uint64_t count=0;double total=0,minimum=0,maximum=0;
+    void add(double value){if(!count)minimum=maximum=value;else {minimum=std::min(minimum,value);maximum=std::max(maximum,value);}++count;total+=value;}
+    double average()const{return count?total/count:0;}
+};
 #include "phone_compositor.h"
 struct App {
-    HWND window = nullptr; Handle wake, audio_event, video_event;
+    HWND window = nullptr; Handle wake, audio_event, video_event, presentation_timer;
     PhoneShell shell;
     bool hevc_available=false,decoder_ready=false;UINT codec=264,expected_fps=60;
     PhoneCompositor chrome;
@@ -79,16 +84,25 @@ struct App {
     ComPtr<ID3D11VideoProcessorEnumerator> venum; ComPtr<ID3D11VideoProcessor> processor;
     ComPtr<IAudioClient> audio; ComPtr<IAudioRenderClient> render;
     UINT32 audio_capacity = 0; double audio_latency = 0; bool audio_running = false;
-    UINT width = 0, height = 0, vieww = 0, viewh = 0;
+    UINT width = 0, height = 0, vieww = 0, viewh = 0,processor_width=0,processor_height=0;
+    UINT source_width=0,source_height=0,presented_width=0,presented_height=0;
+    uint64_t source_shape_changes=0,presented_shape_changes=0;
     std::deque<VideoFrame> video; std::deque<AudioFrame> sound;
     VideoFrame last_frame{};
     bool video_slot_reserved=false;
+    bool high_resolution_timer=false;
+    double present_retry_at=0;
     ComPtr<ID3D11Texture2D> paused_texture;
     uint64_t decoder_instances=0;
     uint64_t decoded = 0, presented = 0, gpu_frames = 0, decoder_surfaces = 0, late_frames = 0, audio_frames = 0, underruns = 0;
     size_t video_high_water=0,audio_high_water=0;
     uint64_t video_waits=0,present_busy=0,submit_calls=0;
     double submit_seconds=0,submit_max_seconds=0,present_seconds=0,present_max_seconds=0;
+    StageTiming output_ahead,presentation_late,decoder_residence;
+    struct DecodePending {LONGLONG pts=0;double began=0;bool active=false;};
+    std::array<DecodePending,32> decode_pending{};
+    HRESULT low_latency_set=E_NOINTERFACE,low_latency_get=E_NOINTERFACE;
+    int low_latency_value=-1,low_latency_attribute=-1;
     std::string adapter; bool com = false, mf = false;
     ~App() {
         if (audio) audio->Stop();
@@ -104,6 +118,10 @@ struct App {
         wake.h = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         audio_event.h = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!wake.h || !audio_event.h) return HRESULT_FROM_WIN32(GetLastError());
+        presentation_timer.h=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_MODIFY_STATE|SYNCHRONIZE);
+        high_resolution_timer=presentation_timer.h!=nullptr;
+        if(!presentation_timer.h)presentation_timer.h=CreateWaitableTimerW(nullptr,FALSE,nullptr);
+        if(!presentation_timer.h)return HRESULT_FROM_WIN32(GetLastError());
         CHECK(shell.create(wake.h,hidden));window=shell.window;
         D3D_FEATURE_LEVEL level;
         CHECK(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
@@ -151,6 +169,7 @@ struct App {
     }
     void reset_video_decoder(){
         video.clear();last_frame.sample.Reset();paused_texture.Reset();processor.Reset();venum.Reset();
+        decode_pending={};present_retry_at=0;CancelWaitableTimer(presentation_timer.h);
         if(decoder){
             if(decoder_ready){decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM,0);decoder->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH,0);decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING,0);}
             HRESULT out=decoder->SetOutputType(0,nullptr,0),in=decoder->SetInputType(0,nullptr,0);
@@ -170,9 +189,11 @@ struct App {
         UINT32 aware = 0; CHECK(attributes->GetUINT32(MF_SA_D3D11_AWARE, &aware)); if (!aware) return E_NOINTERFACE;
         CHECK(attributes->SetUINT32(MF_LOW_LATENCY, TRUE));
         CHECK(decoder->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, reinterpret_cast<ULONG_PTR>(manager.Get())));
+        low_latency_set=low_latency_get=E_NOINTERFACE;low_latency_value=low_latency_attribute=-1;
         ComPtr<ICodecAPI> codec_api; if (SUCCEEDED(decoder.As(&codec_api))) {
-            VARIANT v; VariantInit(&v); v.vt = VT_BOOL; v.boolVal = VARIANT_TRUE;
-            codec_api->SetValue(&CODECAPI_AVLowLatencyMode, &v);
+            VARIANT v; VariantInit(&v);
+            if(codec==264){v.vt=VT_UI4;v.ulVal=TRUE;}else {v.vt=VT_BOOL;v.boolVal=VARIANT_TRUE;}
+            low_latency_set=codec_api->SetValue(&CODECAPI_AVLowLatencyMode, &v);
             v.vt = VT_UI4; v.ulVal = this->codec==265?3840:1920; codec_api->SetValue(&CODECAPI_AVDecVideoMaxCodedWidth, &v);
             v.ulVal = this->codec==265?2176:1920; codec_api->SetValue(&CODECAPI_AVDecVideoMaxCodedHeight, &v);
         }
@@ -185,7 +206,11 @@ struct App {
         }
         CHECK(decoder->SetInputType(0, type.Get(), 0)); CHECK(set_output());
         CHECK(decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0));
-        CHECK(decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0));decoder_ready=true; return S_OK;
+        CHECK(decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0));
+        UINT32 enabled=0;if(SUCCEEDED(attributes->GetUINT32(MF_LOW_LATENCY,&enabled)))low_latency_attribute=enabled!=0;
+        if(codec_api){VARIANT value;VariantInit(&value);low_latency_get=codec_api->GetValue(&CODECAPI_AVLowLatencyMode,&value);
+            if(SUCCEEDED(low_latency_get)){if(value.vt==VT_UI4)low_latency_value=value.ulVal!=0;else if(value.vt==VT_BOOL)low_latency_value=value.boolVal!=VARIANT_FALSE;}VariantClear(&value);}
+        decoder_ready=true; return S_OK;
     }
     HRESULT set_output() {
         for (DWORD i = 0; i < 32; ++i) {
@@ -205,6 +230,11 @@ struct App {
         }
         return MF_E_INVALIDMEDIATYPE;
     }
+    void queue_video_frame(VideoFrame frame) {
+        if(source_width!=frame.width||source_height!=frame.height){source_width=frame.width;source_height=frame.height;++source_shape_changes;}
+        if(video.size()==(codec==265?4:8)){video.pop_front();++late_frames;}
+        video.push_back(std::move(frame));video_high_water=std::max(video_high_water,video.size());
+    }
     HRESULT output() {
         for (int i = 0; i < 32; ++i) {
             MFT_OUTPUT_DATA_BUFFER out{}; DWORD status = 0;
@@ -223,10 +253,9 @@ struct App {
             if (!(texture_desc.BindFlags & D3D11_BIND_DECODER))return E_NOINTERFACE;
             ++decoder_surfaces;
             ++gpu_frames; ++decoded;
-            if (video.size() == (codec==265?4:8)) { video.pop_front(); ++late_frames; }
-            shell.video_size(width,height);
-            video.push_back({s, pts / 1e7, width, height});
-            video_high_water=std::max(video_high_water,video.size());
+            const double ready=now_seconds();output_ahead.add(pts/1e7-ready);
+            for(auto& pending:decode_pending)if(pending.active&&pending.pts==pts){decoder_residence.add(ready-pending.began);pending.active=false;break;}
+            queue_video_frame({s,pts/1e7,width,height});
         }
         return E_UNEXPECTED;
     }
@@ -238,12 +267,17 @@ struct App {
         CHECK(buffer->Lock(&p, nullptr, nullptr)); memcpy(p, bytes, len); buffer->Unlock(); CHECK(buffer->SetCurrentLength(len));
         ComPtr<IMFSample> sample; CHECK(MFCreateSample(&sample)); CHECK(sample->AddBuffer(buffer.Get()));
         CHECK(sample->SetSampleTime((LONGLONG)(pts*1e7))); CHECK(sample->SetSampleDuration(10000000/expected_fps));
-        HRESULT hr = decoder->ProcessInput(0, sample.Get(), 0);
-        if (hr == MF_E_NOTACCEPTING) { CHECK(output()); hr = decoder->ProcessInput(0, sample.Get(), 0); }
-        CHECK(hr);CHECK(output());
+        double accepted=now_seconds();HRESULT hr = decoder->ProcessInput(0, sample.Get(), 0);
+        if (hr == MF_E_NOTACCEPTING) { CHECK(output());accepted=now_seconds();hr = decoder->ProcessInput(0, sample.Get(), 0); }
+        CHECK(hr);
+        auto slot=std::find_if(decode_pending.begin(),decode_pending.end(),[](const DecodePending& entry){return !entry.active;});
+        if(slot==decode_pending.end())slot=std::min_element(decode_pending.begin(),decode_pending.end(),[](const DecodePending& a,const DecodePending& b){return a.began<b.began;});
+        *slot={LONGLONG(pts*1e7),accepted,true};CHECK(output());
         const double elapsed=now_seconds()-began;++submit_calls;submit_seconds+=elapsed;submit_max_seconds=std::max(submit_max_seconds,elapsed);return S_OK;
     }
     HRESULT draw(IMFSample* frame, UINT width, UINT height) {
+        // Decoder output can run ahead of its PTS. Publish only the frame selected for display.
+        shell.video_size(width,height);
         CHECK(chrome.layout(shell));UINT vw=chrome.video_width,vh=chrome.video_height;
         if (!vw || !vh || !width || !height) return S_OK;
         if (vieww != vw || viewh != vh) {
@@ -251,11 +285,13 @@ struct App {
         }
         ComPtr<IMFMediaBuffer> b; CHECK(frame->GetBufferByIndex(0, &b)); ComPtr<IMFDXGIBuffer> dxgi; CHECK(b.As(&dxgi));
         ComPtr<ID3D11Texture2D> texture; CHECK(dxgi->GetResource(IID_PPV_ARGS(&texture))); UINT slice; CHECK(dxgi->GetSubresourceIndex(&slice));
+        if(processor&&(processor_width!=width||processor_height!=height)){processor.Reset();venum.Reset();}
         if (!processor) {
             D3D11_VIDEO_PROCESSOR_CONTENT_DESC desc{}; desc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
             desc.InputWidth = width; desc.InputHeight = height; desc.OutputWidth = vw; desc.OutputHeight = vh;
             desc.InputFrameRate = {60, 1}; desc.OutputFrameRate = {60, 1}; desc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
             CHECK(vdevice->CreateVideoProcessorEnumerator(&desc, &venum)); CHECK(vdevice->CreateVideoProcessor(venum.Get(), 0, &processor));
+            processor_width=width;processor_height=height;
         }
         D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC iv{}; iv.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D; iv.Texture2D.ArraySlice = slice;
         ComPtr<ID3D11VideoProcessorInputView> input; CHECK(vdevice->CreateVideoProcessorInputView(texture.Get(), venum.Get(), &iv, &input));
@@ -291,16 +327,18 @@ struct App {
                 ComPtr<IMFMediaBuffer> cached_buffer;CHECK(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D),paused_texture.Get(),0,FALSE,&cached_buffer));
                 CHECK(MFCreateSample(&last_frame.sample));CHECK(last_frame.sample->AddBuffer(cached_buffer.Get()));
             }
-            context->CopySubresourceRegion(paused_texture.Get(),0,0,0,0,texture.Get(),slice,nullptr);last_frame.width=width;last_frame.height=height;
+            context->CopySubresourceRegion(paused_texture.Get(),0,0,0,0,texture.Get(),slice,nullptr);
         }
+        last_frame.width=width;last_frame.height=height;
         // Audio shares this thread: a display queue must never block its deadline.
         const double began=now_seconds();HRESULT present=swap->Present(0,DXGI_PRESENT_DO_NOT_WAIT);
         const double elapsed=now_seconds()-began;present_seconds+=elapsed;present_max_seconds=std::max(present_max_seconds,elapsed);
         // A failed nonblocking Present did not enqueue a frame or consume our slot.
         // Keep the reservation and retry on the next normal pump; DXGI need not signal it again.
-        if(present==DXGI_ERROR_WAS_STILL_DRAWING){++present_busy;return S_FALSE;}
-        video_slot_reserved=false;
-        CHECK(present); ++presented; return S_OK;
+        if(present==DXGI_ERROR_WAS_STILL_DRAWING){++present_busy;present_retry_at=now_seconds()+.001;return S_FALSE;}
+        video_slot_reserved=false;present_retry_at=0;
+        CHECK(present);if(presented_width!=width||presented_height!=height){presented_width=width;presented_height=height;++presented_shape_changes;}
+        ++presented; return S_OK;
     }
     HRESULT tick_audio() {
         if (!audio_running) return S_OK;
@@ -328,11 +366,37 @@ struct App {
         }
         return render->ReleaseBuffer(count, 0);
     }
+    HRESULT wait_for_media(unsigned wait_ms) {
+        if(shell.quit||shell.disconnect)return S_OK;
+        HANDLE handles[4]={wake.h,audio_event.h};DWORD count=2,timeout=std::min(wait_ms,1000u);
+        DWORD slot_index=MAXDWORD;double deadline=0;const double now=now_seconds();
+        const bool due=!video.empty()&&video.front().pts<=now;
+        const bool redraw=shell.redraw&&last_frame.sample;
+        if(due||redraw){
+            if(video_slot_reserved){if(present_retry_at>now)deadline=present_retry_at;else timeout=0;}
+            else {slot_index=count;handles[count++]=video_event.h;}
+        } else if(!video.empty())deadline=video.front().pts;
+        bool armed=false;
+        if(deadline>now&&timeout){
+            // Relative one-shot timer: QPC selects the deadline; tick verifies it again before drawing.
+            LARGE_INTEGER relative;relative.QuadPart=-std::max<LONGLONG>(1,LONGLONG(std::ceil(std::min(deadline-now,1.0)*1e7)));
+            if(!SetWaitableTimer(presentation_timer.h,&relative,0,nullptr,nullptr,FALSE))return HRESULT_FROM_WIN32(GetLastError());
+            handles[count++]=presentation_timer.h;armed=true;
+        }
+        DWORD result=WaitForMultipleObjects(count,handles,FALSE,timeout);
+        DWORD wait_error=result==WAIT_FAILED?GetLastError():ERROR_SUCCESS;
+        if(armed)CancelWaitableTimer(presentation_timer.h);
+        if(result==WAIT_FAILED)return HRESULT_FROM_WIN32(wait_error);
+        // Waiting consumes an auto-reset DXGI signal. Hand its reservation to tick instead of polling twice.
+        if(slot_index!=MAXDWORD&&result==WAIT_OBJECT_0+slot_index)video_slot_reserved=true;
+        return S_OK;
+    }
     HRESULT tick() {
         CHECK(tick_audio());CHECK(chrome.layout(shell)); double n = now_seconds();bool redraw_needed=shell.redraw.exchange(false);
         while (video.size() > 1 && video[1].pts <= n) { video.pop_front(); ++late_frames; }
         const bool due=!video.empty()&&video.front().pts<=n;
         if(!due&&!(redraw_needed&&last_frame.sample))return S_OK;
+        if(present_retry_at>n){if(redraw_needed)shell.redraw=true;return S_OK;}
         // Poll only when drawing is useful. A permanently ready display must not spin the idle pump.
         if(!video_slot_reserved){
             DWORD ready=WaitForSingleObject(video_event.h,0);
@@ -340,7 +404,8 @@ struct App {
             if(ready!=WAIT_OBJECT_0)return HRESULT_FROM_WIN32(GetLastError());
             video_slot_reserved=true;
         }
-        if(due){auto& frame=video.front();HRESULT hr=draw(frame.sample.Get(),frame.width,frame.height);CHECK(hr);if(hr==S_OK)video.pop_front();}
+        if(due){auto& frame=video.front();const auto before=presented;HRESULT hr=draw(frame.sample.Get(),frame.width,frame.height);CHECK(hr);
+            if(hr==S_OK){if(presented>before)presentation_late.add(now_seconds()-frame.pts);video.pop_front();}}
         else {HRESULT hr=draw(last_frame.sample.Get(),last_frame.width,last_frame.height);CHECK(hr);if(hr==S_FALSE)shell.redraw=true;}
         return S_OK;
     }
@@ -446,10 +511,10 @@ void am_signal(void* handle) { SetEvent(handle); }
 void am_signal_close(void* handle) { CloseHandle(handle); }
 void am_title(void* p, const char* title) { auto s = wide(title); static_cast<App*>(p)->shell.set_status(s); }
 int am_pump(void* p, unsigned wait_ms) {
-    auto a = static_cast<App*>(p); HANDLE hs[] = {a->wake.h, a->audio_event.h};
-    WaitForMultipleObjects(2,hs,FALSE,std::min(wait_ms,1000u));
+    auto a = static_cast<App*>(p);
+    HRESULT hr=a->wait_for_media(wait_ms);if(FAILED(hr)){error_hr("media wait",hr);return -1;}
     if (a->shell.quit) return 0;
-    HRESULT hr = a->tick(); if (FAILED(hr)) { error_hr("media presentation", hr); return -1; }
+    hr = a->tick(); if (FAILED(hr)) { error_hr("media presentation", hr); return -1; }
     if (a->shell.disconnect.exchange(false)) return 2; return 1;
 }
 unsigned long long am_presented(void* p){return static_cast<App*>(p)->presented;}
@@ -485,13 +550,18 @@ int am_reset(void* p) {
     auto a = static_cast<App*>(p); am_flush_audio(p); a->video.clear();
     a->last_frame.sample.Reset();
     a->shell.reset_video();
-    a->reset_video_decoder();return 1;
+    a->reset_video_decoder();a->output_ahead={};a->presentation_late={};a->decoder_residence={};
+    a->source_width=a->source_height=a->presented_width=a->presented_height=0;a->source_shape_changes=a->presented_shape_changes=0;return 1;
 }
 const char* am_stats(void* p) {
     auto a = static_cast<App*>(p); static thread_local std::string text;
+    RECT client{};GetClientRect(a->window,&client);
     text = "adapter=" + a->adapter + " decoded=" + std::to_string(a->decoded) + " dxgi_frames=" + std::to_string(a->gpu_frames)
         + " decoder_surfaces=" + std::to_string(a->decoder_surfaces) + " presented=" + std::to_string(a->presented) + " late=" + std::to_string(a->late_frames)
         + " audio_samples=" + std::to_string(a->audio_frames) + " resolution=" + std::to_string(a->width) + "x" + std::to_string(a->height)
+        + " source_shape="+std::to_string(a->source_width)+"x"+std::to_string(a->source_height)+" source_changes="+std::to_string(a->source_shape_changes)
+        + " presented_shape="+std::to_string(a->presented_width)+"x"+std::to_string(a->presented_height)+" presented_changes="+std::to_string(a->presented_shape_changes)
+        + " client_shape="+std::to_string(client.right-client.left)+"x"+std::to_string(client.bottom-client.top)
         + " decoder_instances="+std::to_string(a->decoder_instances) + " codec=" + std::to_string(a->codec) + " hevc_available=" + std::to_string(a->hevc_available)
         + " local_volume=" + std::to_string(int(a->shell.volume*100)) + " muted=" + std::to_string(a->shell.muted.load())
         + " audio_capacity="+std::to_string(a->audio_capacity)+" audio_latency_ms="+std::to_string(a->audio_latency*1000)
@@ -500,7 +570,17 @@ const char* am_stats(void* p) {
         + " submit_avg_ms="+std::to_string(a->submit_calls?a->submit_seconds*1000/a->submit_calls:0)
         + " submit_max_ms="+std::to_string(a->submit_max_seconds*1000)
         + " present_avg_ms="+std::to_string(a->presented+a->present_busy?a->present_seconds*1000/(a->presented+a->present_busy):0)
-        + " present_max_ms="+std::to_string(a->present_max_seconds*1000);
+        + " present_max_ms="+std::to_string(a->present_max_seconds*1000)
+        + " output_ahead_avg_ms="+std::to_string(a->output_ahead.average()*1000)
+        + " output_ahead_min_ms="+std::to_string(a->output_ahead.minimum*1000)
+        + " due_late_avg_ms="+std::to_string(a->presentation_late.average()*1000)
+        + " due_late_max_ms="+std::to_string(a->presentation_late.maximum*1000)
+        + " mf_residence_avg_ms="+std::to_string(a->decoder_residence.average()*1000)
+        + " mf_residence_max_ms="+std::to_string(a->decoder_residence.maximum*1000)
+        + " mf_residence_samples="+std::to_string(a->decoder_residence.count)
+        + " high_resolution_timer="+std::to_string(a->high_resolution_timer)
+        + " lowlat_attr="+std::to_string(a->low_latency_attribute)+" lowlat_value="+std::to_string(a->low_latency_value)
+        + " lowlat_set_hr="+std::to_string(uint32_t(a->low_latency_set))+" lowlat_get_hr="+std::to_string(uint32_t(a->low_latency_get));
     return text.c_str();
 }
 void* am_discover(const char* name, const char* host, unsigned short port, const uint8_t* address, uint32_t interface_index, const char* const* keys, const char* const* values, unsigned count) {

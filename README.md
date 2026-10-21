@@ -52,9 +52,10 @@ verified portrait result is 994×2160. To choose a different request when starti
 AirMirrorLite, use `--resolution 1440` (2560×1440 / up to 60 fps) or
 `--resolution 1080` (H.264 compatibility / 60 fps). A new mirroring connection is
 needed after changing the request. `--fps 30` restores the lower-bandwidth frame
-rate. The shared audio/video playout buffer now defaults to 80 ms; use
-`--latency-ms 120` for the previous buffer on a jittery network (allowed: 60–250).
-These are scheduling settings, not measured phone-to-screen latency.
+rate. `--latency-ms` sets the output-latency hint advertised to the sender
+(default 80 ms; allowed 60–250). Both playback paths follow the sender's
+presentation timestamps on one synchronized clock; this hint is not added
+again as a local delay. It is not measured phone-to-screen latency.
 Hosts without native HEVC support default to
 1080; explicitly selecting a higher mode requires native HEVC and GPU support.
 

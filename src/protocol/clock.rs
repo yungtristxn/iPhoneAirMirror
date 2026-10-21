@@ -12,25 +12,26 @@ pub struct Clock {
     audio: Option<(u32, u64)>,
     best_rtt: f64,
     pub updates: u64,
-    playout: f64,
 }
 impl Default for Clock {
     fn default() -> Self {
-        Self::new(DEFAULT_PLAYOUT_MS).expect("default playout bounds")
+        Self::new(DEFAULT_PLAYOUT_MS).expect("default advertised latency bounds")
     }
 }
 impl Clock {
-    pub fn new(playout_ms: u32) -> Result<Self> {
+    pub fn new(advertised_latency_ms: u32) -> Result<Self> {
+        // Validate the negotiation hint here without shifting the shared clock.
+        // AirPlay video PTS and the audio RTP/NTP anchor already specify playback
+        // time; adding the hint shifts both past the sender's deadlines.
         ensure!(
-            (60..=250).contains(&playout_ms),
-            "playout delay must be 60..250 ms"
+            (60..=250).contains(&advertised_latency_ms),
+            "advertised latency must be 60..250 ms"
         );
         Ok(Self {
             reference: None,
             audio: None,
             best_rtt: 0.0,
             updates: 0,
-            playout: f64::from(playout_ms) / 1000.0,
         })
     }
     pub fn observe(&mut self, remote: u64, local: f64, rtt: f64) -> Result<()> {
@@ -54,8 +55,7 @@ impl Clock {
         Ok(())
     }
     pub fn map(&self, remote: u64) -> Option<f64> {
-        self.reference
-            .map(|(r, l)| l + difference(remote, r) + self.playout)
+        self.reference.map(|(r, l)| l + difference(remote, r))
     }
     pub fn video(&self, remote: u64) -> Option<f64> {
         self.map(remote.wrapping_add(NTP_EPOCH))
@@ -81,28 +81,47 @@ mod tests {
         let remote = NTP_EPOCH.wrapping_add(ntp(1000.0));
         c.observe(remote, 20.0, 0.002).unwrap();
         c.sync_audio(u32::MAX - 479, remote);
-        assert!((c.video(ntp(1000.0)).unwrap() - 20.08).abs() < 1e-6);
-        assert!((c.audio(0).unwrap() - 20.08 - 480.0 / 44100.0).abs() < 1e-6);
+        assert!((c.video(ntp(1000.0)).unwrap() - 20.0).abs() < 1e-6);
+        assert!((c.audio(0).unwrap() - 20.0 - 480.0 / 44100.0).abs() < 1e-6);
     }
     #[test]
     fn bounded_drift_correction() {
         let mut c = Clock::default();
         c.observe(ntp(100.0), 20.0, 0.01).unwrap();
         c.observe(ntp(101.0), 21.1, 0.01).unwrap();
-        assert!((c.map(ntp(101.0)).unwrap() - 21.081).abs() < 0.00001);
+        assert!((c.map(ntp(101.0)).unwrap() - 21.001).abs() < 0.00001);
         assert!(c.observe(ntp(102.0), 50.0, 0.01).is_err());
     }
     #[test]
-    fn configurable_playout_keeps_common_clock() {
+    fn advertised_latency_does_not_shift_presentation_deadlines() {
         for delay in [60, 80, 120, 250] {
             let mut c = Clock::new(delay).unwrap();
             let n = NTP_EPOCH.wrapping_add(ntp(1000.0));
             c.observe(n, 20.0, 0.002).unwrap();
             c.sync_audio(123, n);
             assert!((c.video(ntp(1000.0)).unwrap() - c.audio(123).unwrap()).abs() < 1e-6);
-            assert!((c.audio(123).unwrap() - 20.0 - f64::from(delay) / 1000.0).abs() < 1e-6);
+            assert!((c.audio(123).unwrap() - 20.0).abs() < 1e-6);
+            assert!((c.video(ntp(1000.1)).unwrap() - 20.1).abs() < 1e-6);
+            assert!((c.audio(123 + 4410).unwrap() - 20.1).abs() < 1e-6);
         }
         assert!(Clock::new(0).is_err());
         assert!(Clock::new(251).is_err());
+    }
+    #[test]
+    fn clock_rewind_is_rejected_without_moving_audio_or_video() {
+        let mut c = Clock::default();
+        let remote = NTP_EPOCH.wrapping_add(ntp(1000.0));
+        c.observe(remote, 20.0, 0.002).unwrap();
+        c.sync_audio(123, remote);
+        let prior_video = c.video(ntp(1000.1)).unwrap();
+        let prior_audio = c.audio(123 + 4410).unwrap();
+        let rewound = NTP_EPOCH.wrapping_add(ntp(990.0));
+        assert!(c.observe(rewound, 21.0, 0.002).is_err());
+        assert_eq!(c.updates, 1);
+        assert_eq!(c.video(ntp(1000.1)), Some(prior_video));
+        assert_eq!(c.audio(123 + 4410), Some(prior_audio));
+        c.observe(remote.wrapping_add(ntp(1.0)), 21.0, 0.002)
+            .unwrap();
+        assert!((c.video(ntp(1001.0)).unwrap() - 21.0).abs() < 1e-6);
     }
 }

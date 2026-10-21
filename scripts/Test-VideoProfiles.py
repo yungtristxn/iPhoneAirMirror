@@ -11,7 +11,10 @@ import time
 root = pathlib.Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--exe", type=pathlib.Path, default=root / "target/release/airmirror-lite.exe")
+parser.add_argument("--latency-ms", type=int, default=80)
 args = parser.parse_args()
+if not 60 <= args.latency_ms <= 250:
+    parser.error("--latency-ms must be 60..250")
 data = root / "local/profile-test"
 data.mkdir(parents=True, exist_ok=True)
 result = data / "result.json"
@@ -30,6 +33,7 @@ for height, width, fps, high in [(1080, 1920, 60, False), (1440, 2560, 60, True)
     with (data / f"{height}-out.txt").open("w") as out, (data / f"{height}-err.txt").open("w") as err:
         process = subprocess.Popen([str(exe), "--hidden", "--no-discovery", "--bind", "127.0.0.1",
                                     "--port", "17003", "--seconds", "3", "--resolution", str(height),
+                                    "--latency-ms", str(args.latency_ms),
                                     "--data-dir", str(data)], stdin=subprocess.DEVNULL,
                                    stdout=out, stderr=err, creationflags=subprocess.CREATE_NO_WINDOW)
         try:
@@ -60,15 +64,16 @@ for height, width, fps, high in [(1080, 1920, 60, False), (1440, 2560, 60, True)
                 info = plistlib.loads(stream.read(length))
                 display = info["displays"][0]
                 require((display["width"], display["height"], display["maxFPS"]) == (width, height, fps), "Advertised display profile is incorrect")
-                require(bool(info["audioLatencies"]) and all(v["outputLatencyMicros"] == 80000 for v in info["audioLatencies"]), "Advertised audio playout latency is incorrect")
+                require(bool(info["audioLatencies"]) and all(v["outputLatencyMicros"] == args.latency_ms * 1000 for v in info["audioLatencies"]), "Advertised audio playout latency is incorrect")
                 require(bool(info["features"] & (1 << 42)) == high, "HEVC capability flag is incorrect")
             require(process.wait(timeout=10) == 0, "Receiver exit failed")
             checked.append({"width": width, "height": height, "fps": fps, "hevc": high})
-            print(f"PASS: /info {width}x{height} at {fps} fps; HEVC={high}; clean silent exit")
+            print(f"PASS: /info {width}x{height} at {fps} fps; HEVC={high}; playout={args.latency_ms}ms; clean silent exit")
         finally:
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=5)
 result.write_text(json.dumps({"executable": str(exe), "sha256": executable_hash,
+                             "playout_ms": args.latency_ms,
                              "profiles": checked,
                              "evidence": "Silent loopback /info and timed exit. No phone acceptance."}, indent=2))

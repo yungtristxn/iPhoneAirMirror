@@ -18,6 +18,15 @@ fn kind(nal: &[u8]) -> Result<u8> {
     Ok((nal[0] >> 1) & 63)
 }
 pub fn dimensions(nal: &[u8]) -> Result<(u32, u32)> {
+    let info = sequence_info(nal)?;
+    Ok((info.width, info.height))
+}
+struct SequenceInfo {
+    width: u32,
+    height: u32,
+    max_num_reorder_pics: u32,
+}
+fn sequence_info(nal: &[u8]) -> Result<SequenceInfo> {
     ensure!(nal.len() <= 16384 && kind(nal)? == 33, "HEVC SPS size/type");
     let mut rbsp = Vec::with_capacity(nal.len());
     let mut zeros = 0;
@@ -120,10 +129,13 @@ pub fn dimensions(nal: &[u8]) -> Result<(u32, u32)> {
     ensure!(b.ue()? == 0 && b.ue()? == 0, "only 8-bit HEVC SDR");
     ensure!(b.ue()? <= 12, "HEVC POC budget");
     let all = b.n(1)? != 0;
+    let mut max_num_reorder_pics = 0;
     for _ in (if all { 0 } else { layers })..=layers {
         let refs = b.ue()?;
         ensure!(refs <= 7, "HEVC decoded picture budget");
-        ensure!(b.ue()? <= refs, "HEVC reorder budget");
+        let reorder = b.ue()?;
+        ensure!(reorder <= refs, "HEVC reorder budget");
+        max_num_reorder_pics = max_num_reorder_pics.max(reorder);
         b.ue()?;
     }
     let min_cb = b.ue()? + 3;
@@ -132,12 +144,17 @@ pub fn dimensions(nal: &[u8]) -> Result<(u32, u32)> {
         min_cb <= 6 && diff <= 3 && min_cb + diff <= 6,
         "HEVC coding tree budget"
     );
-    Ok((width, height))
+    Ok(SequenceInfo {
+        width,
+        height,
+        max_num_reorder_pics,
+    })
 }
 pub struct Config {
     pub annex_b: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    pub max_num_reorder_pics: u32,
 }
 pub fn config(data: &[u8]) -> Result<Config> {
     ensure!(
@@ -186,6 +203,7 @@ pub fn config(data: &[u8]) -> Result<Config> {
     let mut p = 23;
     let mut seen = 0;
     let mut size = None;
+    let mut max_num_reorder_pics = 0;
     let mut out = Vec::new();
     for _ in 0..r[22] {
         ensure!(r.len() - p >= 3, "truncated HEVC parameter array");
@@ -205,12 +223,14 @@ pub fn config(data: &[u8]) -> Result<Config> {
             let nal = &r[p..p + n];
             ensure!(kind(nal)? == t, "HEVC parameter NAL mismatch");
             if t == 33 {
-                let next = dimensions(nal)?;
+                let info = sequence_info(nal)?;
+                let next = (info.width, info.height);
                 ensure!(
                     size.is_none_or(|old| old == next),
                     "HEVC parameter dimensions disagree"
                 );
                 size = Some(next);
+                max_num_reorder_pics = max_num_reorder_pics.max(info.max_num_reorder_pics);
             }
             out.extend_from_slice(&[0, 0, 0, 1]);
             out.extend_from_slice(nal);
@@ -224,6 +244,7 @@ pub fn config(data: &[u8]) -> Result<Config> {
         annex_b: out,
         width,
         height,
+        max_num_reorder_pics,
     })
 }
 pub fn annex_b(data: &mut [u8]) -> Result<()> {
@@ -287,6 +308,9 @@ mod tests {
         }
     }
     fn sps(w: u32, h: u32, refs: u32, depth: u32) -> Vec<u8> {
+        sps_with_reorder(w, h, refs, depth, 0)
+    }
+    fn sps_with_reorder(w: u32, h: u32, refs: u32, depth: u32, reorder: u32) -> Vec<u8> {
         let mut b = Bits(vec![]);
         b.n(0, 4);
         b.n(0, 3);
@@ -307,7 +331,7 @@ mod tests {
         b.ue(4);
         b.n(0, 1);
         b.ue(refs - 1);
-        b.ue(0);
+        b.ue(reorder);
         b.ue(0);
         b.ue(0);
         b.ue(3);
@@ -355,6 +379,15 @@ mod tests {
         ] {
             assert!(dimensions(&sps(w, h, refs, depth)).is_err());
         }
+    }
+    #[test]
+    fn configuration_reports_validated_reorder_requirement() {
+        for reorder in [0, 1, 3] {
+            let parsed = config(&entry(&sps_with_reorder(996, 2160, 4, 0, reorder))).unwrap();
+            assert_eq!((parsed.width, parsed.height), (996, 2160));
+            assert_eq!(parsed.max_num_reorder_pics, reorder);
+        }
+        assert!(config(&entry(&sps_with_reorder(996, 2160, 4, 0, 4))).is_err());
     }
     #[test]
     fn bounded_boxes_arrays_and_truncations() {

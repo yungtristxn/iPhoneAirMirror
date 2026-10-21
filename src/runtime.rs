@@ -28,6 +28,8 @@ pub enum Media {
         height: u32,
         data: Vec<u8>,
         pts: f64,
+        payload_received_at: f64,
+        ready_at: f64,
     },
     Audio {
         epoch: u64,
@@ -35,6 +37,84 @@ pub enum Media {
         pcm: Vec<i16>,
         pts: f64,
     },
+}
+#[derive(Default)]
+struct TimingRange {
+    min: f64,
+    sum: f64,
+    max: f64,
+}
+impl TimingRange {
+    fn record(&mut self, value: f64, first: bool) {
+        self.min = if first { value } else { self.min.min(value) };
+        self.max = if first { value } else { self.max.max(value) };
+        self.sum += value;
+    }
+}
+#[derive(Default)]
+struct VideoTiming {
+    samples: u64,
+    arrival_age: TimingRange,
+    parse: TimingRange,
+    receive_to_submit: TimingRange,
+}
+impl VideoTiming {
+    fn record(&mut self, received: f64, ready: f64, pts: f64, submit: f64) {
+        // PTS is the mapped sender presentation deadline. Negative age means the
+        // packet arrived early; it does not measure screen capture latency.
+        let arrival_age = (received - pts) * 1000.0;
+        let parse = (ready - received) * 1000.0;
+        let receive_to_submit = (submit - received) * 1000.0;
+        if ![arrival_age, parse, receive_to_submit]
+            .iter()
+            .all(|value| value.is_finite())
+        {
+            return;
+        }
+        let first = self.samples == 0;
+        self.arrival_age.record(arrival_age, first);
+        self.parse.record(parse, first);
+        self.receive_to_submit.record(receive_to_submit, first);
+        self.samples += 1;
+    }
+    fn log(&self, shared: &Shared, epoch: u64) {
+        if self.samples == 0 {
+            return;
+        }
+        let count = self.samples as f64;
+        shared.log(&format!(
+            "video_timing epoch={epoch} frames={} arrival_age_min_ms={:.3} arrival_age_avg_ms={:.3} arrival_age_max_ms={:.3} parse_min_ms={:.3} parse_avg_ms={:.3} parse_max_ms={:.3} receive_to_submit_min_ms={:.3} receive_to_submit_avg_ms={:.3} receive_to_submit_max_ms={:.3}",
+            self.samples,
+            self.arrival_age.min, self.arrival_age.sum / count, self.arrival_age.max,
+            self.parse.min, self.parse.sum / count, self.parse.max,
+            self.receive_to_submit.min, self.receive_to_submit.sum / count, self.receive_to_submit.max,
+        ));
+    }
+}
+struct DrainBudget {
+    limit: usize,
+    received: usize,
+}
+impl DrainBudget {
+    fn new(limit: usize) -> Self {
+        Self { limit, received: 0 }
+    }
+    fn consumed(&mut self) {
+        self.received += 1;
+    }
+    fn exhausted(&self) -> bool {
+        self.received == self.limit
+    }
+}
+fn pump_wait_ms(discovery_ready: bool, backlog_possible: bool) -> u32 {
+    if backlog_possible {
+        0
+    } else if !discovery_ready {
+        25
+    } else {
+        // Native presentation uses a deadline timer; queues and UI/audio wake it.
+        1000
+    }
 }
 impl Media {
     fn epoch(&self) -> u64 {
@@ -67,6 +147,7 @@ pub struct Shared {
     pub volume_db: AtomicU32,
     pub owner: AtomicU64,
     pub owner_started: AtomicU64,
+    // Negotiation hint only; wire presentation timestamps are mapped unchanged.
     pub playout_ms: u32,
     pub next: AtomicU64,
     pub connections: AtomicUsize,
@@ -85,7 +166,7 @@ impl Shared {
         let text: String = text
             .chars()
             .filter(|c| !c.is_control() || *c == ' ')
-            .take(1024)
+            .take(2048)
             .collect();
         let line = format!("{:.3} {text}\n", native::now());
         if let Ok(mut log) = self.log.lock() {
@@ -239,7 +320,7 @@ impl ReceiverApp {
             wake,
         });
         shared.log(&format!(
-            "requested_video={}x{} fps={} hevc={} playout_ms={}",
+            "requested_video={}x{} fps={} hevc={} advertised_latency_ms={}",
             video_profile.width,
             video_profile.height,
             video_profile.fps,
@@ -333,6 +414,7 @@ impl ReceiverApp {
         let (mut pending_audio, mut pending_video) = (None, None);
         let mut presented_base = app.presented();
         let mut first_picture = false;
+        let mut video_timing = VideoTiming::default();
         loop {
             if seconds.is_some_and(|s| start.elapsed() >= Duration::from_secs(s)) {
                 break;
@@ -357,6 +439,7 @@ impl ReceiverApp {
                 flush = next_flush;
             }
             if owner != active {
+                video_timing = VideoTiming::default();
                 app.reset()?;
                 active = owner;
                 presented_base = app.presented();
@@ -375,7 +458,8 @@ impl ReceiverApp {
                 ));
                 last_title = status;
             }
-            for _ in 0..(if owner == 0 { 33 } else { 32 }) {
+            let mut audio_drain = DrainBudget::new(if owner == 0 { 33 } else { 32 });
+            for _ in 0..audio_drain.limit {
                 match pending_audio
                     .take()
                     .map(Ok)
@@ -387,6 +471,7 @@ impl ReceiverApp {
                         mut pcm,
                         pts,
                     }) if epoch == owner && owner != 0 && serial == flush => {
+                        audio_drain.consumed();
                         let db = f32::from_bits(self.shared.volume_db.load(Ordering::Relaxed));
                         let gain = if db <= -144.0 {
                             0.0
@@ -406,6 +491,7 @@ impl ReceiverApp {
                         }
                     }
                     Ok(message) => {
+                        audio_drain.consumed();
                         if defer_new_owner(
                             message,
                             owner,
@@ -418,7 +504,8 @@ impl ReceiverApp {
                     Err(_) => break,
                 }
             }
-            for _ in 0..(if owner == 0 { 9 } else { 2 }) {
+            let mut video_drain = DrainBudget::new(if owner == 0 { 9 } else { 2 });
+            for _ in 0..video_drain.limit {
                 if owner != 0 && !app.video_ready() {
                     break;
                 }
@@ -433,6 +520,7 @@ impl ReceiverApp {
                         width,
                         height,
                     }) if epoch == owner && owner != 0 => {
+                        video_drain.consumed();
                         let begin = Instant::now();
                         if let Err(e) =
                             app.prepare_video(codec, width, height, self.shared.video_profile.fps)
@@ -455,7 +543,11 @@ impl ReceiverApp {
                         codec,
                         width,
                         height,
+                        payload_received_at,
+                        ready_at,
                     }) if epoch == owner && owner != 0 => {
+                        video_drain.consumed();
+                        video_timing.record(payload_received_at, ready_at, pts, native::now());
                         if let Err(e) = app.video(&data, pts, codec, width, height) {
                             self.shared.status(&e.to_string());
                             self.shared.disconnect.fetch_add(1, Ordering::AcqRel);
@@ -464,6 +556,7 @@ impl ReceiverApp {
                         }
                     }
                     Ok(message) => {
+                        video_drain.consumed();
                         if defer_new_owner(
                             message,
                             owner,
@@ -480,13 +573,15 @@ impl ReceiverApp {
                 self.shared.status("Mirroring — picture and sound");
                 reported = true;
             }
-            match app.pump(if !discovery_ready {
-                25
-            } else if owner == 0 {
-                1000
-            } else {
-                5
-            })? {
+            // Event notifications coalesce. A consumed whole drain budget can
+            // leave messages queued after the last signal; check again without
+            // sleeping. The next pass still respects native video backpressure.
+            let backlog_possible = audio_drain.exhausted()
+                || video_drain.exhausted()
+                || pending_audio.is_some()
+                || pending_video.is_some()
+                || self.shared.owner.load(Ordering::Acquire) != owner;
+            match app.pump(pump_wait_ms(discovery_ready, backlog_possible))? {
                 0 => break,
                 2 => {
                     self.shared.disconnect.fetch_add(1, Ordering::AcqRel);
@@ -502,6 +597,7 @@ impl ReceiverApp {
                 first_picture = true;
             }
             if last_stats.elapsed() >= Duration::from_secs(5) {
+                video_timing.log(&self.shared, active);
                 self.shared.log(&app.stats());
                 last_stats = Instant::now();
             }
@@ -587,6 +683,8 @@ mod tests {
             height: 2160,
             data: vec![1, 2, 3],
             pts: 0.0,
+            payload_received_at: 0.0,
+            ready_at: 0.0,
         };
         assert!(defer_new_owner(frame, 1, 2, &mut pending));
         match pending.take().unwrap() {
@@ -618,5 +716,52 @@ mod tests {
         assert!(permitted("192.168.1.2".parse().unwrap()));
         assert!(!permitted("8.8.8.8".parse().unwrap()));
         assert!(!permitted("2001:4860:4860::8888".parse().unwrap()));
+    }
+    #[test]
+    fn video_timing_preserves_signed_presentation_age() {
+        let mut timing = VideoTiming::default();
+        timing.record(100.0, 100.001, 99.980, 100.006);
+        timing.record(100.1, 100.102, 100.120, 100.105);
+        assert_eq!(timing.samples, 2);
+        assert!((timing.arrival_age.min + 20.0).abs() < 1e-6);
+        assert!((timing.arrival_age.max - 20.0).abs() < 1e-6);
+        assert!(timing.arrival_age.sum.abs() < 1e-6);
+        assert!((timing.parse.sum / 2.0 - 1.5).abs() < 1e-6);
+        assert!((timing.receive_to_submit.min - 5.0).abs() < 1e-6);
+        assert!((timing.receive_to_submit.max - 6.0).abs() < 1e-6);
+        timing.record(f64::NAN, 0.0, 0.0, 0.0);
+        assert_eq!(timing.samples, 2);
+
+        // A new session starts with fresh extrema, including negative-only ages.
+        timing = VideoTiming::default();
+        timing.record(200.0, 200.001, 200.010, 200.002);
+        assert_eq!(timing.samples, 1);
+        assert!((timing.arrival_age.min + 10.0).abs() < 1e-6);
+        assert!((timing.arrival_age.max + 10.0).abs() < 1e-6);
+    }
+    #[test]
+    fn coalesced_notifications_cannot_leave_budget_backlog_asleep() {
+        for limit in [2, 32] {
+            let (send, receive) = sync_channel(limit + 1);
+            for value in 0..=limit {
+                send.send(value).unwrap();
+            }
+            let mut budget = DrainBudget::new(limit);
+            for _ in 0..budget.limit {
+                receive.try_recv().unwrap();
+                budget.consumed();
+            }
+            assert_eq!(pump_wait_ms(true, budget.exhausted()), 0);
+            let mut next = DrainBudget::new(limit);
+            while receive.try_recv().is_ok() {
+                next.consumed();
+            }
+            assert_eq!(next.received, 1);
+            assert_eq!(pump_wait_ms(true, next.exhausted()), 1000);
+        }
+        assert_eq!(pump_wait_ms(false, false), 25);
+        assert_eq!(pump_wait_ms(false, true), 0);
+        // Backpressure without consumed messages waits for the native deadline.
+        assert_eq!(pump_wait_ms(true, DrainBudget::new(2).exhausted()), 1000);
     }
 }

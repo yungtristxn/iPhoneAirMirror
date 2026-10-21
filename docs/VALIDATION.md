@@ -66,7 +66,7 @@ records host/codec CPU (percent of one core), working set, private bytes, handle
 and threads. JSONL traces and the bounded receiver log stay under ignored local
 directories. Working-set sums may include shared pages; private bytes are separate.
 
-The shared NTP clock and default 80 ms playout target are implementation settings, not
+The shared NTP clock and default 80 ms advertised latency are implementation settings, not
 measured end-to-end latency. Measure phone capture-to-PC display separately with
 a synchronized visual counter/high-speed observation if a numeric latency claim
 is needed. The user shortened the sustained test to five minutes; no 30-minute
@@ -282,3 +282,39 @@ Raw local evidence: `work/optimization-{tests,clippy,build,media,control,profile
 `local/startup-optimization-{before,after}/result.json`, and
 `local/measure-20261021-165044.jsonl`. Packaging freshness was exercised before
 launch; the package and all three test summaries have the same executable hash.
+
+## Presentation deadlines and photo-window follow-up
+
+On `ab77a95`, the user confirmed a faster connection but a noticeable delay
+below half a second. The quiet HEVC session reached 837 decoded / 834 presented
+frames with three late drops; first presentation was 329.4 ms after session claim.
+This is not phone-tap-to-display timing. The later timer/60 ms diagnostic trial
+(`55942EAF358B8485E3CC4805DE35379CEABFDA54330CD0472B1E187160C0E9B1`)
+was smooth but felt similarly delayed. It reached 4,722 decoded/presented frames,
+zero late drops and zero audio samples, and closed cleanly.
+
+The trial exposed the reason to correct clock semantics: received frame PTS were
+typically 75–85 ms in the future, before the receiver added its extra 60 ms.
+MF residence averaged about 0.33 ms and presentation submission lateness about
+0.37 ms, so fast decode calls were not proof that the receiver avoided waiting.
+The correction follows the sender's presentation deadline without adding the
+advertised latency again; video and audio lose the same common offset. Current
+sound synchronization still requires separate physical acceptance.
+
+The high-resolution one-shot wait uses frame deadlines, audio/UI/packet wakeups
+and the DXGI slot event. Coalesced queue signals cannot strand a drain-budget
+backlog. Tests cover future frames not shown early, due-frame delivery, slot
+ownership, idle sleep despite a ready display, and audio/close interruption.
+Per-session diagnostics distinguish arrival age, parsing/queue time, MF residence
+and submission lateness; they do not capture media or measure display scanout.
+
+The user also reported a persistent landscape PC window while the phone stayed
+portrait during photo viewing. A confirmed defect published geometry at decode
+time, ahead of the displayed frame. Geometry now follows the frame selected for
+drawing. Video-processor cache keys include source dimensions. Silent synthetic
+GPU and hidden UI tests cover future opposite-aspect frames, rapid format changes,
+automatic/user-sized windows, fullscreen return and normal DPI suggestions.
+Validated header dimensions and decoded/presented/window shapes are logged to
+distinguish a remaining sender-format change from a window geometry problem.
+These fields are diagnostic only; no physical-phone orientation is inferred
+from an image aspect ratio or an undocumented header.
