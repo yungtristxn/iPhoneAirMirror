@@ -30,6 +30,7 @@ pub enum Media {
         pts: f64,
         payload_received_at: f64,
         ready_at: f64,
+        rotation_cw_degrees: u32,
     },
     Audio {
         epoch: u64,
@@ -243,6 +244,7 @@ pub struct Shared {
     pub device: String,
     pub pi: String,
     pub video_profile: protocol::VideoProfile,
+    display_updates: Mutex<Option<(u64, Arc<protocol::events::DisplayUpdates>)>>,
     video: SyncSender<Media>,
     audio: SyncSender<Media>,
     log: Mutex<(File, u64)>,
@@ -251,6 +253,44 @@ pub struct Shared {
     wake: native::Wake,
 }
 impl Shared {
+    pub(crate) fn display_geometry(&self) -> (u32, u32) {
+        let registered = self.display_updates.lock().unwrap();
+        let live = self.owner.load(Ordering::Acquire);
+        if let Some((owner, updates)) = &*registered
+            && live != 0
+            && *owner == live
+        {
+            updates.requested_size()
+        } else {
+            (self.video_profile.width, self.video_profile.height)
+        }
+    }
+    pub fn register_display_updates(
+        &self,
+        epoch: u64,
+        updates: Arc<protocol::events::DisplayUpdates>,
+    ) -> Result<()> {
+        let _transition = self.transitions.lock().unwrap();
+        ensure!(
+            self.owner.load(Ordering::Acquire) == epoch,
+            "display session ownership changed"
+        );
+        *self.display_updates.lock().unwrap() = Some((epoch, updates));
+        Ok(())
+    }
+    fn update_presented_display(&self, epoch: u64, size: (u32, u32)) {
+        let Some(target) = display_target(self.video_profile, size) else {
+            return;
+        };
+        let registered = self.display_updates.lock().unwrap();
+        if let Some((owner, updates)) = &*registered
+            && *owner == epoch
+            && self.owner.load(Ordering::Acquire) == epoch
+            && let Err(error) = updates.request(target.0, target.1)
+        {
+            self.log(&format!("display update rejected locally: {error}"));
+        }
+    }
     pub fn claim(&self, epoch: u64) -> Result<()> {
         let mut transition = self.transitions.lock().unwrap();
         ensure!(
@@ -282,6 +322,11 @@ impl Shared {
             .compare_exchange(epoch, 0, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
+            let mut display = self.display_updates.lock().unwrap();
+            if display.as_ref().is_some_and(|(owner, _)| *owner == epoch) {
+                *display = None;
+            }
+            drop(display);
             transition.revision += 1;
             let revision = transition.revision;
             drop(transition);
@@ -561,6 +606,7 @@ impl ReceiverApp {
             connections: AtomicUsize::new(0),
             identity,
             video_profile,
+            display_updates: Mutex::new(None),
             device: device.clone(),
             pi: pi.clone(),
             video: vtx,
@@ -820,10 +866,13 @@ impl ReceiverApp {
                         height,
                         payload_received_at,
                         ready_at,
+                        rotation_cw_degrees,
                     }) if epoch == owner && owner != 0 => {
                         video_drain.consumed();
                         video_timing.record(payload_received_at, ready_at, pts, native::now());
-                        if let Err(e) = app.video(&data, pts, codec, width, height) {
+                        if let Err(e) =
+                            app.video(&data, pts, codec, width, height, rotation_cw_degrees)
+                        {
                             self.shared.failure(&format!(
                                 "Video playback failed. Reconnect mirroring. {e}"
                             ));
@@ -892,6 +941,10 @@ impl ReceiverApp {
                 }
                 _ => {}
             }
+            if cfg!(feature = "display-update-experiment") && active != 0 {
+                self.shared
+                    .update_presented_display(active, app.presented_size());
+            }
             if active != 0 && !first_picture && app.presented() > presented_base {
                 self.shared.status(ReceiverStatus::Streaming);
                 let claim = f64::from_bits(self.shared.owner_started.load(Ordering::Acquire));
@@ -910,6 +963,30 @@ impl ReceiverApp {
         self.shared.log(&app.stats());
         Ok(())
     }
+}
+fn display_target(profile: protocol::VideoProfile, size: (u32, u32)) -> Option<(u32, u32)> {
+    let (w, h) = size;
+    if w == 0 || h == 0 || w > 3840 || h > 3840 {
+        return None;
+    }
+    let short = profile.width.min(profile.height);
+    let long = profile.width.max(profile.height);
+    // Only rotate an existing phone-shaped hint within native admission caps.
+    // Arbitrary external-media ratios and sender destination rectangles cannot
+    // drive this feedback path. No upscaling/resolution negotiation is invented.
+    if short < 48
+        || !short.is_multiple_of(2)
+        || !long.is_multiple_of(2)
+        || long > if profile.hevc { 2160 } else { 1920 }
+    {
+        return None;
+    }
+    let expected = f64::from(short) / f64::from(long);
+    let actual = f64::from(w.min(h)) / f64::from(w.max(h));
+    if (actual - expected).abs() > expected * 0.01 {
+        return None;
+    }
+    Some(if w > h { (long, short) } else { (short, long) })
 }
 impl Drop for ReceiverApp {
     fn drop(&mut self) {
@@ -980,6 +1057,27 @@ fn connection(stream: TcpStream, shared: Arc<Shared>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn display_updates_follow_only_the_established_hint_shape() {
+        let profile = protocol::VideoProfile::new(2160, true)
+            .unwrap()
+            .with_display_width(994)
+            .unwrap();
+        assert_eq!(display_target(profile, (994, 2160)), Some((994, 2160)));
+        assert_eq!(display_target(profile, (2160, 994)), Some((2160, 994)));
+        assert_eq!(display_target(profile, (994, 458)), Some((2160, 994)));
+        assert_eq!(display_target(profile, (498, 1080)), Some((994, 2160)));
+        for geometry in [(0, 0), (3840, 2160), (1600, 1200), (65535, 1)] {
+            assert_eq!(display_target(profile, geometry), None);
+        }
+        let wide = protocol::VideoProfile::new(2160, true).unwrap();
+        assert_eq!(display_target(wide, (3840, 2160)), None); // No unsupported tall4K hint.
+        let low = protocol::VideoProfile::new(1080, false)
+            .unwrap()
+            .with_display_width(498)
+            .unwrap();
+        assert_eq!(display_target(low, (1080, 498)), Some((1080, 498)));
+    }
     #[test]
     fn explicit_discovery_bind_is_forwarded_as_selection_filter() {
         assert_eq!(
@@ -1082,12 +1180,19 @@ mod tests {
             pts: 0.0,
             payload_received_at: 0.0,
             ready_at: 0.0,
+            rotation_cw_degrees: 270,
         };
         assert!(defer_new_owner(frame, 1, 2, &mut pending));
         match pending.take().unwrap() {
-            Media::Video { epoch, data, .. } => {
+            Media::Video {
+                epoch,
+                data,
+                rotation_cw_degrees,
+                ..
+            } => {
                 assert_eq!(epoch, 2);
                 assert_eq!(data, vec![1, 2, 3]);
+                assert_eq!(rotation_cw_degrees, 270);
             }
             _ => panic!("wrong queued message"),
         }

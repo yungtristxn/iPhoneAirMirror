@@ -12,6 +12,9 @@ default = []
 # FFmpeg candidate is separate; add decoder-lab to forbid receiver startup.
 decoder-lab = []
 ffmpeg-aac = []
+# Controlled local interoperability test; not enabled in packaged candidates.
+rotation-advertisement-experiment = []
+display-update-experiment = ["rotation-advertisement-experiment"]
 
 [dependencies]
 aes = "=0.8.4"

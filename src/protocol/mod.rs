@@ -1,7 +1,9 @@
 pub mod clock;
+pub mod events;
 pub mod framing;
 pub mod h264;
 pub mod hevc;
+pub mod orientation;
 pub mod pairing;
 pub mod plist;
 mod streams;
@@ -20,6 +22,10 @@ use std::{
 };
 // Screen mirroring, FairPlay, AAC, legacy pairing and unified /info. Excludes
 // photo, HLS/URL playback, ALAC/PCM, metadata, remote-control and AP2 buffering.
+// Bit 8 + displays.rotation is an opt-in interoperability experiment, not a
+// proven Photos orientation fix. Pinned UxPlay records the same AppleTV pairing
+// but deliberately leaves it disabled because its behavior is uncertain.
+pub const ROTATABLE_DISPLAY: bool = cfg!(feature = "rotation-advertisement-experiment");
 pub const FEATURES: u64 = (1 << 2)
     | (1 << 6)
     | (1 << 7)
@@ -31,7 +37,8 @@ pub const FEATURES: u64 = (1 << 2)
     | (1 << 21)
     | (1 << 27)
     | (1 << 28)
-    | (1 << 30);
+    | (1 << 30)
+    | if ROTATABLE_DISPLAY { 1 << 8 } else { 0 };
 #[derive(Clone, Copy, Debug)]
 pub struct VideoProfile {
     pub width: u32,
@@ -143,7 +150,7 @@ impl Session {
             let streams =
                 streams::Streams::new(peer, local, timing, key, iv, self.shared.clone(), self.id)?;
             response.insert("timingPort".into(), number(streams.timing_port.into()));
-            response.insert("eventPort".into(), number(0));
+            response.insert("eventPort".into(), number(streams.event_port.into()));
             self.streams = Some(streams);
         }
 
@@ -249,26 +256,28 @@ fn info(s: &Shared) -> Value {
             "audioLatencies",
             Value::Array(vec![latency(100), latency(101)]),
         ),
+        ("displays", Value::Array(vec![display_description(s)])),
+    ])
+}
+
+pub(crate) fn display_description(s: &Shared) -> Value {
+    let (width, height) = s.display_geometry();
+    dict([
+        ("uuid", Value::String(s.pi.clone())),
+        ("width", number(width.into())),
+        ("height", number(height.into())),
+        ("widthPixels", number(width.into())),
+        ("heightPixels", number(height.into())),
+        ("widthPhysical", number(0)),
+        ("heightPhysical", number(0)),
+        ("rotation", Value::Boolean(ROTATABLE_DISPLAY)),
         (
-            "displays",
-            Value::Array(vec![dict([
-                ("uuid", Value::String(s.pi.clone())),
-                ("width", number(s.video_profile.width.into())),
-                ("height", number(s.video_profile.height.into())),
-                ("widthPixels", number(s.video_profile.width.into())),
-                ("heightPixels", number(s.video_profile.height.into())),
-                ("widthPhysical", number(0)),
-                ("heightPhysical", number(0)),
-                ("rotation", Value::Boolean(false)),
-                (
-                    "refreshRate",
-                    Value::Real(1.0 / f64::from(s.video_profile.fps)),
-                ),
-                ("maxFPS", number(s.video_profile.fps.into())),
-                ("overscanned", Value::Boolean(false)),
-                ("features", number(14)),
-            ])]),
+            "refreshRate",
+            Value::Real(1.0 / f64::from(s.video_profile.fps)),
         ),
+        ("maxFPS", number(s.video_profile.fps.into())),
+        ("overscanned", Value::Boolean(false)),
+        ("features", number(14)),
     ])
 }
 fn respond(

@@ -81,10 +81,11 @@ static HRESULT probe_media_wait(App* app) {
     SetEvent(wake.h);CHECK(app->wait_for_media(1000));if(WaitForSingleObject(wake.h,0)!=WAIT_TIMEOUT)return E_FAIL;
     return S_OK;
 }
-static HRESULT probe_video(App* app,VideoProbeContext& probe, UINT width, UINT height,UINT codec=264,bool continue_stream=false,bool dpb16=false) {
+static HRESULT probe_video(App* app,VideoProbeContext& probe, UINT width, UINT height,UINT codec=264,bool continue_stream=false,bool dpb16=false,UINT rotation=0) {
     // These independent encoder fixtures represent separate phones/sessions.
     if(!continue_stream){app->shell.reset_video();CHECK(app->init_decoder(codec,width,height));}
     else if(!app->decoder_ready||app->codec!=codec)return E_UNEXPECTED;
+    const auto pending_before=app->decode_pending.active_count;const auto inputs_before=probe.validated;const auto decoded_before=app->decoded;
     if(app->low_latency_attribute!=1||(SUCCEEDED(app->low_latency_get)&&app->low_latency_value!=1)){error_hr("decoder low-latency readback",E_FAIL);return E_FAIL;}
     ComPtr<IMFTransform> enc;if(codec==265){CHECK(create_hevc_transform(true,&enc));}else{CHECK(CoCreateInstance(CLSID_CMSH264EncoderMFT,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&enc)));}
     ComPtr<IMFMediaType> output; CHECK(MFCreateMediaType(&output));
@@ -109,7 +110,7 @@ static HRESULT probe_video(App* app,VideoProbeContext& probe, UINT width, UINT h
             std::vector<uint8_t> packet(bytes,bytes+len);LONGLONG pts;hr=sample->GetSampleTime(&pts);
             if(SUCCEEDED(hr)&&dpb16&&!probe_dpb16_packet(packet,probe.dpb16_sps)){error_hr("synthetic DPB16 parameter rewrite",E_FAIL);hr=E_FAIL;}
             if(SUCCEEDED(hr)){if(!probe.validate||probe.validate(packet.data(),unsigned(packet.size()),codec)!=1){error_hr("production parser rejected synthetic access unit",E_FAIL);hr=E_FAIL;}else ++probe.validated;}
-            if(SUCCEEDED(hr))hr=app->submit(packet.data(),unsigned(packet.size()),pts/1e7);compressed->Unlock();CHECK(hr);
+            if(SUCCEEDED(hr))hr=app->submit(packet.data(),unsigned(packet.size()),pts/1e7,rotation);compressed->Unlock();CHECK(hr);
         }return S_OK;
     };
     double start=now_seconds();
@@ -123,6 +124,12 @@ static HRESULT probe_video(App* app,VideoProbeContext& probe, UINT width, UINT h
     }
     CHECK(enc->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN,0));CHECK(drain());
     double until=now_seconds()+0.4;while(now_seconds()<until){CHECK(app->tick());Sleep(2);}
+    const uint64_t inputs=probe.validated-inputs_before,outputs=app->decoded-decoded_before;
+    const unsigned pending_after=app->decode_pending.active_count;
+    fprintf(stderr,"synthetic decoder accounting codec=%u size=%ux%u rotation=%u continued=%u inputs=%llu outputs=%llu pending_before=%u pending_after=%u peak=%u\n",
+        codec,width,height,rotation,unsigned(continue_stream),static_cast<unsigned long long>(inputs),static_cast<unsigned long long>(outputs),pending_before,pending_after,app->decode_pending.high_water);
+    if(outputs>inputs+pending_before||inputs+pending_before-outputs!=pending_after
+        ||(continue_stream&&pending_after>pending_before)){error_hr("decoder associations accumulated across format transition",E_FAIL);return E_FAIL;}
     // A paused redraw uses the retained private texture, not a live decoder surface.
     if(!app->last_frame.sample){error_hr("no retained frame after encoder drain",E_FAIL);return E_FAIL;}
     app->video.clear();
@@ -151,21 +158,21 @@ static HRESULT probe_video(App* app,VideoProbeContext& probe, UINT width, UINT h
     CHECK(redraw_paused());
     // A queued future picture cannot be shown early, and wait0 still services already-due work.
     app->shell.redraw=false;const auto before=app->presentation_late.count;const double due=now_seconds()+.06;
-    app->video.push_back({app->last_frame.sample,due,app->last_frame.width,app->last_frame.height});
+    auto future_frame=app->last_frame;future_frame.pts=due;app->video.push_back(std::move(future_frame));
     if(am_pump(app,0)<0)return E_FAIL;
     if(app->presentation_late.count>before&&now_seconds()<due){error_hr("future picture early presentation",E_FAIL);return E_FAIL;}
     ULONGLONG deadline=GetTickCount64()+1000;
     while(!app->video.empty()&&GetTickCount64()<deadline)if(am_pump(app,100)<0)return E_FAIL;
     if(app->presentation_late.count!=before+1||!app->video.empty()){error_hr("future picture did not drain exactly once",E_FAIL);return HRESULT_FROM_WIN32(ERROR_TIMEOUT);}
     const auto late=app->late_frames,shown=app->presentation_late.count;const double now=now_seconds();
-    for(int i=0;i<3;++i)app->video.push_back({app->last_frame.sample,now-.03+i*.01,app->last_frame.width,app->last_frame.height});
+    for(int i=0;i<3;++i){auto frame=app->last_frame;frame.pts=now-.03+i*.01;app->video.push_back(std::move(frame));}
     if(am_pump(app,0)<0)return E_FAIL;
     deadline=GetTickCount64()+1000;
     while(!app->video.empty()&&GetTickCount64()<deadline)if(am_pump(app,100)<0)return E_FAIL;
     if(app->presentation_late.count!=shown+1||!app->video.empty()||app->late_frames!=late+2){error_hr("latest-due backlog did not coalesce",E_FAIL);return E_FAIL;}
     return S_OK;
 }
-static HRESULT probe_letterbox_pixels(App* app,bool offset=false,VideoColor color={}) {
+static HRESULT probe_letterbox_pixels(App* app,bool offset=false,VideoColor color={},UINT rotation=0) {
     // This readback is restricted to a freshly generated diagnostic pattern, never sender media.
     constexpr UINT width=640,height=360,border=16;
     const UINT ox=offset?16:0,oy=offset?8:0,coded_w=width+(offset?32:0),coded_h=height+(offset?24:0);
@@ -195,9 +202,10 @@ static HRESULT probe_letterbox_pixels(App* app,bool offset=false,VideoColor colo
     const ULONGLONG deadline=GetTickCount64()+1000;
     while(app->presented==before&&GetTickCount64()<deadline){
         if(!app->video_slot_reserved){DWORD ready=WaitForSingleObject(app->video_event.h,20);if(ready==WAIT_TIMEOUT)continue;if(ready!=WAIT_OBJECT_0)return E_FAIL;app->video_slot_reserved=true;}
-        CHECK(app->draw(sample.Get(),width,height,readback.Get(),&source,&color));if(app->presented==before)Sleep(1);
+        CHECK(app->draw(sample.Get(),width,height,readback.Get(),&source,&color,false,rotation));if(app->presented==before)Sleep(1);
     }
-    if(app->presented!=before+1||!app->video.empty()||app->presented_width!=width||app->presented_height!=height)return E_FAIL;
+    const UINT display_width=rotation%180?height:width,display_height=rotation%180?width:height;
+    if(app->presented!=before+1||!app->video.empty()||app->presented_width!=display_width||app->presented_height!=display_height||app->presented_rotation!=rotation)return E_FAIL;
     if(app->vieww!=read_desc.Width||app->viewh!=read_desc.Height)return E_FAIL;
     D3D11_MAPPED_SUBRESOURCE mapped{};CHECK(app->context->Map(readback.Get(),0,D3D11_MAP_READ,0,&mapped));
     auto gray=[&](UINT x,UINT y,int expected,int tolerance) {
@@ -206,7 +214,7 @@ static HRESULT probe_letterbox_pixels(App* app,bool offset=false,VideoColor colo
             &&std::abs(int(p[2])-expected)<=tolerance&&p[3]>=250)return true;
         char detail[180];sprintf_s(detail,"synthetic letterbox pixel (%u,%u) BGRA=%u,%u,%u,%u expected_gray=%d",x,y,p[0],p[1],p[2],p[3],expected);error_hr(detail,E_FAIL);return false;
     };
-    const UINT dw=read_desc.Width,dh=UINT(double(dw)*height/width),top=(read_desc.Height-dh)/2;
+    const UINT dw=read_desc.Width,dh=UINT(double(dw)*display_height/display_width),top=(read_desc.Height-dh)/2;
     bool valid=top>8&&dh>32;
     if(valid){
         // Border corners survive scaling: a center crop would lose these markers.
@@ -215,7 +223,10 @@ static HRESULT probe_letterbox_pixels(App* app,bool offset=false,VideoColor colo
             const bool full=color.range==MFNominalRange_0_255,bt709=color.matrix==MFVideoTransferMatrix_BT709;
             double luma=full?levels[y][x]:(levels[y][x]-16)*255.0/219,u=(chroma[y][x][0]-128)*(full?1.0:255.0/224),v=(chroma[y][x][1]-128)*(full?1.0:255.0/224);
             double reference[3]={luma+(bt709?1.8556:1.772)*u,luma-(bt709?.187324:.344136)*u-(bt709?.468124:.714136)*v,luma+(bt709?1.5748:1.402)*v};
-            UINT px=UINT((x?.75:.25)*(dw-1)),py=top+UINT((y?.75:.25)*(dh-1));auto pixel=static_cast<const uint8_t*>(mapped.pData)+size_t(py)*mapped.RowPitch+size_t(px)*4;
+            // Follow each source quadrant through the explicit clockwise transform.
+            UINT dx=x,dy=y;
+            if(rotation==90){dx=1-y;dy=x;}else if(rotation==180){dx=1-x;dy=1-y;}else if(rotation==270){dx=y;dy=1-x;}
+            UINT px=UINT((dx?.75:.25)*(dw-1)),py=top+UINT((dy?.75:.25)*(dh-1));auto pixel=static_cast<const uint8_t*>(mapped.pData)+size_t(py)*mapped.RowPitch+size_t(px)*4;
             for(int channel=0;channel<3;++channel)if(std::abs(int(pixel[channel])-int(std::lround(std::clamp(reference[channel],0.0,255.0))))>8){error_hr("synthetic aperture/color quadrant mismatch",E_FAIL);valid=false;}
         }
         for(double x:{.1,.5,.9}){
@@ -223,9 +234,38 @@ static HRESULT probe_letterbox_pixels(App* app,bool offset=false,VideoColor colo
             valid=gray(UINT(x*(dw-1)),read_desc.Height-1-top/2,0,8)&&valid;
         }
     }
+    auto pixel_hash=[&](const D3D11_MAPPED_SUBRESOURCE& data){
+        uint64_t hash=1469598103934665603ull;
+        for(UINT y=0;y<read_desc.Height;++y){const auto row=static_cast<const uint8_t*>(data.pData)+size_t(y)*data.RowPitch;
+            for(size_t x=0;x<size_t(read_desc.Width)*4;++x){hash^=row[x];hash*=1099511628211ull;}}
+        return hash;
+    };
+    std::vector<uint8_t> displayed_pixels(size_t(read_desc.Width)*read_desc.Height*4);
+    for(UINT y=0;y<read_desc.Height;++y)memcpy(displayed_pixels.data()+size_t(y)*read_desc.Width*4,static_cast<const uint8_t*>(mapped.pData)+size_t(y)*mapped.RowPitch,size_t(read_desc.Width)*4);
+    const auto displayed_hash=pixel_hash(mapped);app->context->Unmap(readback.Get(),0);
+    if(!EqualRect(&app->last_frame.source,&source)||app->last_frame.color.matrix!=color.matrix||app->last_frame.color.range!=color.range||app->last_frame.rotation!=rotation)return E_FAIL;
+    if(!valid)return E_FAIL;
+    // A different picture/rotation that cannot Present must not replace paused
+    // pixels or metadata. Mutate only this private synthetic source to black.
+    std::fill(pixels.begin(),pixels.begin()+size_t(coded_w)*coded_h,uint8_t(color.range==MFNominalRange_0_255?0:16));
+    std::fill(pixels.begin()+size_t(coded_w)*coded_h,pixels.end(),uint8_t(128));
+    app->context->UpdateSubresource(pattern.Get(),0,nullptr,pixels.data(),coded_w,UINT(pixels.size()));
+    if(!app->video_slot_reserved){if(WaitForSingleObject(app->video_event.h,1000)!=WAIT_OBJECT_0)return E_FAIL;app->video_slot_reserved=true;}
+    const auto cached=app->last_frame.sample;const auto presented=app->presented;
+    if(app->draw(sample.Get(),width,height,nullptr,&source,&color,true,(rotation+90)%360)!=S_FALSE
+        ||app->presented!=presented||app->last_frame.sample.Get()!=cached.Get()||app->last_frame.rotation!=rotation||app->presented_rotation!=rotation)return E_FAIL;
+    const ULONGLONG paused_deadline=GetTickCount64()+1000;
+    do {CHECK(app->draw(cached.Get(),width,height,readback.Get(),&source,&color,false,rotation));if(app->presented>presented)break;Sleep(1);}while(GetTickCount64()<paused_deadline);
+    if(app->presented!=presented+1)return E_FAIL;
+    CHECK(app->context->Map(readback.Get(),0,D3D11_MAP_READ,0,&mapped));
+    const bool retained=pixel_hash(mapped)==displayed_hash;
+    if(!retained){size_t changed=0;unsigned maximum=0;int reports=0;
+        for(UINT y=0;y<read_desc.Height;++y)for(UINT x=0;x<read_desc.Width*4;++x){
+            const auto value=*(static_cast<const uint8_t*>(mapped.pData)+size_t(y)*mapped.RowPitch+x),previous=displayed_pixels[size_t(y)*read_desc.Width*4+x];
+            if(value!=previous){++changed;maximum=std::max(maximum,unsigned(std::abs(int(value)-int(previous))));if(reports++<5)fprintf(stderr,"paused pixel (%u,%u) channel%u old=%u now=%u\n",x/4,y,x%4,previous,value);}}
+        fprintf(stderr,"paused synthetic comparison rotation=%u offset=%u changed=%zu max_delta=%u size=%ux%u\n",rotation,unsigned(offset),changed,maximum,read_desc.Width,read_desc.Height);}
     app->context->Unmap(readback.Get(),0);
-    if(!EqualRect(&app->last_frame.source,&source)||app->last_frame.color.matrix!=color.matrix||app->last_frame.color.range!=color.range)return E_FAIL;
-    return valid?S_OK:E_FAIL;
+    if(!retained){error_hr("busy rotation replaced paused synthetic pixels",E_FAIL);return E_FAIL;}return S_OK;
 }
 static HRESULT probe_shape_schedule(App* app) {
     if(!app->last_frame.sample||app->shell.fullscreen)return E_FAIL;
@@ -266,6 +306,7 @@ static HRESULT probe_shape_schedule(App* app) {
     CHECK(probe_letterbox_pixels(app,true,{MFVideoTransferMatrix_BT601,MFNominalRange_16_235}));
     CHECK(probe_letterbox_pixels(app,true,{MFVideoTransferMatrix_BT601,MFNominalRange_0_255}));
     CHECK(probe_letterbox_pixels(app,true,{MFVideoTransferMatrix_BT709,MFNominalRange_0_255}));
+    for(UINT rotation:{90u,180u,270u,0u})CHECK(probe_letterbox_pixels(app,true,{},rotation));
     CHECK(show(edge,edge*2,now_seconds(),.5));
     const auto shape_changes=app->presented_shape_changes;const double future=now_seconds()+.25;
     app->queue_video_frame({sample,future,edge*2,edge});
@@ -284,6 +325,47 @@ static HRESULT probe_shape_schedule(App* app) {
     CHECK(show(edge,edge*2,now_seconds(),.5));
     if(app->presented_shape_changes!=shape_changes+2)return E_FAIL;
     app->shell.reset_video();CHECK(show(original_w,original_h,now_seconds(),double(original_w)/original_h));return S_OK;
+}
+static HRESULT probe_rotation_schedule(App* app){
+    if(!app->last_frame.sample||!app->video.empty()||!app->video_sync||app->last_frame.rotation)return E_FAIL;
+    const auto original=app->last_frame;const UINT w=original.width,h=original.height;
+    const auto lateness=app->presentation_late.count;const double first_due=now_seconds()+.15,second_due=first_due+.4;
+    auto first=original;first.pts=first_due;first.rotation=90;
+    auto second=original;second.pts=second_due;second.rotation=270;
+    app->queue_video_frame(std::move(first));app->queue_video_frame(std::move(second));
+    const double inspect=now_seconds()+.035;
+    do {
+        app->shell.redraw=true;if(am_pump(app,5)<0)return E_FAIL;
+        if(now_seconds()>=first_due||app->presented_rotation||app->last_frame.rotation||app->video.size()!=2
+            ||app->presented_width!=w||app->presented_height!=h)return E_FAIL;
+    }while(now_seconds()<inspect);
+    ULONGLONG deadline=GetTickCount64()+1000;
+    while(app->presented_rotation!=90&&GetTickCount64()<deadline)if(am_pump(app,20)<0)return E_FAIL;
+    if(app->presented_rotation!=90||app->last_frame.rotation!=90||app->video.size()!=1
+        ||app->presented_width!=h||app->presented_height!=w||now_seconds()>=second_due)return E_FAIL;
+    // Paused redraw while a newer orientation is queued must keep the old one.
+    app->shell.redraw=true;if(am_pump(app,0)<0||app->presented_rotation!=90||app->last_frame.rotation!=90)return E_FAIL;
+    deadline=GetTickCount64()+1000;
+    while(!app->video.empty()&&GetTickCount64()<deadline)if(am_pump(app,20)<0)return E_FAIL;
+    if(app->presented_rotation!=270||app->last_frame.rotation!=270||app->presentation_late.count!=lateness+2)return E_FAIL;
+    auto restore=original;restore.pts=now_seconds();app->queue_video_frame(std::move(restore));
+    deadline=GetTickCount64()+1000;
+    while((!app->video.empty()||app->presented_rotation)&&GetTickCount64()<deadline)if(am_pump(app,20)<0)return E_FAIL;
+    if(!app->video.empty()||app->presented_rotation||app->last_frame.rotation||app->presented_width!=w||app->presented_height!=h)return E_FAIL;
+    bool settled=false;deadline=GetTickCount64()+1000;
+    do {
+        if(am_pump(app,10)<0)return E_FAIL;RECT client{};GetClientRect(app->window,&client);const int rim=2*PhoneShell::rim_pixels(app->shell.dpi_scale());
+        settled=client.right>rim&&client.bottom>rim&&std::abs(double(client.right-rim)/(client.bottom-rim)-double(w)/h)<.02
+            &&app->vieww==UINT(client.right-rim)&&app->viewh==UINT(client.bottom-rim);
+    }while(!settled&&GetTickCount64()<deadline);
+    if(!settled)return E_FAIL;
+    // An unsupported capability or invalid angle must leave the displayed state intact.
+    const bool support=app->processor_rotation;app->processor_rotation=false;
+    HRESULT unsupported=app->draw(original.sample.Get(),w,h,nullptr,&original.source,&original.color,false,90);
+    app->processor_rotation=support;
+    if(unsupported!=DXGI_ERROR_UNSUPPORTED||app->presented_rotation||app->last_frame.rotation)return E_FAIL;
+    if(app->draw(nullptr,w,h,nullptr,nullptr,nullptr,false,45)!=E_INVALIDARG)return E_FAIL;
+    last_error.clear();return S_OK;
 }
 static HRESULT probe_interactive_video(App* app) {
     if(!app->video_sync||!app->video.empty()||!app->last_frame.sample||app->audio_running||!app->sound.empty())return E_FAIL;
@@ -345,7 +427,8 @@ static HRESULT probe_minimized_output(App* app){
 extern "C" int am_video_probe(void* p,ProbeValidator validate) {
     if(!p||!validate)return 0;
     auto app=static_cast<App*>(p);uint64_t before=app->decoder_surfaces;VideoProbeContext probe{validate};
-    const char* stage="H264 landscape";HRESULT hr=probe_video(app,probe,1920,1080);
+    const char* stage="H264 rotated landscape";HRESULT hr=probe_video(app,probe,1920,1080,264,false,false,90);
+    if(SUCCEEDED(hr)&&(app->presented_rotation!=90||app->presented_width!=1080||app->presented_height!=1920))hr=E_FAIL;
     if(SUCCEEDED(hr)){stage="H264 portrait";hr=probe_video(app,probe,1080,1920);}
     if(SUCCEEDED(hr)&&app->hevc_available){
         // A partial codec-initialization failure must be recoverable, not a null dereference.
@@ -366,6 +449,7 @@ extern "C" int am_video_probe(void* p,ProbeValidator validate) {
         }
     }
     if(SUCCEEDED(hr)){stage="shape scheduling/aperture/color pixels";hr=probe_shape_schedule(app);}
+    if(SUCCEEDED(hr)){stage="queued per-frame rotation and paused commitment";hr=probe_rotation_schedule(app);}
     if(SUCCEEDED(hr)){stage="interactive/synchronized transition";hr=probe_interactive_video(app);}
     if(SUCCEEDED(hr)){stage="first successful presentation commitment";hr=probe_first_present_commit(app);}
     if(SUCCEEDED(hr)){stage="minimized output/restore";hr=probe_minimized_output(app);}
@@ -378,6 +462,21 @@ extern "C" int am_video_probe(void* p,ProbeValidator validate) {
 }
 static HRESULT probe_native_contracts(App* app){
     CHECK(probe_platform_contracts());
+    {
+        DecodeAssociations pending;DecodeAssociations::Entry value;
+        if(!pending.add(100,1,0)||!pending.add(300,2,90)||!pending.add(200,3,270))return E_FAIL;
+        if(!pending.take(200,value)||value.rotation!=270||value.began!=3
+            ||!pending.take(100,value)||value.rotation!=0
+            ||!pending.take(300,value)||value.rotation!=90||pending.take(300,value))return E_FAIL;
+        // Duplicate timestamps are safe only when their transform is identical.
+        if(!pending.add(400,4,180)||!pending.add(400,5,180)||pending.add(400,6,90)||pending.add(500,6,45))return E_FAIL;
+        if(!pending.take(400,value)||value.began!=4||!pending.take(400,value)||value.began!=5)return E_FAIL;
+        for(unsigned i=0;i<32;++i)if(!pending.add(i,1,(i%4)*90))return E_FAIL;
+        if(pending.add(1000,2,0)||pending.active_count!=32||pending.high_water!=32)return E_FAIL;
+        if(!pending.take(15,value)||value.rotation!=270||!pending.add(1000,2,0))return E_FAIL;
+        if(!pending.take(0,value)||value.rotation!=0)return E_FAIL;
+        pending={};if(pending.active_count||pending.high_water||pending.take(1000,value)||!pending.add(1000,3,270))return E_FAIL;
+    }
     StageTiming short_samples;short_samples.add(.000003);short_samples.add(.000006);
     if(short_samples.percentile(.95)>short_samples.maximum||short_samples.percentile(.95)<short_samples.minimum)return E_FAIL;
     MFVideoArea area{};area.OffsetX.value=16;area.OffsetY.value=8;area.Area={640,360};RECT rect{};

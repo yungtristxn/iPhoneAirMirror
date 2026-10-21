@@ -27,6 +27,7 @@ pub struct Streams {
     pub video_port: Option<u16>,
     pub audio_ports: Option<(u16, u16)>,
     pub timing_port: u16,
+    pub event_port: u16,
     threads: Vec<JoinHandle<()>>,
     audio_stop: Option<Arc<AtomicBool>>,
     audio_thread: Option<JoinHandle<()>>,
@@ -58,6 +59,7 @@ impl Streams {
             video_port: None,
             audio_ports: None,
             timing_port,
+            event_port: 0,
             threads: Vec::new(),
             audio_stop: None,
             audio_thread: None,
@@ -71,6 +73,35 @@ impl Streams {
         s.spawn("timing", move |stop, clock, shared, _| {
             timing_loop(sock, stop, clock, shared)
         });
+        if cfg!(feature = "display-update-experiment") {
+            let prepared = (|| -> Result<_> {
+                let listener = TcpListener::bind(SocketAddr::new(local, 0))?;
+                listener.set_nonblocking(true)?;
+                let port = listener.local_addr()?.port();
+                let updates = Arc::new(super::events::DisplayUpdates::new(
+                    s.shared.video_profile.width,
+                    s.shared.video_profile.height,
+                )?);
+                Ok((listener, port, updates))
+            })();
+            match prepared {
+                Ok((listener, port, updates)) => {
+                    // A stale session must still fail closed; optional socket
+                    // allocation failure alone must not disable mirroring.
+                    s.shared.register_display_updates(epoch, updates.clone())?;
+                    s.event_port = port;
+                    let base_display = super::display_description(&s.shared);
+                    s.spawn("events", move |stop, _, shared, _| {
+                        super::events::run(listener, peer, stop, updates, base_display, |message| {
+                            shared.log(message)
+                        })
+                    });
+                }
+                Err(error) => s
+                    .shared
+                    .log(&format!("display updates unavailable at setup: {error}")),
+            }
+        }
         Ok(s)
     }
     fn spawn<F>(&mut self, name: &'static str, job: F)
@@ -371,6 +402,8 @@ fn video_loop(
     let mut codec = None;
     let mut dimensions = (0, 0);
     let mut hevc_sequence = None;
+    let mut rotation_cw_degrees = 0;
+    let mut frame_options = None;
     while !stop.load(Ordering::Acquire) {
         let mut header = [0; 128];
         let mut record_started = None;
@@ -412,6 +445,19 @@ fn video_loop(
                 cipher.apply_keystream(&mut payload);
                 let active_codec =
                     codec.ok_or_else(|| anyhow::anyhow!("video before codec configuration"))?;
+                if super::ROTATABLE_DISPLAY {
+                    let options = (
+                        u16::from_le_bytes(header[4..6].try_into()?) & !0x1000,
+                        u16::from_le_bytes(header[6..8].try_into()?),
+                    );
+                    if frame_options != Some(options) {
+                        shared.log(&format!(
+                            "video frame flags=0x{:04x} options=0x{:04x} (diagnostic only)",
+                            options.0, options.1
+                        ));
+                        frame_options = Some(options);
+                    }
+                }
                 if active_codec == 265 {
                     if let Some(info) = super::hevc::annex_b(&mut payload)? {
                         if hevc_sequence != Some(info) {
@@ -451,9 +497,12 @@ fn video_loop(
                     pts,
                     payload_received_at,
                     ready_at,
+                    rotation_cw_degrees,
                 })?;
             }
             1 => {
+                let next_rotation =
+                    super::orientation::configuration_rotation(&header, super::ROTATABLE_DISPLAY)?;
                 let next = if payload.get(4..8) == Some(b"hvc1") {
                     265
                 } else {
@@ -474,14 +523,32 @@ fn video_loop(
                     config = h264::avcc_config(&payload)?;
                 }
                 codec = Some(next);
+                rotation_cw_degrees = next_rotation;
                 shared.log(&format!("H.{next} configuration accepted"));
+                shared.log(&format!(
+                    "AirPlay display transform={} clockwise_degrees={rotation_cw_degrees}",
+                    header[5]
+                ));
                 // These observed header fields are diagnostics only. Codec SPS
                 // dimensions remain authoritative for video; none of these fields
                 // establish the phone's physical orientation.
                 shared.log(&format!(
-                    "video configuration header source={} display={} (diagnostic only)",
+                    "video configuration header source={} display={} type_flags=0x{:04x} options=0x{:04x} auxiliary={} transform_words={} (diagnostic only)",
                     size_label(configuration_header_size(&header, 40)),
                     size_label(configuration_header_size(&header, 56)),
+                    u16::from_le_bytes(header[4..6].try_into()?),
+                    u16::from_le_bytes(header[6..8].try_into()?),
+                    [48usize,52].iter().map(|offset| {
+                        let value=f32::from_le_bytes(header[*offset..*offset+4].try_into().unwrap());
+                        if value.is_finite() && value.abs()<=16384.0 {value.to_string()} else {"invalid".into()}
+                    }).collect::<Vec<_>>().join(","),
+                    [24usize,28,32,36].iter().map(|offset| {
+                        let word=u32::from_le_bytes(header[*offset..*offset+4].try_into().unwrap());
+                        let value=f32::from_bits(word);
+                        if word<=360 {format!("{offset}:small_uint={word}")}
+                        else if value.is_finite() && value.abs()<=360.0 {format!("{offset}:float={value}")}
+                        else {format!("{offset}:unrecognized")}
+                    }).collect::<Vec<_>>().join(","),
                 ));
                 shared.send_video(Media::VideoConfig {
                     epoch,

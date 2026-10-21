@@ -13,6 +13,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--exe", type=pathlib.Path, default=root / "target/release/airmirror-lite.exe")
 parser.add_argument("--latency-ms", type=int, default=80)
 parser.add_argument("--fps", type=int, choices=(30, 60), default=60)
+parser.add_argument("--expect-rotation", action="store_true", help="Check the opt-in rotation advertisement experiment")
 parser.add_argument("--display-width", type=int)
 parser.add_argument("--display-aspect", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"))
 args = parser.parse_args()
@@ -85,6 +86,9 @@ for height, width, high in [(1080, 1920, False), (1440, 2560, True), (2160, 3840
                 require(0 < length <= 65536, "/info body length is invalid")
                 info = plistlib.loads(stream.read(length))
                 display = info["displays"][0]
+                require(display["rotation"] is args.expect_rotation and
+                        bool(info["features"] & (1 << 8)) == args.expect_rotation,
+                        "Rotation display flag and feature bit disagree")
                 require((display["width"], display["height"], display["maxFPS"]) == (width, height, fps), "Advertised display profile is incorrect")
                 require((display["widthPixels"], display["heightPixels"]) == (width, height),
                         "Advertised pixel dimensions disagree with the display hint")
@@ -100,6 +104,7 @@ for height, width, high in [(1080, 1920, False), (1440, 2560, True), (2160, 3840
 result.write_text(json.dumps({"executable": str(exe), "sha256": executable_hash,
                              "playout_ms": args.latency_ms,
                              "fps": args.fps,
+                             "rotation_advertisement": args.expect_rotation,
                              "display_aspect": args.display_aspect,
                              "profiles": checked,
                              "evidence": "Silent loopback /info and timed exit. Initial display hints do not constrain rotated stream dimensions; no picture, rotation or phone acceptance is established."}, indent=2))

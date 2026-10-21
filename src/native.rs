@@ -31,6 +31,7 @@ unsafe extern "C" {
     fn am_status_dismissed(app: *mut c_void) -> i32;
     fn am_prepare_video(app: *mut c_void, codec: u32, width: u32, height: u32, fps: u32) -> i32;
     fn am_presented(app: *mut c_void) -> u64;
+    fn am_presented_size(app: *mut c_void) -> u64;
     fn am_discovery_status(discovery: *mut c_void) -> i32;
     fn am_hevc_available(app: *mut c_void) -> i32;
     fn am_video(
@@ -41,6 +42,7 @@ unsafe extern "C" {
         codec: u32,
         width: u32,
         height: u32,
+        rotation_cw_degrees: u32,
     ) -> i32;
     fn am_video_ready(app: *mut c_void) -> i32;
     fn am_video_sync(app: *mut c_void, synchronized: i32);
@@ -241,6 +243,10 @@ impl App {
     pub fn presented(&self) -> u64 {
         unsafe { am_presented(self.0.as_ptr()) }
     }
+    pub fn presented_size(&self) -> (u32, u32) {
+        let size = unsafe { am_presented_size(self.0.as_ptr()) };
+        ((size >> 32) as u32, size as u32)
+    }
     pub fn hevc_available(&self) -> bool {
         unsafe { am_hevc_available(self.0.as_ptr()) != 0 }
     }
@@ -275,7 +281,15 @@ impl App {
         let r = unsafe { am_pump(self.0.as_ptr(), timeout) };
         if r < 0 { Err(error()) } else { Ok(r) }
     }
-    pub fn video(&self, data: &[u8], pts: f64, codec: u32, width: u32, height: u32) -> Result<()> {
+    pub fn video(
+        &self,
+        data: &[u8],
+        pts: f64,
+        codec: u32,
+        width: u32,
+        height: u32,
+        rotation_cw_degrees: u32,
+    ) -> Result<()> {
         ensure!(
             matches!(codec, 264 | 265)
                 && !data.is_empty()
@@ -285,7 +299,8 @@ impl App {
                     } else {
                         2 * 1024 * 1024
                     }
-                && pts.is_finite(),
+                && pts.is_finite()
+                && matches!(rotation_cw_degrees, 0 | 90 | 180 | 270),
             "invalid video sample"
         );
         if unsafe {
@@ -297,6 +312,7 @@ impl App {
                 codec,
                 width,
                 height,
+                rotation_cw_degrees,
             )
         } == 0
         {

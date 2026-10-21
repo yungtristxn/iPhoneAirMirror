@@ -21,6 +21,34 @@ Updated: 2026-10-21
   instead continues sending 994x2160. The user closed this candidate after testing.
   Both FDK fallback hashes remain unchanged. Rotation-capability advertisement
   and scalar decoder-orientation metadata are the next controlled investigation.
+- The opt-in rotation-advertisement trial is now open at the candidate path,
+  SHA `E74F70DD72E7F3B893216E8F28D05C44D6137A88F66ECF701AEBFBCE87CA4346`;
+  it pairs display rotation=true with ScreenRotate bit 8, keeping the aspect hint.
+  82 tests, strict Clippy, silent native checks and wire profiles pass. The user
+  reported that it still fails; their screenshot shows the whole Photos interface
+  sideways in the portrait frame. The trial produces source=994x2160 with a
+  landscape display hint=994x458, while MF rotation is absent and both apertures
+  remain full-frame. Normal packaging does not enable this feature.
+  Previous FFmpeg binary: `work/rotation-verified-candidate/`; trial manifest and
+  checks: `local/rotation-advertisement/`. See ROTATION_REGRESSION.md for limits.
+- Further trial A761D568... passed 91 Rust tests and full silent GPU checks but
+  still showed sideways Photos: this phone sends no rotation SEI. Research now
+  identifies configuration byte5 as SymmetricTransform (0/3/4/7 map to
+  0/180/90/270 clockwise). The unused SEI experiment has been removed.
+- Current follow-up uses that actual transport metadata with verified per-frame
+  GPU rotation, plus an opt-in legacy event channel for full updateDisplayInfo
+  requests. Dynamic canvas requests follow only successfully presented frames of
+  the established hint shape; no image cropping or destination-rectangle guesses.
+  Built candidate SHA-256 is
+  `AF3B9439AFB4BC220FF4F42ED4B03FD6B7359B549B46390B6DC1F1D175A1C183`.
+  95 Rust tests pass with both default FDK and experimental FFmpeg builds;
+  strict Clippy, silent native/GPU/worker checks and all three
+  advertised profiles pass. GPU evidence includes all quarter-turns, exact PTS
+  associations and busy-present cache preservation; 160 hardware surfaces,
+  162 parser-validated access units and zero endpoint audio. Physical Photos
+  convergence remains pending; normal packaging still disables both experiments.
+  This exact build is open at the candidate path; discovery readiness is verified.
+  Manifest, launch and copied test evidence: `local/transport-rotation-phone-test/`.
 - Full bounded interaction matrix, commands, evidence and physical limitations:
   ROTATION_REGRESSION.md. Launch: `local/rotation-phone-test/launch.json`.
 
