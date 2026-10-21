@@ -38,6 +38,12 @@ Confirmed 2026-10-21: the user wants their own minimal, efficient Windows AirPla
   expand chevron. Keyboard access remains available when collapsed.
 - Embedded multi-size application icon, including DPI-appropriate native window icons.
 - Ordinary-user runtime; close fully exits, deregisters discovery and closes sockets.
+- Worker executable access is provisioned explicitly by its owner/build/package
+  step; normal launches do not rewrite executable permissions. Read-only deployment
+  uses a writable per-user data directory without weakening isolation.
+- Endpoint and graphics failures receive bounded owner-thread recovery attempts,
+  a controlled session disconnect and a persistent actionable status if recovery
+  cannot complete. Custom controls expose native accessibility semantics.
 - No timer, watermark, subscription, account or cloud relay.
 
 Exclude recording, remote phone input, USB capture, DLNA, direct URL/HLS playback, standalone music-player features, BLE discovery, startup service, autostart and automatic updating. Necessary AirPlay negotiation/audio transport is still in scope.
@@ -60,6 +66,11 @@ Use bounded protocol/session code and an actual restricted worker for retained r
 10. Build/package/release identity and imported component licenses are recorded.
 
 A passing build, synthetic media or simulated sender is not equivalent to items 1-4. When physical interaction is needed, provide the exact next phone action after preparing a runnable build, and continue independent work.
+
+Audio FLUSH uses a validated RTP sequence/timestamp cutoff and applied native
+transition boundary. Active-audio requests without a usable cutoff are rejected
+with a reconnect instruction rather than admitting canceled in-flight audio;
+real-phone pause/seek compatibility on the revised build remains a separate check.
 
 ## Implementation order
 1. Verify toolchain and minimal Windows discovery/decoder/audio feasibility; establish module boundaries.

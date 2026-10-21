@@ -9,11 +9,30 @@
 #include <future>
 #include "control_artwork.h"
 #include "resources.h"
+#include "phone_accessibility.h"
 using namespace Gdiplus;
 namespace {
 constexpr DWORD WINDOW_STYLE=WS_POPUP|WS_THICKFRAME|WS_SYSMENU|WS_MINIMIZEBOX;
 constexpr int PALETTE_WIDTH=96, BODY_HEIGHT=196, BUTTON_STEP=44, FLYOUT_WIDTH=212, FLYOUT_SPACE=224;
 constexpr UINT_PTR HIDE_VOLUME=1;
+constexpr int RAIL_GAP=4,WORK_MARGIN=12;
+int rail_clearance(float s){return int(std::ceil((PALETTE_WIDTH+RAIL_GAP+WORK_MARGIN)*s));}
+struct PalettePlacement {int x,y,width,height,rail,arrow,flyout;bool right,popup;};
+PalettePlacement palette_placement(RECT phone,RECT work,float s,bool collapsed,bool popup,bool fullscreen){
+    const int base=collapsed?36:PALETTE_WIDTH,base_px=int(base*s),gap=int(std::ceil(RAIL_GAP*s));
+    const int expanded=int(std::ceil(PALETTE_WIDTH*s))+gap;
+    const int left_space=phone.left-work.left,right_space=work.right-phone.right;
+    bool right=fullscreen||right_space>=expanded||(left_space<expanded&&right_space>=left_space);
+    int x=fullscreen?phone.right-base_px-int(WORK_MARGIN*s):right?phone.right+gap:phone.left-base_px-gap;
+    x=std::clamp<LONG>(x,work.left,std::max(work.left,work.right-base_px));
+    int height=int((BODY_HEIGHT+20)*s),y=std::clamp<LONG>(phone.top+(phone.bottom-phone.top-height)/2,work.top,std::max(work.top,work.bottom-height));
+    popup=popup&&int((base+FLYOUT_SPACE)*s)<=work.right-work.left;
+    bool extend_right=x+int((base+FLYOUT_SPACE)*s)<=work.right;
+    int offset=popup&&!extend_right?FLYOUT_SPACE:0,width=int((base+(popup?FLYOUT_SPACE:0))*s);
+    int panel_x=std::clamp<LONG>(x-int(offset*s),work.left,std::max(work.left,work.right-width));
+    // Only the neither-side-fits fallback may move the rail when opening a flyout.
+    return {panel_x,y,width,height,offset+(right?0:20),offset+(collapsed?18:right?84:12),extend_right?PALETTE_WIDTH+2:10,right,popup};
+}
 constexpr wchar_t const* labels[]={L"Mute / unmute (M) — hover for volume",L"Fit at source resolution (0)",L"Fullscreen (F11)",L"Close AirMirrorLite (Alt+F4)",L"Hide controls (C)"};
 RECT work_area(HWND hwnd){MONITORINFO mi{sizeof(mi)};GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&mi);return mi.rcWork;}
 }
@@ -59,18 +78,24 @@ void PhoneShell::signal(){redraw=true;chrome_dirty=true;if(wake_)SetEvent(wake_)
 HRESULT PhoneShell::create(HANDLE wake,bool hidden){
     wake_=wake;hidden_=hidden;std::promise<HWND> created;auto ready=created.get_future();
     thread_=std::thread([this,created=std::move(created)]() mutable {
-        GdiplusStartupInput startup;if(GdiplusStartup(&gdiplus_,&startup,nullptr)!=Ok){created.set_value(nullptr);return;}
+        if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED))){created.set_value(nullptr);return;}
+        GdiplusStartupInput startup;if(GdiplusStartup(&gdiplus_,&startup,nullptr)!=Ok){CoUninitialize();created.set_value(nullptr);return;}
         painter_=std::make_unique<ControlPainter>();
         palette_surface_=std::make_unique<PaletteSurface>();
+        status_surface_=std::make_unique<PaletteSurface>();
+        accessibility_=std::make_unique<PhoneAccessibility>();
         INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_STANDARD_CLASSES};InitCommonControlsEx(&controls);
         WNDCLASSW wc{};wc.lpfnWndProc=main_proc;wc.hInstance=GetModuleHandleW(nullptr);wc.hIcon=LoadIconW(wc.hInstance,MAKEINTRESOURCEW(IDI_AIRMIRRORLITE));wc.style=CS_DBLCLKS;wc.lpszClassName=L"AirMirrorLiteWindow";wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);RegisterClassW(&wc);
         WNDCLASSW pc=wc;pc.lpfnWndProc=palette_proc;pc.lpszClassName=L"AirMirrorLiteControls";RegisterClassW(&pc);
+        WNDCLASSW sc=wc;sc.lpfnWndProc=status_proc;sc.lpszClassName=L"AirMirrorLiteStatus";RegisterClassW(&sc);
         window=CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP,wc.lpszClassName,L"AirMirrorLite",WINDOW_STYLE,0,0,360,760,nullptr,nullptr,wc.hInstance,this);
         if(window){
             update_icons();
             BOOL dark=TRUE;DwmSetWindowAttribute(window,DWMWA_USE_IMMERSIVE_DARK_MODE,&dark,sizeof(dark));
             DWORD border=DWMWA_COLOR_NONE;DwmSetWindowAttribute(window,DWMWA_BORDER_COLOR,&border,sizeof(border));
             palette_=CreateWindowExW(WS_EX_LAYERED|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,pc.lpszClassName,L"AirMirrorLite quick controls",WS_POPUP,0,0,72,220,window,nullptr,wc.hInstance,this);
+            status_panel_=CreateWindowExW(WS_EX_LAYERED|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TRANSPARENT,sc.lpszClassName,L"AirMirrorLite status",WS_POPUP,0,0,320,160,window,nullptr,wc.hInstance,this);
+            accessibility_->attach(window);
             tooltip_=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,palette_,nullptr,wc.hInstance,nullptr);
             SendMessageW(tooltip_,TTM_SETDELAYTIME,TTDT_INITIAL,450);SendMessageW(tooltip_,TTM_SETMAXTIPWIDTH,0,250);
             for(UINT_PTR i=0;i<5;++i){TOOLINFOW t{sizeof(t)};t.uFlags=TTF_SUBCLASS;t.hwnd=palette_;t.uId=i+1;t.lpszText=const_cast<LPWSTR>(labels[i]);SendMessageW(tooltip_,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&t));}
@@ -83,10 +108,13 @@ HRESULT PhoneShell::create(HANDLE wake,bool hidden){
         if(window){MSG msg;while(GetMessageW(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}}
         painter_.reset();
         palette_surface_.reset();
+        status_surface_.reset();
+        accessibility_.reset();
         if(small_icon_)DestroyIcon(small_icon_);if(large_icon_)DestroyIcon(large_icon_);small_icon_=large_icon_=nullptr;
         if(gdiplus_){GdiplusShutdown(gdiplus_);gdiplus_=0;}
+        CoUninitialize();
     });
-    HWND result=ready.get();return result&&palette_&&tooltip_?initial_paint_:E_FAIL;
+    HWND result=ready.get();return result&&palette_&&tooltip_&&status_panel_?initial_paint_:E_FAIL;
 }
 void PhoneShell::show(){PostMessageW(window,WM_SHOW,0,0);}
 void PhoneShell::update_icons(){
@@ -97,18 +125,32 @@ void PhoneShell::update_icons(){
     if(next_large){SendMessageW(window,WM_SETICON,ICON_BIG,reinterpret_cast<LPARAM>(next_large));if(large_icon_)DestroyIcon(large_icon_);large_icon_=next_large;}
 }
 void PhoneShell::shutdown(){if(thread_.joinable()){if(window)PostMessageW(window,WM_SHUTDOWN,0,0);thread_.join();}window=nullptr;}
-void PhoneShell::set_status(const std::wstring& title){
-    SetWindowTextW(window,title.c_str());
-    int state=has_video?2:title.find(L"Connect")!=std::wstring::npos?1:0;
-    if(status.exchange(state)!=state){chrome_dirty=true;PostMessageW(window,WM_REFRESH,0,0);if(wake_)SetEvent(wake_);}
+void PhoneShell::set_title(const std::wstring& title){SetWindowTextW(window,title.c_str());}
+std::wstring PhoneShell::status_message() const {std::lock_guard<std::mutex> lock(status_mutex_);return status_reason_;}
+void PhoneShell::set_status(int kind,const std::wstring& message){
+    if(kind<0||kind>6)return;
+    {std::lock_guard<std::mutex> lock(status_mutex_);
+        const int current=status;
+        if(kind==6){status=has_video?2:0;status_reason_.clear();}
+        else if((current==5&&kind<3)||(current==4&&kind<2))return;
+        else{status=kind;status_reason_.clear();for(wchar_t c:message){if(status_reason_.size()==256)break;status_reason_.push_back(c>=32&&c!=127?c:L' ');}if(kind==4||kind==5)error_generation_=source_generation_;}
+    }
+    signal();PostMessageW(window,WM_REFRESH,0,0);
+}
+bool PhoneShell::dismiss_error(){
+    {std::lock_guard<std::mutex> lock(status_mutex_);if(status!=4)return false;status=has_video?2:0;status_reason_.clear();}
+    status_dismissed=true;signal();PostMessageW(window,WM_REFRESH,0,0);return true;
 }
 void PhoneShell::video_size(UINT w,UINT h){
     if(!w||!h||w>3840||h>3840)return;
-    if(!has_video.exchange(true)){status=2;chrome_dirty=true;signal();}
+    if(!has_video.exchange(true)){
+        {std::lock_guard<std::mutex> lock(status_mutex_);if(status<3||(status==4&&source_generation_>error_generation_)){status=2;status_reason_.clear();}}
+        chrome_dirty=true;signal();PostMessageW(window,WM_REFRESH,0,0);
+    }
     if(published_w_!=w||published_h_!=h){published_w_=w;published_h_=h;PostMessageW(window,WM_SOURCE_FORMAT,source_generation_,MAKELPARAM(w,h));}
 }
 void PhoneShell::reset_video(){
-    has_video=false;status=0;published_w_=published_h_=0;++source_generation_;
+    has_video=false;{std::lock_guard<std::mutex> lock(status_mutex_);if(status<3){status=0;status_reason_.clear();}}published_w_=published_h_=0;++source_generation_;
     PostMessageW(window,WM_SOURCE_RESET,source_generation_,0);signal();PostMessageW(window,WM_REFRESH,0,0);
 }
 void PhoneShell::shape_window(){
@@ -124,11 +166,11 @@ void PhoneShell::default_size(bool center){
     // Source pixels are physical pixels. DPI scales the controls, not the video.
     float source_h=display_h_?float(display_h_):760*s;
     float source_w=display_w_?float(display_w_):source_h*aspect_;
-    float fit=std::min({1.0f,std::max(1.0f,float(area.right-area.left)-110*s-2*border)/source_w,std::max(1.0f,float(area.bottom-area.top)-48*s-2*border)/source_h});
+    float fit=std::min({1.0f,std::max(1.0f,float(area.right-area.left)-WORK_MARGIN*s-rail_clearance(s)-2*border)/source_w,std::max(1.0f,float(area.bottom-area.top)-48*s-2*border)/source_h});
     int w=int(std::round(source_w*fit))+2*border,h=int(std::round(source_h*fit))+2*border;
     int x=center?area.left+((area.right-area.left)-w-int(84*s))/2:old.left+(old.right-old.left-w)/2;
     int y=center?area.top+((area.bottom-area.top)-h)/2:old.top+(old.bottom-old.top-h)/2;
-    x=std::clamp<LONG>(x,area.left+int(12*s),std::max(area.left+int(12*s),area.right-w-int(84*s)));
+    x=std::clamp<LONG>(x,area.left+int(WORK_MARGIN*s),std::max(area.left+int(WORK_MARGIN*s),area.right-w-rail_clearance(s)));
     y=std::clamp<LONG>(y,area.top+int(12*s),std::max(area.top+int(12*s),area.bottom-h-int(12*s)));
     user_sized_=false;SetWindowPos(window,nullptr,x,y,w,h,SWP_NOZORDER|SWP_NOACTIVATE|SWP_FRAMECHANGED);signal();
 }
@@ -137,10 +179,10 @@ RECT PhoneShell::fitted_rect(RECT original) const {
     RECT work=work_area(window);
     float area=std::max(1.0f,float(original.right-original.left)-border)*std::max(1.0f,float(original.bottom-original.top)-border);
     float h=std::sqrt(area/aspect_),w=h*aspect_;
-    float factor=std::min({1.0f,std::max(1.0f,float(work.right-work.left)-100*s-border)/w,std::max(1.0f,float(work.bottom-work.top)-24*s-border)/h});
+    float factor=std::min({1.0f,std::max(1.0f,float(work.right-work.left)-WORK_MARGIN*s-rail_clearance(s)-border)/w,std::max(1.0f,float(work.bottom-work.top)-24*s-border)/h});
     int width=int(w*factor+border),height=int(h*factor+border);
     int x=(original.left+original.right-width)/2,y=(original.top+original.bottom-height)/2;
-    x=std::clamp<LONG>(x,work.left+int(12*s),std::max(work.left+int(12*s),work.right-width-int(84*s)));
+    x=std::clamp<LONG>(x,work.left+int(WORK_MARGIN*s),std::max(work.left+int(WORK_MARGIN*s),work.right-width-rail_clearance(s)));
     y=std::clamp<LONG>(y,work.top+int(12*s),std::max(work.top+int(12*s),work.bottom-height-int(12*s)));
     return {x,y,x+width,y+height};
 }
@@ -168,6 +210,7 @@ void PhoneShell::toggle_mute(){
 }
 void PhoneShell::invoke(int button){
     if(button==0)toggle_mute();else if(button==1)default_size();else if(button==2)toggle_fullscreen();else if(button==3){quit=true;if(wake_)SetEvent(wake_);}else if(button==4)toggle_controls();
+    if(accessibility_&&button>=0&&button<=4)accessibility_->invoked(button+1);
 }
 void PhoneShell::toggle_controls(){
     dismiss_volume();controls_collapsed_=!controls_collapsed_;hot_=-1;pressed_=-1;
@@ -176,7 +219,7 @@ void PhoneShell::toggle_controls(){
 }
 void PhoneShell::dismiss_volume(){
     update_volume_timer(true);TRACKMOUSEEVENT cancel{sizeof(cancel),TME_CANCEL|TME_HOVER,palette_,0};TrackMouseEvent(&cancel);
-    hover_pending_=false;if(popup_){popup_=false;place_palette();}else update_tooltips();
+    hover_pending_=false;if(keyboard_focus_==5)keyboard_focus_=0;if(popup_){popup_=false;place_palette();}else update_tooltips();
 }
 void PhoneShell::update_volume_timer(bool in_zone){
     if(!popup_||in_zone||dragging_slider_){
@@ -189,21 +232,41 @@ void PhoneShell::update_volume_timer(bool in_zone){
 }
 void PhoneShell::place_palette(){
     if(!palette_)return;
-    RECT r;GetWindowRect(window,&r);RECT area=work_area(window);float s=dpi_scale();int base_width=controls_collapsed_?36:PALETTE_WIDTH;int base_w=int(base_width*s),height=int((BODY_HEIGHT+20)*s);
-    int x=fullscreen?r.right-base_w-int(12*s):r.right+int(4*s);
-    // Choose the dock side using expanded width, so collapsing never flips sides.
-    bool right=true;if(r.right+int((PALETTE_WIDTH+4)*s)>area.right&&!fullscreen){x=r.left-base_w-int(4*s);right=false;}
-    dock_right_=right;int y=std::clamp<LONG>(r.top+(r.bottom-r.top-height)/2,area.top,std::max(area.top,area.bottom-height));
-    bool extend_right=right;
-    if(x+int((base_width+FLYOUT_SPACE)*s)>area.right)extend_right=false;
-    if(x-int(FLYOUT_SPACE*s)<area.left)extend_right=true;
-    int offset=popup_&&!extend_right?FLYOUT_SPACE:0;
-    rail_x_=offset+(right?0:20);arrow_x_=offset+(controls_collapsed_?18:right?84:12);
-    flyout_x_=extend_right?PALETTE_WIDTH+2:10;
-    palette_width_=base_width+(popup_?FLYOUT_SPACE:0);
-    SetWindowPos(palette_,nullptr,x-int(offset*s),y,int(palette_width_*s),height,SWP_NOZORDER|SWP_NOACTIVATE);
+    RECT r;GetWindowRect(window,&r);float s=dpi_scale();auto placement=palette_placement(r,work_area(window),s,controls_collapsed_,popup_,fullscreen);
+    dock_right_=placement.right;popup_=placement.popup;rail_x_=placement.rail;arrow_x_=placement.arrow;flyout_x_=placement.flyout;
+    palette_width_=(controls_collapsed_?36:PALETTE_WIDTH)+(popup_?FLYOUT_SPACE:0);
+    SetWindowPos(palette_,nullptr,placement.x,placement.y,placement.width,placement.height,SWP_NOZORDER|SWP_NOACTIVATE);
     paint_palette();
     if(!hidden_&&IsWindowVisible(window)&&!IsIconic(window))ShowWindow(palette_,SW_SHOWNOACTIVATE);else ShowWindow(palette_,SW_HIDE);
+    paint_status_panel();
+}
+void PhoneShell::paint_status_panel(){
+    if(!status_panel_||!status_surface_)return;
+    const int kind=status;const auto reason=status_message();
+    if(kind<3){ShowWindow(status_panel_,SW_HIDE);accessibility_changed();return;}
+    const float s=dpi_scale();RECT phone,area=work_area(window);GetWindowRect(window,&phone);
+    const int width=std::min(int(340*s),int(area.right-area.left)),height=std::min(int(218*s),int(area.bottom-area.top));
+    const int x=std::clamp<LONG>((phone.left+phone.right-width)/2,area.left,std::max(area.left,area.right-width));
+    const int y=std::clamp<LONG>((phone.top+phone.bottom-height)/2,area.top,std::max(area.top,area.bottom-height));
+    auto& surface=*status_surface_;const bool changed=surface.width!=width||surface.height!=height||painted_status_!=reason||painted_status_kind_!=kind;
+    if(changed&&SUCCEEDED(surface.resize(width,height))){
+        RECT bounds{0,0,width,height};HBRUSH brush=CreateSolidBrush(RGB(30,32,38));FillRect(surface.memory,&bounds,brush);DeleteObject(brush);
+        SetBkMode(surface.memory,TRANSPARENT);
+        auto label=[&](const std::wstring& value,int top,int bottom,int size,int weight,COLORREF color){
+            HFONT font=CreateFontW(-int(size*s),0,0,0,weight,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH,L"Segoe UI");
+            auto old=SelectObject(surface.memory,font);SetTextColor(surface.memory,color);RECT text{int(18*s),int(top*s),width-int(18*s),int(bottom*s)};
+            DrawTextW(surface.memory,value.c_str(),int(value.size()),&text,DT_WORDBREAK|DT_NOPREFIX|DT_END_ELLIPSIS);SelectObject(surface.memory,old);DeleteObject(font);
+        };
+        label(kind==3?L"Restoring playback":kind==5?L"Receiver unavailable":L"Connection needs attention",18,48,17,FW_SEMIBOLD,RGB(244,245,248));
+        label(reason.empty()?L"Playback could not continue.":reason,54,158,12,FW_NORMAL,RGB(219,223,232));
+        label(kind==3?L"Please wait. Your connection will recover if possible.":kind==5?L"Close and reopen AirMirrorLite to retry.":L"Press Escape to dismiss, then reconnect your iPhone.",168,208,11,FW_NORMAL,RGB(161,179,207));
+        auto pixels=static_cast<uint32_t*>(surface.pixels);for(int i=0;i<width*height;++i)pixels[i]|=0xff000000;
+        SIZE size{width,height};POINT zero{};BLENDFUNCTION blend{AC_SRC_OVER,0,255,AC_SRC_ALPHA};
+        if(UpdateLayeredWindow(status_panel_,nullptr,nullptr,&size,surface.memory,&zero,0,&blend,ULW_ALPHA)){painted_status_=reason;painted_status_kind_=kind;}
+        HRGN region=CreateRoundRectRgn(0,0,width+1,height+1,int(24*s),int(24*s));if(region&&!SetWindowRgn(status_panel_,region,FALSE))DeleteObject(region);
+    }
+    SetWindowPos(status_panel_,HWND_TOP,x,y,width,height,SWP_NOACTIVATE);
+    ShowWindow(status_panel_,!hidden_&&IsWindowVisible(window)&&!IsIconic(window)?SW_SHOWNOACTIVATE:SW_HIDE);accessibility_changed();
 }
 int PhoneShell::button_at(POINT p) const {
     float s=dpi_scale(),x=p.x/s-rail_x_,y=p.y/s;
@@ -241,7 +304,7 @@ HRESULT PhoneShell::paint_palette(const wchar_t* diagnostic_path,float diagnosti
     if(width<1||height<1||width>2048||height>2048)return E_INVALIDARG;
     ControlArtwork artwork{s,float(rail_x_),float(flyout_x_),volume,float(arrow_x_),width,height,hot_,pressed_,keyboard_focus_,popup_,fullscreen,muted,controls_collapsed_,controls_collapsed_?!dock_right_:dock_right_};
     auto& surface=*palette_surface_;
-    if(!diagnostic_path&&surface.valid&&surface.artwork==artwork){update_tooltips();return S_OK;}
+    if(!diagnostic_path&&surface.valid&&surface.artwork==artwork){update_tooltips();accessibility_changed();return S_OK;}
     HRESULT result=surface.resize(width,height);if(FAILED(result))return result;
     surface.valid=false;result=painter_->draw(surface.memory,artwork);
     if(SUCCEEDED(result))++surface.draws;
@@ -252,12 +315,38 @@ HRESULT PhoneShell::paint_palette(const wchar_t* diagnostic_path,float diagnosti
     if(SUCCEEDED(result)&&!diagnostic_path){SIZE size{width,height};POINT source{};BLENDFUNCTION blend{AC_SRC_OVER,0,255,AC_SRC_ALPHA};
         if(!UpdateLayeredWindow(palette_,nullptr,nullptr,&size,surface.memory,&source,0,&blend,ULW_ALPHA))result=HRESULT_FROM_WIN32(GetLastError());
         else{surface.artwork=artwork;surface.valid=true;}}
-    update_tooltips();return result;
+    update_tooltips();accessibility_changed();return result;
 }
 void PhoneShell::menu(POINT screen){
     HMENU menu=CreatePopupMenu();AppendMenuW(menu,MF_STRING,1,L"Default size\t0");AppendMenuW(menu,MF_STRING,2,L"Fullscreen\tF11");AppendMenuW(menu,MF_STRING,3,L"Disconnect\tD");AppendMenuW(menu,MF_SEPARATOR,0,nullptr);AppendMenuW(menu,MF_STRING,4,L"Close\tAlt+F4");
     UINT action=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,screen.x,screen.y,0,window,nullptr);DestroyMenu(menu);
     if(action==1)default_size();if(action==2)toggle_fullscreen();if(action==3){disconnect=true;signal();}if(action==4){quit=true;signal();}
+}
+void PhoneShell::accessibility_changed(){if(accessibility_)accessibility_->changed();}
+LRESULT PhoneShell::accessibility_request(AccessibilityRequest& request){
+    if(request.id<0||request.id>=9){request.result=E_INVALIDARG;return 0;}
+    if(request.operation==AccessibilityRequest::Snapshot){
+        auto& s=request.snapshot;s.window=window;s.palette=palette_;s.status_window=status_panel_;s.collapsed=controls_collapsed_;s.muted=muted;s.fullscreen=fullscreen;s.volume=volume*100;
+        s.focus=keyboard_focus_>=0?keyboard_focus_+1:0;s.window_focused=GetFocus()==window;s.status=status;s.reason=status_message();
+        GetWindowRect(window,&s.bounds[0]);RECT palette{};if(palette_)GetWindowRect(palette_,&palette);const float scale=dpi_scale();
+        const bool shown=!hidden_&&IsWindowVisible(window)&&!IsIconic(window);s.visible[0]=shown;s.bounds[8]=palette;s.visible[8]=shown;
+        for(int id=1;id<=4;++id){s.bounds[id]={palette.left+int((rail_x_+16)*scale),palette.top+int((18+(id-1)*BUTTON_STEP)*scale),palette.left+int((rail_x_+60)*scale),palette.top+int((62+(id-1)*BUTTON_STEP)*scale)};s.visible[id]=shown&&!controls_collapsed_;}
+        s.bounds[5]={palette.left+int((arrow_x_-12)*scale),palette.top+int(90*scale),palette.left+int((arrow_x_+12)*scale),palette.top+int(126*scale)};s.visible[5]=shown;
+        s.bounds[6]={palette.left+int((flyout_x_+12)*scale),palette.top+int(42*scale),palette.left+int((flyout_x_+200)*scale),palette.top+int(74*scale)};s.visible[6]=shown&&popup_&&!controls_collapsed_;
+        if(status_panel_)GetWindowRect(status_panel_,&s.bounds[7]);s.visible[7]=shown&&s.status>=3;
+        if(shown)UnionRect(&s.bounds[0],&s.bounds[0],&palette);if(s.visible[7])UnionRect(&s.bounds[0],&s.bounds[0],&s.bounds[7]);
+    }else if(request.operation==AccessibilityRequest::Invoke){
+        if(request.id<1||request.id>5||(controls_collapsed_&&request.id!=5)){request.result=UIA_E_ELEMENTNOTAVAILABLE;return 0;}
+        invoke(request.id-1);
+    }else if(request.operation==AccessibilityRequest::Volume){
+        if(request.id!=6||!std::isfinite(request.value)||request.value<0||request.value>100){request.result=E_INVALIDARG;return 0;}
+        set_volume(float(request.value/100));
+    }else if(request.operation==AccessibilityRequest::Focus){
+        if(request.id<0||request.id>6){request.result=UIA_E_INVALIDOPERATION;return 0;}
+        if(request.id==0)dismiss_volume();else if(controls_collapsed_&&request.id!=5)toggle_controls();
+        keyboard_focus_=request.id-1;if(request.id==6)popup_=true;if(!hidden_)SetFocus(window);place_palette();
+    }
+    request.result=S_OK;return 1;
 }
 LRESULT CALLBACK PhoneShell::main_proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
     auto a=reinterpret_cast<PhoneShell*>(GetWindowLongPtrW(h,GWLP_USERDATA));
@@ -266,7 +355,10 @@ LRESULT CALLBACK PhoneShell::main_proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
     switch(msg){
     case WM_NCCALCSIZE:return 0;
     case WM_TEST:return a->test_on_ui_thread(reinterpret_cast<const wchar_t*>(lp));
-    case WM_SHUTDOWN:if(a->tooltip_)DestroyWindow(a->tooltip_);if(a->palette_)DestroyWindow(a->palette_);DestroyWindow(h);PostQuitMessage(0);return 0;
+    case WM_SHUTDOWN:if(a->accessibility_)a->accessibility_->detach();if(a->tooltip_)DestroyWindow(a->tooltip_);if(a->palette_)DestroyWindow(a->palette_);if(a->status_panel_)DestroyWindow(a->status_panel_);DestroyWindow(h);PostQuitMessage(0);return 0;
+    case WM_GETOBJECT:if(lp==UiaRootObjectId&&a->accessibility_)return a->accessibility_->return_provider(h,wp,lp);break;
+    case WM_ACCESSIBILITY:if(wp==1)return a->accessibility_?a->accessibility_->dispatch_pending(reinterpret_cast<void*>(lp)):0;return lp?a->accessibility_request(*reinterpret_cast<AccessibilityRequest*>(lp)):0;
+    case WM_SETFOCUS:case WM_KILLFOCUS:a->accessibility_changed();break;
     case WM_SHOW:a->hidden_=false;ShowWindow(h,SW_SHOW);a->place_palette();return 0;
     case WM_ACTIVATEAPP:if(!wp)a->dismiss_volume();break;
     case WM_CLOSE:a->quit=true;a->signal();return 0;
@@ -286,7 +378,7 @@ LRESULT CALLBACK PhoneShell::main_proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         if(dw>dh)height=(w-border)/a->aspect_+border;else w=(height-border)*a->aspect_+border;
         float min_h=a->aspect_<1?360*s:180*s;float max_h=std::min(3900.0f,float(work_area(h).bottom-work_area(h).top-16*s));
         height=std::clamp(height,std::min(min_h,max_h),max_h);w=(height-border)*a->aspect_+border;
-        float max_w=std::min(3900.0f,float(work_area(h).right-work_area(h).left)-90*s);
+        float max_w=std::min(3900.0f,float(work_area(h).right-work_area(h).left)-WORK_MARGIN*s-rail_clearance(s));
         if(w>max_w){w=max_w;height=(w-border)/a->aspect_+border;}
         r->right=r->left+LONG(w);r->bottom=r->top+LONG(height);a->user_sized_=true;return TRUE;}
     case WM_GETMINMAXINFO:{auto m=reinterpret_cast<MINMAXINFO*>(lp);float s=a->dpi_scale();float height=a->aspect_<1?360*s:180*s;m->ptMinTrackSize={LONG((height-2*rim_pixels(s))*a->aspect_+2*rim_pixels(s)),LONG(height)};m->ptMaxTrackSize={4096,4096};return 0;}
@@ -311,7 +403,7 @@ LRESULT CALLBACK PhoneShell::main_proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         a->aspect_=next;a->display_w_=UINT(wp);a->display_h_=UINT(lp);
         if(changed){a->dismiss_volume();if(!a->fullscreen){if(!a->user_sized_)a->default_size();else{r=a->fitted_rect(r);SetWindowPos(h,nullptr,r.left,r.top,r.right-r.left,r.bottom-r.top,SWP_NOZORDER|SWP_NOACTIVATE);}}}
         }a->signal();a->paint_palette();return 0;}
-    case WM_REFRESH:a->paint_palette();return 0;
+    case WM_REFRESH:a->paint_palette();a->paint_status_panel();return 0;
     case WM_NCLBUTTONDBLCLK:if(wp==HTCAPTION){a->toggle_fullscreen();return 0;}break;
     case WM_LBUTTONDBLCLK:a->toggle_fullscreen();return 0;
     case WM_SYSCOMMAND:if((wp&0xfff0)==SC_MAXIMIZE || ((wp&0xfff0)==SC_RESTORE && a->fullscreen)){a->toggle_fullscreen();return 0;}break;
@@ -321,12 +413,13 @@ LRESULT CALLBACK PhoneShell::main_proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         if(wp=='M' && !(lp&(1LL<<30))){a->toggle_mute();return 0;}
         if(wp=='C'&&!(lp&(1LL<<30))){a->toggle_controls();return 0;}
         if(wp=='0'||wp==VK_NUMPAD0){a->default_size();return 0;}
-        if(wp==VK_UP||wp==VK_DOWN){a->set_volume(a->volume+(wp==VK_UP?.05f:-.05f));return 0;}
-        if(wp==VK_TAB){a->keyboard_focus_=a->controls_collapsed_?4:a->keyboard_focus_<0?(GetKeyState(VK_SHIFT)<0?4:0):(a->keyboard_focus_+(GetKeyState(VK_SHIFT)<0?4:1))%5;a->paint_palette();return 0;}
-        if((wp==VK_RETURN||wp==VK_SPACE)&&a->keyboard_focus_>=0){if(!(lp&(1LL<<30)))a->invoke(a->keyboard_focus_);return 0;}
-        if(wp==VK_ESCAPE){if(a->popup_||a->hover_pending_){a->dismiss_volume();return 0;}if(a->fullscreen)a->toggle_fullscreen();else{a->disconnect=true;a->signal();}return 0;}
-        if((wp==VK_LEFT||wp==VK_RIGHT)&&a->keyboard_focus_==0&&!a->controls_collapsed_){a->popup_=true;a->place_palette();a->set_volume(a->volume+(wp==VK_RIGHT?.01f:-.01f));return 0;}
-        if(wp=='D'){a->disconnect=true;a->signal();return 0;}break;
+        if(wp==VK_UP||wp==VK_DOWN){const float step=a->keyboard_focus_==5?.01f:.05f;a->set_volume(a->volume+(wp==VK_UP?step:-step));return 0;}
+        if(a->keyboard_focus_==5&&(wp==VK_HOME||wp==VK_END||wp==VK_PRIOR||wp==VK_NEXT)){a->set_volume(wp==VK_HOME?0:wp==VK_END?1:a->volume+(wp==VK_PRIOR?.1f:-.1f));return 0;}
+        if(wp==VK_TAB){int count=a->popup_?6:5;a->keyboard_focus_=a->controls_collapsed_?4:a->keyboard_focus_<0?(GetKeyState(VK_SHIFT)<0?count-1:0):(a->keyboard_focus_+(GetKeyState(VK_SHIFT)<0?count-1:1))%count;a->paint_palette();return 0;}
+        if((wp==VK_RETURN||wp==VK_SPACE)&&a->keyboard_focus_>=0){if(a->keyboard_focus_<5&&!(lp&(1LL<<30)))a->invoke(a->keyboard_focus_);return 0;}
+        if(wp==VK_ESCAPE){if(a->dismiss_error())return 0;if(a->popup_||a->hover_pending_){a->dismiss_volume();return 0;}if(a->fullscreen)a->toggle_fullscreen();else{a->disconnect=true;a->signal();}return 0;}
+        if((wp==VK_LEFT||wp==VK_RIGHT)&&(a->keyboard_focus_==0||a->keyboard_focus_==5)&&!a->controls_collapsed_){a->popup_=true;a->place_palette();a->set_volume(a->volume+(wp==VK_RIGHT?.01f:-.01f));return 0;}
+        if(wp=='D'){a->dismiss_error();a->disconnect=true;a->signal();return 0;}break;
     }
     return DefWindowProcW(h,msg,wp,lp);
 }
@@ -335,6 +428,7 @@ LRESULT CALLBACK PhoneShell::palette_proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
     if(msg==WM_NCCREATE){a=static_cast<PhoneShell*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(a));}
     if(!a)return DefWindowProcW(h,msg,wp,lp);
     switch(msg){
+    case WM_GETOBJECT:if(lp==UiaRootObjectId&&a->accessibility_)return a->accessibility_->return_provider(h,wp,lp);break;
     case WM_MOUSEACTIVATE:return MA_NOACTIVATE;
     case WM_SETCURSOR:SetCursor(LoadCursorW(nullptr,IDC_HAND));return TRUE;
     case WM_MOUSEMOVE:{POINT point{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};
@@ -360,6 +454,13 @@ LRESULT CALLBACK PhoneShell::palette_proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
     case WM_MOUSEWHEEL:a->set_volume(a->volume+(GET_WHEEL_DELTA_WPARAM(wp)>0?.05f:-.05f));return 0;
     case WM_CLOSE:a->quit=true;a->signal();return 0;
     }
+    return DefWindowProcW(h,msg,wp,lp);
+}
+
+LRESULT CALLBACK PhoneShell::status_proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
+    auto shell=reinterpret_cast<PhoneShell*>(GetWindowLongPtrW(h,GWLP_USERDATA));
+    if(msg==WM_NCCREATE){shell=static_cast<PhoneShell*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(shell));}
+    if(msg==WM_GETOBJECT&&lp==UiaRootObjectId&&shell&&shell->accessibility_)return shell->accessibility_->return_provider(h,wp,lp);
     return DefWindowProcW(h,msg,wp,lp);
 }
 

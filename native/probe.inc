@@ -28,7 +28,7 @@ static HRESULT probe_video(App* app, UINT width, UINT height,UINT codec=264) {
     // These independent encoder fixtures represent separate phones/sessions.
     app->shell.reset_video();
     CHECK(app->init_decoder(codec,width,height));
-    if(app->low_latency_attribute!=1||(SUCCEEDED(app->low_latency_get)&&app->low_latency_value!=1))return E_FAIL;
+    if(app->low_latency_attribute!=1||(SUCCEEDED(app->low_latency_get)&&app->low_latency_value!=1)){error_hr("decoder low-latency readback",E_FAIL);return E_FAIL;}
     ComPtr<IMFTransform> enc;if(codec==265){CHECK(create_hevc_transform(true,&enc));}else{CHECK(CoCreateInstance(CLSID_CMSH264EncoderMFT,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&enc)));}
     ComPtr<IMFMediaType> output; CHECK(MFCreateMediaType(&output));
     CHECK(output->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video)); CHECK(output->SetGUID(MF_MT_SUBTYPE, codec==265?MFVideoFormat_HEVC:MFVideoFormat_H264));
@@ -60,7 +60,7 @@ static HRESULT probe_video(App* app, UINT width, UINT height,UINT codec=264) {
     CHECK(enc->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN,0));CHECK(drain());
     double until=now_seconds()+0.4;while(now_seconds()<until){CHECK(app->tick());Sleep(2);}
     // A paused redraw uses the retained private texture, not a live decoder surface.
-    if(!app->last_frame.sample)return E_FAIL;
+    if(!app->last_frame.sample){error_hr("no retained frame after encoder drain",E_FAIL);return E_FAIL;}
     app->video.clear();
     auto redraw_paused=[&]() -> HRESULT {
         const uint64_t before=app->presented;const ULONGLONG deadline=GetTickCount64()+1000;
@@ -78,10 +78,10 @@ static HRESULT probe_video(App* app, UINT width, UINT height,UINT codec=264) {
     }
     DWORD_PTR result=0;
     if(!SendMessageTimeoutW(app->window,WM_KEYDOWN,VK_F11,0,SMTO_ABORTIFHUNG,2000,&result))return HRESULT_FROM_WIN32(GetLastError());
-    if(GetWindowLongPtrW(app->window,GWL_STYLE)&WS_CAPTION)return E_FAIL;
+    if(GetWindowLongPtrW(app->window,GWL_STYLE)&WS_CAPTION){error_hr("fullscreen caption regression",E_FAIL);return E_FAIL;}
     CHECK(redraw_paused());
     if(!SendMessageTimeoutW(app->window,WM_KEYDOWN,VK_F11,0,SMTO_ABORTIFHUNG,2000,&result))return HRESULT_FROM_WIN32(GetLastError());
-    if((GetWindowLongPtrW(app->window,GWL_STYLE)&WS_CAPTION)||app->shell.fullscreen)return E_FAIL;
+    if((GetWindowLongPtrW(app->window,GWL_STYLE)&WS_CAPTION)||app->shell.fullscreen){error_hr("fullscreen return regression",E_FAIL);return E_FAIL;}
     CHECK(redraw_paused());
     if(!SetWindowPos(app->window,nullptr,original.left,original.top,original.right-original.left,original.bottom-original.top,SWP_NOZORDER|SWP_NOACTIVATE))return HRESULT_FROM_WIN32(GetLastError());
     CHECK(redraw_paused());
@@ -89,29 +89,33 @@ static HRESULT probe_video(App* app, UINT width, UINT height,UINT codec=264) {
     app->shell.redraw=false;const auto before=app->presented;const double due=now_seconds()+.06;
     app->video.push_back({app->last_frame.sample,due,app->last_frame.width,app->last_frame.height});
     if(am_pump(app,0)<0)return E_FAIL;
-    if(app->presented>before&&now_seconds()<due)return E_FAIL;
+    if(app->presented>before&&now_seconds()<due){char detail[180];sprintf_s(detail,"future picture early presentation queued=%zu shown_delta=%llu due_in_ms=%.3f",app->video.size(),static_cast<unsigned long long>(app->presented-before),(due-now_seconds())*1000);error_hr(detail,E_FAIL);return E_FAIL;}
     ULONGLONG deadline=GetTickCount64()+1000;
     while(app->presented==before&&GetTickCount64()<deadline)if(am_pump(app,100)<0)return E_FAIL;
-    if(app->presented!=before+1||!app->video.empty())return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+    if(app->presented!=before+1||!app->video.empty()){error_hr("future picture did not drain exactly once",E_FAIL);return HRESULT_FROM_WIN32(ERROR_TIMEOUT);}
     const auto late=app->late_frames,shown=app->presented;const double now=now_seconds();
     for(int i=0;i<3;++i)app->video.push_back({app->last_frame.sample,now-.03+i*.01,app->last_frame.width,app->last_frame.height});
     if(am_pump(app,0)<0)return E_FAIL;
     deadline=GetTickCount64()+1000;
     while(app->presented==shown&&GetTickCount64()<deadline)if(am_pump(app,100)<0)return E_FAIL;
-    if(app->presented!=shown+1||!app->video.empty()||app->late_frames!=late+2)return E_FAIL;
+    if(app->presented!=shown+1||!app->video.empty()||app->late_frames!=late+2){error_hr("latest-due backlog did not coalesce",E_FAIL);return E_FAIL;}
     return S_OK;
 }
-static HRESULT probe_letterbox_pixels(App* app) {
+static HRESULT probe_letterbox_pixels(App* app,bool offset=false,VideoColor color={}) {
     // This readback is restricted to a freshly generated diagnostic pattern, never sender media.
     constexpr UINT width=640,height=360,border=16;
-    std::vector<uint8_t> pixels(width*height*3/2,128);
+    const UINT ox=offset?16:0,oy=offset?8:0,coded_w=width+(offset?32:0),coded_h=height+(offset?24:0);
+    std::vector<uint8_t> pixels(coded_w*coded_h*3/2,128);std::fill(pixels.begin(),pixels.begin()+coded_w*coded_h,uint8_t(16));
     const uint8_t levels[2][2]={{64,112},{160,208}};
+    const uint8_t chroma[2][2][2]={{{192,192},{64,192}},{{192,64},{64,64}}};
+    const uint8_t white=color.range==MFNominalRange_0_255?255:235;
     for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x)
-        pixels[y*width+x]=(x<border||y<border||x>=width-border||y>=height-border)?235:levels[y>=height/2][x>=width/2];
-    D3D11_TEXTURE2D_DESC pattern_desc{};pattern_desc.Width=width;pattern_desc.Height=height;pattern_desc.MipLevels=1;pattern_desc.ArraySize=1;
+        pixels[(y+oy)*coded_w+x+ox]=(x<border||y<border||x>=width-border||y>=height-border)?white:levels[y>=height/2][x>=width/2];
+    for(UINT y=border;y<height-border;y+=2)for(UINT x=border;x<width-border;x+=2){size_t p=size_t(coded_w)*coded_h+(y+oy)/2*coded_w+x+ox;pixels[p]=chroma[y>=height/2][x>=width/2][0];pixels[p+1]=chroma[y>=height/2][x>=width/2][1];}
+    D3D11_TEXTURE2D_DESC pattern_desc{};pattern_desc.Width=coded_w;pattern_desc.Height=coded_h;pattern_desc.MipLevels=1;pattern_desc.ArraySize=1;
     pattern_desc.Format=DXGI_FORMAT_NV12;pattern_desc.SampleDesc.Count=1;pattern_desc.Usage=D3D11_USAGE_DEFAULT;
     pattern_desc.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;
-    D3D11_SUBRESOURCE_DATA initial{pixels.data(),width,UINT(pixels.size())};ComPtr<ID3D11Texture2D> pattern;
+    D3D11_SUBRESOURCE_DATA initial{pixels.data(),coded_w,UINT(pixels.size())};ComPtr<ID3D11Texture2D> pattern;
     CHECK(app->device->CreateTexture2D(&pattern_desc,&initial,&pattern));
     ComPtr<IMFMediaBuffer> buffer;CHECK(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D),pattern.Get(),0,FALSE,&buffer));
     ComPtr<IMFSample> sample;CHECK(MFCreateSample(&sample));CHECK(sample->AddBuffer(buffer.Get()));
@@ -123,10 +127,11 @@ static HRESULT probe_letterbox_pixels(App* app) {
     read_desc.Format=DXGI_FORMAT_B8G8R8A8_UNORM;read_desc.SampleDesc.Count=1;read_desc.Usage=D3D11_USAGE_STAGING;read_desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
     ComPtr<ID3D11Texture2D> readback;CHECK(app->device->CreateTexture2D(&read_desc,nullptr,&readback));
     const uint64_t before=app->presented;
+    const RECT source{LONG(ox),LONG(oy),LONG(ox+width),LONG(oy+height)};
     const ULONGLONG deadline=GetTickCount64()+1000;
     while(app->presented==before&&GetTickCount64()<deadline){
         if(!app->video_slot_reserved){DWORD ready=WaitForSingleObject(app->video_event.h,20);if(ready==WAIT_TIMEOUT)continue;if(ready!=WAIT_OBJECT_0)return E_FAIL;app->video_slot_reserved=true;}
-        CHECK(app->draw(sample.Get(),width,height,readback.Get()));if(app->presented==before)Sleep(1);
+        CHECK(app->draw(sample.Get(),width,height,readback.Get(),&source,&color));if(app->presented==before)Sleep(1);
     }
     if(app->presented!=before+1||!app->video.empty()||app->presented_width!=width||app->presented_height!=height)return E_FAIL;
     if(app->vieww!=read_desc.Width||app->viewh!=read_desc.Height)return E_FAIL;
@@ -142,14 +147,21 @@ static HRESULT probe_letterbox_pixels(App* app) {
     if(valid){
         // Border corners survive scaling: a center crop would lose these markers.
         for(double x:{.01,.99})for(double y:{.02,.98})valid=gray(UINT(x*(dw-1)),top+UINT(y*(dh-1)),255,25)&&valid;
-        const int expected[2][2]={{56,112},{168,224}};
-        for(UINT y=0;y<2;++y)for(UINT x=0;x<2;++x)valid=gray(UINT((x?.75:.25)*(dw-1)),top+UINT((y?.75:.25)*(dh-1)),expected[y][x],20)&&valid;
+        for(UINT y=0;y<2;++y)for(UINT x=0;x<2;++x){
+            const bool full=color.range==MFNominalRange_0_255,bt709=color.matrix==MFVideoTransferMatrix_BT709;
+            double luma=full?levels[y][x]:(levels[y][x]-16)*255.0/219,u=(chroma[y][x][0]-128)*(full?1.0:255.0/224),v=(chroma[y][x][1]-128)*(full?1.0:255.0/224);
+            double reference[3]={luma+(bt709?1.8556:1.772)*u,luma-(bt709?.187324:.344136)*u-(bt709?.468124:.714136)*v,luma+(bt709?1.5748:1.402)*v};
+            UINT px=UINT((x?.75:.25)*(dw-1)),py=top+UINT((y?.75:.25)*(dh-1));auto pixel=static_cast<const uint8_t*>(mapped.pData)+size_t(py)*mapped.RowPitch+size_t(px)*4;
+            for(int channel=0;channel<3;++channel)if(std::abs(int(pixel[channel])-int(std::lround(std::clamp(reference[channel],0.0,255.0))))>8){error_hr("synthetic aperture/color quadrant mismatch",E_FAIL);valid=false;}
+        }
         for(double x:{.1,.5,.9}){
             valid=gray(UINT(x*(dw-1)),top/2,0,8)&&valid;
             valid=gray(UINT(x*(dw-1)),read_desc.Height-1-top/2,0,8)&&valid;
         }
     }
-    app->context->Unmap(readback.Get(),0);return valid?S_OK:E_FAIL;
+    app->context->Unmap(readback.Get(),0);
+    if(!EqualRect(&app->last_frame.source,&source)||app->last_frame.color.matrix!=color.matrix||app->last_frame.color.range!=color.range)return E_FAIL;
+    return valid?S_OK:E_FAIL;
 }
 static HRESULT probe_shape_schedule(App* app) {
     if(!app->last_frame.sample||app->shell.fullscreen)return E_FAIL;
@@ -186,6 +198,10 @@ static HRESULT probe_shape_schedule(App* app) {
         ||destination.right<=destination.left||destination.bottom<=destination.top
         ||std::abs(double(destination.right-destination.left)/(destination.bottom-destination.top)-16.0/9)>.02)return E_FAIL;
     CHECK(probe_letterbox_pixels(app));
+    CHECK(probe_letterbox_pixels(app,true));
+    CHECK(probe_letterbox_pixels(app,true,{MFVideoTransferMatrix_BT601,MFNominalRange_16_235}));
+    CHECK(probe_letterbox_pixels(app,true,{MFVideoTransferMatrix_BT601,MFNominalRange_0_255}));
+    CHECK(probe_letterbox_pixels(app,true,{MFVideoTransferMatrix_BT709,MFNominalRange_0_255}));
     CHECK(show(edge,edge*2,now_seconds(),.5));
     const auto shape_changes=app->presented_shape_changes;const double future=now_seconds()+.25;
     app->queue_video_frame({sample,future,edge*2,edge});
@@ -232,23 +248,109 @@ static HRESULT probe_interactive_video(App* app) {
     if(app->presented<shown+1||!app->video.empty()||app->presentation_late.count!=lateness+1||app->audio_frames)return E_FAIL;
     return S_OK;
 }
+static HRESULT probe_first_present_commit(App* app){
+    if(!app->last_frame.sample)return E_FAIL;auto sample=app->last_frame.sample;
+    const UINT width=app->last_frame.width,height=app->last_frame.height;app->shell.reset_video();
+    if(!app->video_slot_reserved){if(WaitForSingleObject(app->video_event.h,1000)!=WAIT_OBJECT_0)return E_FAIL;app->video_slot_reserved=true;}
+    const auto before=app->presented;
+    HRESULT busy=app->draw(sample.Get(),(width/2)&~1u,height,nullptr,nullptr,nullptr,true);
+    if(busy!=S_FALSE||app->shell.has_video||app->shell.status==2||app->presented!=before)return E_FAIL;
+    ULONGLONG deadline=GetTickCount64()+1000;
+    do {CHECK(app->draw(sample.Get(),width,height));if(app->presented>before)break;Sleep(2);}while(GetTickCount64()<deadline);
+    if(app->presented!=before+1||!app->shell.has_video)return E_FAIL;
+    do {RECT r{};GetClientRect(app->window,&r);int rim=PhoneShell::rim_pixels(app->shell.dpi_scale());
+        if(r.bottom>2*rim&&std::abs(double(r.right-2*rim)/(r.bottom-2*rim)-double(width)/height)<.02)return S_OK;
+        if(am_pump(app,10)<0)return E_FAIL;
+    }while(GetTickCount64()<deadline);
+    return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+}
+static HRESULT probe_minimized_output(App* app){
+    if(!app->last_frame.sample)return E_FAIL;WINDOWPLACEMENT original{sizeof(original)};if(!GetWindowPlacement(app->window,&original))return E_FAIL;
+    const BOOL visible=IsWindowVisible(app->window);auto minimized=original;minimized.showCmd=SW_SHOWMINNOACTIVE;
+    if(!SetWindowPlacement(app->window,&minimized))return E_FAIL;ShowWindow(app->window,SW_HIDE);
+    const auto presented=app->presented,lateness=app->presentation_late.count;auto sample=app->last_frame.sample;const UINT width=app->last_frame.width,height=app->last_frame.height;
+    for(int i=0;i<4;++i)app->queue_video_frame({sample,now_seconds()+.2,width,height});HRESULT result=app->tick();
+    bool drained=IsIconic(app->window)&&app->presented==presented&&app->video.size()==1;
+    SetWindowPlacement(app->window,&original);if(!visible)ShowWindow(app->window,SW_HIDE);app->shell.redraw=true;
+    CHECK(result);if(!drained){error_hr("minimized output did not retain exactly one frame without Present",E_FAIL);return E_FAIL;}
+    // Restore may redraw the last presented picture before the retained future frame is due.
+    // Only consumption of that queue entry (and its synchronized timing sample) proves restore.
+    ULONGLONG deadline=GetTickCount64()+1000;while(!app->video.empty()&&GetTickCount64()<deadline)if(am_pump(app,20)<0)return E_FAIL;
+    if(app->presented<=presented||!app->video.empty()||app->presentation_late.count!=lateness+1){char detail[180];sprintf_s(detail,"minimized restore queued=%zu presented_delta=%llu iconic=%d",app->video.size(),static_cast<unsigned long long>(app->presented-presented),int(IsIconic(app->window)));error_hr(detail,E_FAIL);return E_FAIL;}return S_OK;
+}
 extern "C" int am_video_probe(void* p) {
     auto app=static_cast<App*>(p);uint64_t before=app->decoder_surfaces;
-    HRESULT hr=probe_video(app,1920,1080);
-    if(SUCCEEDED(hr))hr=probe_video(app,1080,1920);
+    const char* stage="H264 landscape";HRESULT hr=probe_video(app,1920,1080);
+    if(SUCCEEDED(hr)){stage="H264 portrait";hr=probe_video(app,1080,1920);}
     if(SUCCEEDED(hr)&&app->hevc_available){
         // A partial codec-initialization failure must be recoverable, not a null dereference.
         app->decoder.Reset();app->decoder_ready=false;const uint8_t dummy=0;
         if(app->submit(&dummy,1,now_seconds())!=MF_E_TRANSFORM_TYPE_NOT_SET)return 0;
-        uint64_t hevc_before=app->decoder_surfaces;hr=probe_video(app,3840,2160,265);
+        stage="HEVC landscape";uint64_t hevc_before=app->decoder_surfaces;hr=probe_video(app,3840,2160,265);
         if(SUCCEEDED(hr)&&(app->decoder_surfaces-hevc_before<8||app->width!=3840||app->height!=2160))hr=E_FAIL;
-        if(SUCCEEDED(hr))hr=probe_video(app,992,2160,265);
+        if(SUCCEEDED(hr)){stage="HEVC portrait";hr=probe_video(app,992,2160,265);}
         if(SUCCEEDED(hr)&&(app->width!=992||app->height!=2160))hr=E_FAIL;
     }
-    if(SUCCEEDED(hr))hr=probe_shape_schedule(app);
-    if(SUCCEEDED(hr))hr=probe_interactive_video(app);
-    if(FAILED(hr)){error_hr("synthetic GPU probe",hr);return 0;}
-    if(app->decoder_surfaces-before<60){error_hr("insufficient hardware decoder surfaces",E_FAIL);return 0;}return 1;
+    if(SUCCEEDED(hr)){stage="shape scheduling/aperture/color pixels";hr=probe_shape_schedule(app);}
+    if(SUCCEEDED(hr)){stage="interactive/synchronized transition";hr=probe_interactive_video(app);}
+    if(SUCCEEDED(hr)){stage="first successful presentation commitment";hr=probe_first_present_commit(app);}
+    if(SUCCEEDED(hr)){stage="minimized output/restore";hr=probe_minimized_output(app);}
+    if(FAILED(hr)){error_hr(stage,hr);return 0;}
+    if(app->decoder_surfaces-before<60){error_hr("insufficient hardware decoder surfaces",E_FAIL);return 0;}
+    if(!app->input_prepare.count||!std::isfinite(app->input_prepare.average())||app->input_prepare.minimum<0||app->input_prepare.maximum<app->input_prepare.minimum)return 0;
+    return 1;
+}
+static HRESULT probe_native_contracts(App* app){
+    CHECK(probe_platform_contracts());
+    StageTiming short_samples;short_samples.add(.000003);short_samples.add(.000006);
+    if(short_samples.percentile(.95)>short_samples.maximum||short_samples.percentile(.95)<short_samples.minimum)return E_FAIL;
+    MFVideoArea area{};area.OffsetX.value=16;area.OffsetY.value=8;area.Area={640,360};RECT rect{};
+    CHECK(source_area(672,384,&area,rect));if(rect.left!=16||rect.top!=8||rect.right!=656||rect.bottom!=368)return E_FAIL;
+    area.OffsetX.fract=1;if(SUCCEEDED(source_area(672,384,&area,rect)))return E_FAIL;area.OffsetX.fract=0;
+    area.OffsetX.value=-1;if(SUCCEEDED(source_area(672,384,&area,rect)))return E_FAIL;area.OffsetX.value=40;
+    if(SUCCEEDED(source_area(672,384,&area,rect)))return E_FAIL;
+    ComPtr<IMFAttributes> attrs;CHECK(MFCreateAttributes(&attrs,2));VideoColor color;
+    CHECK(attrs->SetUINT32(MF_MT_YUV_MATRIX,MFVideoTransferMatrix_BT601));CHECK(attrs->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE,MFNominalRange_0_255));CHECK(media_color(attrs.Get(),color));
+    if(color.matrix!=MFVideoTransferMatrix_BT601||color.range!=MFNominalRange_0_255)return E_FAIL;
+    CHECK(attrs->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE,99));if(SUCCEEDED(media_color(attrs.Get(),color)))return E_FAIL;
+    // Fake endpoint ordering uses the production mixer/prime sequence, without touching WASAPI.
+    std::deque<AudioFrame> queue;std::array<int16_t,64> pcm{};uint64_t played=0,skipped=0;std::string order;
+    queue.push_back({std::vector<int16_t>(64,1234),0,10});
+    auto fill=[&]{order+='G';mix_audio(queue,pcm.data(),32,0,1,played,skipped);order+='R';return S_OK;};
+    auto start=[&]{order+='S';return S_OK;};CHECK(prime_audio(fill,start));
+    if(order!="GRS"||played||std::any_of(pcm.begin(),pcm.end(),[](int16_t v){return v!=0;}))return E_FAIL;
+    queue.clear();order.clear();CHECK(prime_audio(fill,start));if(order!="GRS"||played)return E_FAIL;
+    queue.push_back({std::vector<int16_t>(64,2345),0,0});mix_audio(queue,pcm.data(),32,0,1,played,skipped);
+    if(played!=32||pcm.front()!=2345||pcm.back()!=2345)return E_FAIL;
+    bool started=false;if(SUCCEEDED(prime_audio([]{return E_FAIL;},[&]{started=true;return S_OK;}))||started)return E_FAIL;
+    const auto recoveries=app->audio_recoveries;app->endpoint_notice->OnDeviceAdded(L"synthetic unrelated capture endpoint");app->service_recovery();
+    if(app->audio_pending||app->audio_recoveries!=recoveries)return E_FAIL;
+    // Repeated recoverable failures stop after three attempts, then a device event can rearm.
+    HWND window=app->window;if(!app->recover_fault(AUDCLNT_E_DEVICE_INVALIDATED))return E_FAIL;
+    for(int i=0;i<4;++i){app->audio_retry_at=0;app->service_recovery(true);}
+    if(app->audio_retries!=3||!app->audio_pending||app->shell.status!=5)return E_FAIL;
+    app->endpoint_notice->OnDefaultDeviceChanged(eRender,eConsole,nullptr);
+    if(am_dispatch(app)!=2||app->audio_pending||!app->audio||app->audio_running||app->audio_frames)return E_FAIL;
+    if(!app->recover_fault(DXGI_ERROR_DEVICE_RESET))return E_FAIL;
+    for(int i=0;i<4;++i){app->graphics_retry_at=0;app->service_recovery(true);}
+    if(app->graphics_retries!=3||!app->graphics_pending||app->device||app->shell.status!=5)return E_FAIL;
+    if(!am_reset(app))return E_FAIL;app->service_recovery();
+    if(app->graphics_pending||!app->device||!app->decoder_ready||app->window!=window||!IsWindow(window))return E_FAIL;
+    if(am_dispatch(app)!=2)return E_FAIL;
+    app->shell.set_status(6,L"");return S_OK;
+}
+static HRESULT probe_wait_transition(App* app){
+    Handle blocked,wake,audio;blocked.h=CreateEventW(nullptr,FALSE,FALSE,nullptr);wake.h=CreateEventW(nullptr,FALSE,FALSE,nullptr);audio.h=CreateEventW(nullptr,FALSE,FALSE,nullptr);if(!blocked.h||!wake.h||!audio.h)return E_FAIL;
+    struct Restore{App* app;HANDLE handle,wake,audio;bool reserved;~Restore(){app->video.clear();app->video_event.h=handle;app->wake.h=wake;app->audio_event.h=audio;app->video_slot_reserved=reserved;am_video_sync(app,1);}} restore{app,app->video_event.h,app->wake.h,app->audio_event.h,app->video_slot_reserved};
+    app->video_event.h=blocked.h;app->wake.h=wake.h;app->audio_event.h=audio.h;app->video_slot_reserved=false;app->shell.redraw=false;am_video_sync(app,0);
+    app->video.push_back({{},now_seconds()+5,16,16});ResetEvent(app->wake.h);ResetEvent(app->audio_event.h);
+    const auto presented=app->presented;auto waiting=std::async(std::launch::async,[&]{return am_wait(app,1000);});
+    if(waiting.wait_for(std::chrono::milliseconds(20))!=std::future_status::timeout)return E_FAIL;
+    SetEvent(app->wake.h);if(waiting.get()!=1||app->presented!=presented||app->video.size()!=1)return E_FAIL;
+    // Main-thread reconciliation happens between wait and dispatch, never after dispatch.
+    am_video_sync(app,1);app->sound.push_back({std::vector<int16_t>(64,1200),0,now_seconds()+5});am_flush_audio(app);
+    if(am_dispatch(app)!=1||app->presented!=presented||!app->sound.empty()||app->audio_frames)return E_FAIL;
+    return S_OK;
 }
 extern "C" int am_ui_probe(void* p,const char* directory) {
     // Readiness polling must not consume an asynchronous completion signal.
@@ -256,6 +358,8 @@ extern "C" int am_ui_probe(void* p,const char* directory) {
         if(am_discovery_status(&d)!=1||am_discovery_status(&d)!=1){error_hr("discovery completion must remain signaled",E_FAIL);return 0;}
         ResetEvent(d.done.h);d.status=ERROR_IO_PENDING;if(am_discovery_status(&d)!=0)return 0;}
     auto app=static_cast<App*>(p);
+    HRESULT contracts=probe_native_contracts(app);if(SUCCEEDED(contracts))contracts=probe_wait_transition(app);
+    if(FAILED(contracts)){error_hr("native recovery/transition contracts",contracts);return 0;}
     HRESULT wait_probe=probe_media_wait(app);if(FAILED(wait_probe)){error_hr("deadline-driven media wait regression",wait_probe);return 0;}
     // Exercise transport deadlines with local pipe ends that deliberately never drain/reply.
     // No worker codec, audio endpoint, desktop input or network is involved.
@@ -296,15 +400,15 @@ extern "C" int am_ui_probe(void* p,const char* directory) {
     auto path=wide(directory);HRESULT hr=app->shell.self_test(path.c_str());
     if(FAILED(hr)){error_hr("native UI regression (line encoded in HRESULT)",hr);return 0;}
     app->shell.reset_video();
-    app->shell.set_status(L"Connected — waiting for picture and sound");
+    app->shell.set_status(1,L"Waiting for picture and sound");
     if(app->shell.status!=1){error_hr("negotiated session waiting state",E_FAIL);return 0;}
-    app->shell.set_status(L"Ready");
+    app->shell.set_status(0,L"");
     auto file=path+L"/idle.png";hr=app->chrome.layout(app->shell,path.empty()?nullptr:file.c_str());
     if(FAILED(hr)){error_hr("idle artwork diagnostic",hr);return 0;}
     if(!path.empty()){
-        app->shell.set_status(L"Connecting");file=path+L"/connecting.png";hr=app->chrome.layout(app->shell,file.c_str());
+        app->shell.set_status(1,L"");file=path+L"/connecting.png";hr=app->chrome.layout(app->shell,file.c_str());
         if(FAILED(hr))return 0;
-        app->shell.set_status(L"Ready");
+        app->shell.set_status(0,L"");
         SendMessageW(app->window,PhoneShell::WM_FORMAT,1920,1080);
         SendMessageW(app->window,WM_KEYDOWN,'0',0);
         file=path+L"/landscape-idle.png";hr=app->chrome.layout(app->shell,file.c_str());if(FAILED(hr))return 0;

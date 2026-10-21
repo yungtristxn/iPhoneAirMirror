@@ -5,8 +5,11 @@
 #include <string>
 #include <algorithm>
 #include <memory>
+#include <mutex>
 class ControlPainter;
 class PaletteSurface;
+class PhoneAccessibility;
+struct AccessibilityRequest;
 
 // UI-thread-only geometry/input plus atomic handoff to the media thread.
 // The owned palette has no taskbar entry and never outlives the receiver.
@@ -17,6 +20,7 @@ public:
     std::atomic<bool> fullscreen{false}, has_video{false}, muted{false};
     std::atomic<float> volume{1.0f};
     std::atomic<int> status{0}; // ready, connecting, streaming
+    std::atomic<bool> status_dismissed{false};
     PhoneShell();
     ~PhoneShell();
     HRESULT create(HANDLE wake, bool hidden);
@@ -25,15 +29,18 @@ public:
     void shutdown();
     void video_size(UINT width,UINT height);
     void reset_video();
-    void set_status(const std::wstring& title);
+    void set_title(const std::wstring& title);
+    void set_status(int kind,const std::wstring& message);
+    std::wstring status_message() const;
     float gain() const {return muted.load()?0.0f:volume.load();}
     float dpi_scale() const;
     static int rim_pixels(float scale){return std::max(2,int(3*scale+.5f));}
     static float corner_radius(UINT width,UINT height,float scale);
     static constexpr UINT WM_SHUTDOWN=WM_APP+1, WM_FORMAT=WM_APP+2, WM_REFRESH=WM_APP+3, WM_SHOW=WM_APP+4, WM_TEST=WM_APP+5,
-        WM_SOURCE_FORMAT=WM_APP+6, WM_SOURCE_RESET=WM_APP+7;
+        WM_SOURCE_FORMAT=WM_APP+6, WM_SOURCE_RESET=WM_APP+7, WM_ACCESSIBILITY=WM_APP+8;
 private:
-    HWND palette_=nullptr,tooltip_=nullptr;
+    friend class PhoneAccessibility;
+    HWND palette_=nullptr,tooltip_=nullptr,status_panel_=nullptr;
     HICON small_icon_=nullptr,large_icon_=nullptr;
     HANDLE wake_=nullptr;
     std::thread thread_;
@@ -51,6 +58,13 @@ private:
     ULONG_PTR gdiplus_=0;
     std::unique_ptr<ControlPainter> painter_;
     std::unique_ptr<PaletteSurface> palette_surface_;
+    std::unique_ptr<PaletteSurface> status_surface_;
+    std::wstring painted_status_;
+    int painted_status_kind_=-1;
+    std::unique_ptr<PhoneAccessibility> accessibility_;
+    mutable std::mutex status_mutex_;
+    std::wstring status_reason_;
+    UINT_PTR error_generation_=0;
     HRESULT initial_paint_=E_PENDING;
     void default_size(bool center=false);
     RECT fitted_rect(RECT original) const;
@@ -58,6 +72,10 @@ private:
     void shape_window();
     void update_icons();
     void place_palette();
+    void paint_status_panel();
+    bool dismiss_error();
+    LRESULT accessibility_request(AccessibilityRequest& request);
+    void accessibility_changed();
     HRESULT paint_palette(const wchar_t* diagnostic_path=nullptr,float diagnostic_scale=0);
     void toggle_fullscreen();
     void toggle_mute();
@@ -75,4 +93,5 @@ private:
     void menu(POINT screen);
     static LRESULT CALLBACK main_proc(HWND,UINT,WPARAM,LPARAM);
     static LRESULT CALLBACK palette_proc(HWND,UINT,WPARAM,LPARAM);
+    static LRESULT CALLBACK status_proc(HWND,UINT,WPARAM,LPARAM);
 };

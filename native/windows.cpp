@@ -32,6 +32,7 @@
 #include <thread>
 #include <future>
 #include <limits>
+#include "platform_support.h"
 using Microsoft::WRL::ComPtr;
 #define CHECK(x) do { HRESULT hr_ = (x); if (FAILED(hr_)) { error_hr(#x, hr_); return hr_; } } while (0)
 
@@ -65,12 +66,61 @@ static HRESULT create_hevc_transform(bool encoder,IMFTransform** transform) {
     if(FAILED(hr))return hr;hr=MF_E_TOPO_CODEC_NOT_FOUND;
     for(UINT32 i=0;i<count;++i){if(FAILED(hr))hr=list[i]->ActivateObject(IID_PPV_ARGS(transform));list[i]->Release();}CoTaskMemFree(list);return hr;
 }
-struct VideoFrame { ComPtr<IMFSample> sample; double pts; UINT width; UINT height; };
+struct VideoColor {UINT32 matrix=MFVideoTransferMatrix_BT709,range=MFNominalRange_16_235;};
+static HRESULT source_area(UINT w,UINT h,const MFVideoArea* area,RECT& source){
+    source={0,0,LONG(w),LONG(h)};if(!area)return S_OK;
+    if(area->OffsetX.fract||area->OffsetY.fract||area->OffsetX.value<0||area->OffsetY.value<0||area->Area.cx<=0||area->Area.cy<=0)return MF_E_INVALIDMEDIATYPE;
+    const int64_t right=int64_t(area->OffsetX.value)+area->Area.cx,bottom=int64_t(area->OffsetY.value)+area->Area.cy;
+    if(right>w||bottom>h)return MF_E_INVALIDMEDIATYPE;
+    source={area->OffsetX.value,area->OffsetY.value,LONG(right),LONG(bottom)};return S_OK;
+}
+static HRESULT media_color(IMFAttributes* attrs,VideoColor& color){
+    color={};UINT32 value=0;
+    if(SUCCEEDED(attrs->GetUINT32(MF_MT_YUV_MATRIX,&value))&&value){if(value!=MFVideoTransferMatrix_BT709&&value!=MFVideoTransferMatrix_BT601)return MF_E_INVALIDMEDIATYPE;color.matrix=value;}
+    if(SUCCEEDED(attrs->GetUINT32(MF_MT_VIDEO_NOMINAL_RANGE,&value))&&value){if(value!=MFNominalRange_0_255&&value!=MFNominalRange_16_235)return MF_E_INVALIDMEDIATYPE;color.range=value;}
+    return S_OK;
+}
+struct VideoFrame { ComPtr<IMFSample> sample; double pts; UINT width; UINT height; RECT source{};VideoColor color{}; };
 struct AudioFrame { std::vector<int16_t> pcm; size_t pos = 0; double pts = 0; };
+static void mix_audio(std::deque<AudioFrame>& queue,int16_t* out,UINT32 count,double target,float gain,uint64_t& played,uint64_t& skipped){
+    memset(out,0,size_t(count)*4);
+        for (UINT32 f = 0; f < count; ++f) {
+            double t = target + double(f)/44100;
+            while (!queue.empty()) {
+                auto& a = queue.front(); double delta = a.pts + double(a.pos/2)/44100 - t;
+                if (delta < -0.010) {
+                    // Clamp before conversion; an untrusted timestamp must not overflow size_t.
+                    const double skip=std::min(double((a.pcm.size()-a.pos)/2),(-delta-0.002)*44100);
+                    a.pos += size_t(skip)*2;skipped+=size_t(skip);
+                }
+                if (a.pos >= a.pcm.size()) { queue.pop_front(); continue; }
+                if (delta > 0.003) break;
+                out[2*f] = int16_t(a.pcm[a.pos++]*gain); out[2*f+1] = int16_t(a.pcm[a.pos++]*gain); ++played;
+                if (a.pos >= a.pcm.size()) queue.pop_front(); break;
+            }
+        }
+}
 struct StageTiming {
     uint64_t count=0;double total=0,minimum=0,maximum=0;
-    void add(double value){if(!count)minimum=maximum=value;else {minimum=std::min(minimum,value);maximum=std::max(maximum,value);}++count;total+=value;}
+    std::array<uint64_t,65> histogram{};
+    void add(double value){if(!count)minimum=maximum=value;else {minimum=std::min(minimum,value);maximum=std::max(maximum,value);}++count;total+=value;if(value>=0)++histogram[size_t(std::min(value*2000,64.0))];}
     double average()const{return count?total/count:0;}
+    double percentile(double quantile)const{uint64_t seen=0,target=uint64_t(std::ceil(count*quantile));if(!target)return 0;for(size_t i=0;i<histogram.size();++i){seen+=histogram[i];if(seen>=target)return i==64?maximum:std::min(maximum,(i+1)/2000.0);}return maximum;}
+};
+template<class Fill,class Start>static HRESULT prime_audio(Fill fill,Start start){HRESULT hr=fill();return SUCCEEDED(hr)?start():hr;}
+class EndpointNotice final:public IMMNotificationClient {
+    std::atomic<ULONG> references{1};
+public:
+    Handle wake;std::atomic<bool> changed{false};
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** result)override{if(!result)return E_POINTER;*result=nullptr;if(iid==__uuidof(IUnknown)||iid==__uuidof(IMMNotificationClient)){*result=static_cast<IMMNotificationClient*>(this);AddRef();return S_OK;}return E_NOINTERFACE;}
+    ULONG STDMETHODCALLTYPE AddRef()override{return ++references;}
+    ULONG STDMETHODCALLTYPE Release()override{ULONG left=--references;if(!left)delete this;return left;}
+    void notify(){changed=true;SetEvent(wake.h);}
+    HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow,ERole role,LPCWSTR)override{if(flow==eRender&&role==eConsole)notify();return S_OK;}
+    HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR,DWORD)override{notify();return S_OK;}
+    HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR)override{notify();return S_OK;}
+    HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR)override{notify();return S_OK;}
+    HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR,const PROPERTYKEY)override{return S_OK;}
 };
 #include "phone_compositor.h"
 struct App {
@@ -83,8 +133,14 @@ struct App {
     ComPtr<IMFDXGIDeviceManager> manager; ComPtr<IMFTransform> decoder,h264_cache,hevc_cache;
     ComPtr<ID3D11VideoProcessorEnumerator> venum; ComPtr<ID3D11VideoProcessor> processor;
     ComPtr<IAudioClient> audio; ComPtr<IAudioRenderClient> render;
+    ComPtr<IMMDeviceEnumerator> audio_enumerator;ComPtr<EndpointNotice> endpoint_notice;bool endpoint_registered=false;
+    std::wstring audio_endpoint_id;
+    bool audio_pending=false,graphics_pending=false,external_unavailable=false;unsigned audio_retries=0,graphics_retries=0;double audio_retry_at=0,graphics_retry_at=0;
+    uint64_t audio_recoveries=0,graphics_recoveries=0,audio_silence=0,audio_skips=0;double audio_event_observed=0;
+    StageTiming audio_service_gap,audio_fill_time,audio_event_service,audio_queue_age;double last_audio_service=0;
     UINT32 audio_capacity = 0; double audio_latency = 0; bool audio_running = false;
     UINT width = 0, height = 0, vieww = 0, viewh = 0,processor_width=0,processor_height=0;
+    RECT output_aperture{};VideoColor output_color{};
     UINT source_width=0,source_height=0,presented_width=0,presented_height=0;
     uint64_t source_shape_changes=0,presented_shape_changes=0;
     std::deque<VideoFrame> video; std::deque<AudioFrame> sound;
@@ -96,20 +152,27 @@ struct App {
     uint64_t decoder_instances=0;
     uint64_t decoded = 0, presented = 0, gpu_frames = 0, decoder_surfaces = 0, late_frames = 0, audio_frames = 0, underruns = 0;
     size_t video_high_water=0,audio_high_water=0;
-    uint64_t video_waits=0,present_busy=0,submit_calls=0,interactive_skips=0;
+    uint64_t video_waits=0,present_busy=0,submit_calls=0,interactive_skips=0,minimized_skips=0;
     double submit_seconds=0,submit_max_seconds=0,present_seconds=0,present_max_seconds=0;
-    StageTiming output_ahead,presentation_late,decoder_residence;
+    StageTiming output_ahead,presentation_late,decoder_residence,input_prepare;
     struct DecodePending {LONGLONG pts=0;double began=0;bool active=false;};
     std::array<DecodePending,32> decode_pending{};
     HRESULT low_latency_set=E_NOINTERFACE,low_latency_get=E_NOINTERFACE;
     int low_latency_value=-1,low_latency_attribute=-1;
     std::string adapter; bool com = false, mf = false;
     ~App() {
+        if(endpoint_registered)audio_enumerator->UnregisterEndpointNotificationCallback(endpoint_notice.Get());endpoint_notice.Reset();audio_enumerator.Reset();
         if (audio) audio->Stop();
         sound.clear(); video.clear(); last_frame.sample.Reset(); paused_texture.Reset();decoder.Reset();h264_cache.Reset();hevc_cache.Reset(); render.Reset(); audio.Reset();
         processor.Reset(); venum.Reset(); manager.Reset(); swap.Reset(); vcontext.Reset(); vdevice.Reset(); context.Reset(); device.Reset();
         chrome=PhoneCompositor{};shell.shutdown();
         if (mf) MFShutdown(); if (com) CoUninitialize();
+    }
+    HRESULT init_audio_notifications(){
+        CHECK(CoCreateInstance(__uuidof(MMDeviceEnumerator),nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&audio_enumerator)));
+        endpoint_notice.Attach(new EndpointNotice);
+        if(!DuplicateHandle(GetCurrentProcess(),wake.h,GetCurrentProcess(),&endpoint_notice->wake.h,EVENT_MODIFY_STATE,FALSE,0))return HRESULT_FROM_WIN32(GetLastError());
+        CHECK(audio_enumerator->RegisterEndpointNotificationCallback(endpoint_notice.Get()));endpoint_registered=true;return S_OK;
     }
     HRESULT init(bool hidden) {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -123,6 +186,11 @@ struct App {
         if(!presentation_timer.h)presentation_timer.h=CreateWaitableTimerW(nullptr,FALSE,nullptr);
         if(!presentation_timer.h)return HRESULT_FROM_WIN32(GetLastError());
         CHECK(shell.create(wake.h,hidden));window=shell.window;
+        CHECK(init_graphics());CHECK(init_audio_notifications());CHECK(init_audio());
+        if (!hidden) shell.show();
+        return S_OK;
+    }
+    HRESULT init_graphics(){
         D3D_FEATURE_LEVEL level;
         CHECK(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
             D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
@@ -146,15 +214,19 @@ struct App {
         UINT token; CHECK(MFCreateDXGIDeviceManager(&token, &manager)); CHECK(manager->ResetDevice(device.Get(), token));
         {
             ComPtr<IMFTransform> probe;ComPtr<IMFAttributes> attrs;UINT32 aware=0;
-            D3D11_VIDEO_DECODER_DESC desc{D3D11_DECODER_PROFILE_HEVC_VLD_MAIN,3840,2160,DXGI_FORMAT_NV12};UINT configs=0;
+            D3D11_VIDEO_DECODER_DESC capability_desc{D3D11_DECODER_PROFILE_HEVC_VLD_MAIN,3840,2160,DXGI_FORMAT_NV12};UINT configs=0;
             hevc_available=SUCCEEDED(create_hevc_transform(false,&probe))&&SUCCEEDED(probe->GetAttributes(&attrs))
                 &&SUCCEEDED(attrs->GetUINT32(MF_SA_D3D11_AWARE,&aware))&&aware
-                &&SUCCEEDED(vdevice->GetVideoDecoderConfigCount(&desc,&configs))&&configs>0;
+                &&SUCCEEDED(vdevice->GetVideoDecoderConfigCount(&capability_desc,&configs))&&configs>0;
             if(hevc_available){hevc_cache=probe;++decoder_instances;}
         }
         CHECK(init_decoder());
-        ComPtr<IMMDeviceEnumerator> en; CHECK(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&en)));
-        ComPtr<IMMDevice> endpoint; CHECK(en->GetDefaultAudioEndpoint(eRender, eConsole, &endpoint));
+        return S_OK;
+    }
+    HRESULT init_audio(){
+        render.Reset();audio.Reset();audio_running=false;audio_capacity=0;
+        ComPtr<IMMDevice> endpoint; CHECK(audio_enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &endpoint));
+        LPWSTR id=nullptr;CHECK(endpoint->GetId(&id));audio_endpoint_id=id;CoTaskMemFree(id);
         CHECK(endpoint->Activate(__uuidof(IAudioClient), CLSCTX_INPROC_SERVER, nullptr, &audio));
         WAVEFORMATEX format{}; format.wFormatTag = WAVE_FORMAT_PCM; format.nChannels = 2; format.nSamplesPerSec = 44100;
         format.wBitsPerSample = 16; format.nBlockAlign = 4; format.nAvgBytesPerSec = 176400;
@@ -164,8 +236,50 @@ struct App {
         CHECK(audio->SetEventHandle(audio_event.h)); CHECK(audio->GetBufferSize(&audio_capacity));
         REFERENCE_TIME latency; CHECK(audio->GetStreamLatency(&latency)); audio_latency = latency / 1e7;
         CHECK(audio->GetService(IID_PPV_ARGS(&render)));
-        if (!hidden) shell.show();
         return S_OK;
+    }
+    HRESULT flush_audio(){
+        sound.clear();audio_running=false;last_audio_service=0;audio_event_observed=0;
+        if(!audio)return S_OK;HRESULT stopped=audio->Stop();if(FAILED(stopped))return stopped;return audio->Reset();
+    }
+    void release_audio(){if(audio)audio->Stop();sound.clear();audio_running=false;render.Reset();audio.Reset();audio_endpoint_id.clear();audio_capacity=0;last_audio_service=0;audio_event_observed=0;}
+    bool default_audio_changed(){
+        if(audio_pending||!audio)return true;ComPtr<IMMDevice> current;
+        if(FAILED(audio_enumerator->GetDefaultAudioEndpoint(eRender,eConsole,&current)))return true;
+        DWORD state=0;if(FAILED(current->GetState(&state))||state!=DEVICE_STATE_ACTIVE)return true;
+        LPWSTR id=nullptr;if(FAILED(current->GetId(&id)))return true;bool changed=audio_endpoint_id!=id;CoTaskMemFree(id);return changed;
+    }
+    void release_graphics(){
+        video.clear();last_frame.sample.Reset();paused_texture.Reset();decoder.Reset();h264_cache.Reset();hevc_cache.Reset();decoder_ready=false;decode_pending={};
+        chrome=PhoneCompositor{};processor.Reset();venum.Reset();manager.Reset();swap.Reset();vcontext.Reset();vdevice.Reset();context.Reset();device.Reset();
+        if(video_event.h){CloseHandle(video_event.h);video_event.h=nullptr;}video_slot_reserved=false;vieww=viewh=width=height=0;present_retry_at=0;
+    }
+    static bool audio_fault(HRESULT hr){return hr==AUDCLNT_E_DEVICE_INVALIDATED||hr==AUDCLNT_E_RESOURCES_INVALIDATED||hr==AUDCLNT_E_SERVICE_NOT_RUNNING;}
+    static bool graphics_fault(HRESULT hr){return hr==DXGI_ERROR_DEVICE_REMOVED||hr==DXGI_ERROR_DEVICE_RESET||hr==DXGI_ERROR_DEVICE_HUNG||hr==D2DERR_RECREATE_TARGET;}
+    void recovery_status(int kind,const wchar_t* reason){if(!external_unavailable)shell.set_status(kind,reason);}
+    bool recover_fault(HRESULT hr){
+        if(!audio_fault(hr)&&!graphics_fault(hr)&&device){HRESULT removed=device->GetDeviceRemovedReason();if(FAILED(removed))hr=DXGI_ERROR_DEVICE_REMOVED;}
+        if(audio_fault(hr)){release_audio();audio_pending=true;audio_retries=0;audio_retry_at=now_seconds();}
+        else if(graphics_fault(hr)){release_graphics();graphics_pending=true;graphics_retries=0;graphics_retry_at=now_seconds();}
+        else return false;
+        shell.reset_video();shell.disconnect=true;recovery_status(3,audio_fault(hr)?L"Audio device changed. Reconnecting…":L"Graphics device changed. Reconnecting…");return true;
+    }
+    void service_recovery(bool synthetic_failure=false){
+        // Notifications are coalesced; only the owning thread queries the render/default route.
+        // Capture or unrelated-device changes must not disconnect a healthy render session.
+        if(endpoint_notice&&endpoint_notice->changed.exchange(false)&&default_audio_changed())recover_fault(AUDCLNT_E_DEVICE_INVALIDATED);
+        const double now=now_seconds();bool recovered=false;
+        if(audio_pending&&audio_retries<3&&now>=audio_retry_at){
+            ++audio_retries;HRESULT hr=synthetic_failure?E_FAIL:init_audio();
+            if(SUCCEEDED(hr)){audio_pending=false;++audio_recoveries;recovered=true;}
+            else {release_audio();audio_retry_at=now+.25*audio_retries;recovery_status(audio_retries==3?5:3,L"Audio unavailable. Reconnect an output device, then reconnect mirroring.");}
+        }
+        if(graphics_pending&&graphics_retries<3&&now>=graphics_retry_at){
+            ++graphics_retries;HRESULT hr=synthetic_failure?E_FAIL:init_graphics();
+            if(SUCCEEDED(hr)){graphics_pending=false;++graphics_recoveries;recovered=true;}
+            else {release_graphics();graphics_retry_at=now+.25*graphics_retries;recovery_status(graphics_retries==3?5:3,L"Graphics unavailable. Reconnect mirroring to retry, or restart the receiver.");}
+        }
+        if(recovered&&!audio_pending&&!graphics_pending)recovery_status(6,L"");
     }
     void reset_video_decoder(){
         video.clear();last_frame.sample.Reset();paused_texture.Reset();processor.Reset();venum.Reset();
@@ -222,17 +336,18 @@ struct App {
             video.clear();last_frame.sample.Reset();paused_texture.Reset();
             CHECK(decoder->SetOutputType(0, t.Get(), 0)); width = w; height = h;
             MFVideoArea aperture{}; UINT32 size=0;
-            if(SUCCEEDED(t->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE, reinterpret_cast<UINT8*>(&aperture), sizeof(aperture), &size)) && size==sizeof(aperture)
-                && aperture.Area.cx>0 && aperture.Area.cy>0 && UINT(aperture.Area.cx)<=w && UINT(aperture.Area.cy)<=h) {
-                width=aperture.Area.cx;height=aperture.Area.cy;
-            }
+            HRESULT area=t->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE,reinterpret_cast<UINT8*>(&aperture),sizeof(aperture),&size);
+            if(SUCCEEDED(area)&&size!=sizeof(aperture))return MF_E_INVALIDMEDIATYPE;
+            if(FAILED(area)&&area!=MF_E_ATTRIBUTENOTFOUND)return area;
+            CHECK(source_area(w,h,SUCCEEDED(area)?&aperture:nullptr,output_aperture));
+            width=output_aperture.right-output_aperture.left;height=output_aperture.bottom-output_aperture.top;CHECK(media_color(t.Get(),output_color));
             video.clear(); last_frame.sample.Reset(); processor.Reset(); venum.Reset(); return S_OK;
         }
         return MF_E_INVALIDMEDIATYPE;
     }
     void queue_video_frame(VideoFrame frame) {
         if(source_width!=frame.width||source_height!=frame.height){source_width=frame.width;source_height=frame.height;++source_shape_changes;}
-        if(video.size()==(codec==265?4:8)){video.pop_front();if(video_sync)++late_frames;else ++interactive_skips;}
+        if(video.size()==(codec==265?4:8)){video.pop_front();if(IsIconic(window))++minimized_skips;else if(video_sync)++late_frames;else ++interactive_skips;}
         video.push_back(std::move(frame));video_high_water=std::max(video_high_water,video.size());
     }
     HRESULT output() {
@@ -255,7 +370,7 @@ struct App {
             ++gpu_frames; ++decoded;
             const double ready=now_seconds();output_ahead.add(pts/1e7-ready);
             for(auto& pending:decode_pending)if(pending.active&&pending.pts==pts){decoder_residence.add(ready-pending.began);pending.active=false;break;}
-            queue_video_frame({s,pts/1e7,width,height});
+            queue_video_frame({s,pts/1e7,width,height,output_aperture,output_color});
         }
         return E_UNEXPECTED;
     }
@@ -267,6 +382,7 @@ struct App {
         CHECK(buffer->Lock(&p, nullptr, nullptr)); memcpy(p, bytes, len); buffer->Unlock(); CHECK(buffer->SetCurrentLength(len));
         ComPtr<IMFSample> sample; CHECK(MFCreateSample(&sample)); CHECK(sample->AddBuffer(buffer.Get()));
         CHECK(sample->SetSampleTime((LONGLONG)(pts*1e7))); CHECK(sample->SetSampleDuration(10000000/expected_fps));
+        input_prepare.add(now_seconds()-began);
         double accepted=now_seconds();HRESULT hr = decoder->ProcessInput(0, sample.Get(), 0);
         if (hr == MF_E_NOTACCEPTING) { CHECK(output());accepted=now_seconds();hr = decoder->ProcessInput(0, sample.Get(), 0); }
         CHECK(hr);
@@ -275,32 +391,34 @@ struct App {
         *slot={LONGLONG(pts*1e7),accepted,true};CHECK(output());
         const double elapsed=now_seconds()-began;++submit_calls;submit_seconds+=elapsed;submit_max_seconds=std::max(submit_max_seconds,elapsed);return S_OK;
     }
-    HRESULT draw(IMFSample* frame, UINT width, UINT height,ID3D11Texture2D* synthetic_probe_copy=nullptr) {
-        // Decoder output can run ahead of its PTS. Publish only the frame selected for display.
-        shell.video_size(width,height);
+    HRESULT draw(IMFSample* frame, UINT visible_width, UINT visible_height,ID3D11Texture2D* synthetic_probe_copy=nullptr,const RECT* aperture=nullptr,const VideoColor* metadata=nullptr,bool synthetic_busy=false) {
         CHECK(chrome.layout(shell));UINT vw=chrome.video_width,vh=chrome.video_height;
-        if (!vw || !vh || !width || !height) return S_OK;
+        if (!vw || !vh || !visible_width || !visible_height) return S_OK;
         if (vieww != vw || viewh != vh) {
             context->ClearState(); CHECK(swap->ResizeBuffers(0, vw, vh, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)); vieww = vw; viewh = vh;processor.Reset();venum.Reset();
         }
         ComPtr<IMFMediaBuffer> b; CHECK(frame->GetBufferByIndex(0, &b)); ComPtr<IMFDXGIBuffer> dxgi; CHECK(b.As(&dxgi));
         ComPtr<ID3D11Texture2D> texture; CHECK(dxgi->GetResource(IID_PPV_ARGS(&texture))); UINT slice; CHECK(dxgi->GetSubresourceIndex(&slice));
-        if(processor&&(processor_width!=width||processor_height!=height)){processor.Reset();venum.Reset();}
+        D3D11_TEXTURE2D_DESC source_desc{};texture->GetDesc(&source_desc);
+        RECT src=aperture&&aperture->right>aperture->left?*aperture:RECT{0,0,LONG(visible_width),LONG(visible_height)};
+        if(src.left<0||src.top<0||src.right>LONG(source_desc.Width)||src.bottom>LONG(source_desc.Height)
+            ||src.right-src.left!=LONG(visible_width)||src.bottom-src.top!=LONG(visible_height))return MF_E_INVALIDMEDIATYPE;
+        if(processor&&(processor_width!=source_desc.Width||processor_height!=source_desc.Height)){processor.Reset();venum.Reset();}
         if (!processor) {
             D3D11_VIDEO_PROCESSOR_CONTENT_DESC desc{}; desc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
-            desc.InputWidth = width; desc.InputHeight = height; desc.OutputWidth = vw; desc.OutputHeight = vh;
+            desc.InputWidth = source_desc.Width; desc.InputHeight = source_desc.Height; desc.OutputWidth = vw; desc.OutputHeight = vh;
             desc.InputFrameRate = {60, 1}; desc.OutputFrameRate = {60, 1}; desc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
             CHECK(vdevice->CreateVideoProcessorEnumerator(&desc, &venum)); CHECK(vdevice->CreateVideoProcessor(venum.Get(), 0, &processor));
-            processor_width=width;processor_height=height;
+            processor_width=source_desc.Width;processor_height=source_desc.Height;
         }
         D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC iv{}; iv.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D; iv.Texture2D.ArraySlice = slice;
         ComPtr<ID3D11VideoProcessorInputView> input; CHECK(vdevice->CreateVideoProcessorInputView(texture.Get(), venum.Get(), &iv, &input));
         ComPtr<ID3D11Texture2D> target; CHECK(swap->GetBuffer(0, IID_PPV_ARGS(&target)));
         D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC ov{}; ov.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
         ComPtr<ID3D11VideoProcessorOutputView> output_view; CHECK(vdevice->CreateVideoProcessorOutputView(target.Get(), venum.Get(), &ov, &output_view));
-        double scale = std::min(double(vw)/width, double(vh)/height);
-        LONG dw = LONG(width*scale), dh = LONG(height*scale);
-        RECT src{0, 0, LONG(width), LONG(height)}, dst{(LONG(vw)-dw)/2, (LONG(vh)-dh)/2, (LONG(vw)+dw)/2, (LONG(vh)+dh)/2};
+        double scale = std::min(double(vw)/visible_width, double(vh)/visible_height);
+        LONG dw = LONG(visible_width*scale), dh = LONG(visible_height*scale);
+        RECT dst{(LONG(vw)-dw)/2, (LONG(vh)-dh)/2, (LONG(vw)+dw)/2, (LONG(vh)+dh)/2};
         D3D11_VIDEO_COLOR bg{}; bg.RGBA.A = 1;
         vcontext->VideoProcessorSetOutputBackgroundColor(processor.Get(), FALSE, &bg);
         vcontext->VideoProcessorSetOutputAlphaFillMode(processor.Get(),D3D11_VIDEO_PROCESSOR_ALPHA_FILL_MODE_OPAQUE,0);
@@ -308,18 +426,20 @@ struct App {
         vcontext->VideoProcessorSetStreamSourceRect(processor.Get(), 0, TRUE, &src);
         vcontext->VideoProcessorSetStreamDestRect(processor.Get(), 0, TRUE, &dst);
         vcontext->VideoProcessorSetStreamAutoProcessingMode(processor.Get(), 0, FALSE);
-        D3D11_VIDEO_PROCESSOR_COLOR_SPACE cs{}; cs.YCbCr_Matrix = 1; // BT.709, studio range
+        const VideoColor color=metadata?*metadata:VideoColor{};
+        D3D11_VIDEO_PROCESSOR_COLOR_SPACE cs{};cs.YCbCr_Matrix=color.matrix==MFVideoTransferMatrix_BT709;
+        cs.Nominal_Range=color.range==MFNominalRange_0_255?D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255:D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
         vcontext->VideoProcessorSetStreamColorSpace(processor.Get(), 0, &cs);
         D3D11_VIDEO_PROCESSOR_STREAM stream{}; stream.Enable = TRUE; stream.pInputSurface = input.Get();
         HRESULT blt=vcontext->VideoProcessorBlt(processor.Get(), output_view.Get(), 0, 1, &stream);
         if(FAILED(blt)){
             D3D11_TEXTURE2D_DESC td{},od{};texture->GetDesc(&td);target->GetDesc(&od);
-            char details[256];sprintf_s(details,"VideoProcessorBlt input=%ux%u fmt=%u array=%u slice=%u visible=%ux%u output=%ux%u fmt=%u",td.Width,td.Height,td.Format,td.ArraySize,slice,width,height,od.Width,od.Height,od.Format);
+            char details[256];sprintf_s(details,"VideoProcessorBlt input=%ux%u fmt=%u array=%u slice=%u visible=%ux%u output=%ux%u fmt=%u",td.Width,td.Height,td.Format,td.ArraySize,slice,visible_width,visible_height,od.Width,od.Height,od.Format);
             error_hr(details,blt);return blt;
         }
         // Keep a GPU copy for paused-window redraw without retaining a decoder-pool surface.
         if(texture.Get()!=paused_texture.Get()) {
-            D3D11_TEXTURE2D_DESC source_desc{},cached_desc{};texture->GetDesc(&source_desc);
+            D3D11_TEXTURE2D_DESC cached_desc{};
             if(paused_texture)paused_texture->GetDesc(&cached_desc);
             if(!paused_texture || cached_desc.Width!=source_desc.Width || cached_desc.Height!=source_desc.Height) {
                 last_frame.sample.Reset();paused_texture.Reset();auto copy_desc=source_desc;copy_desc.ArraySize=1;copy_desc.MipLevels=1;copy_desc.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;copy_desc.MiscFlags=0;
@@ -329,7 +449,7 @@ struct App {
             }
             context->CopySubresourceRegion(paused_texture.Get(),0,0,0,0,texture.Get(),slice,nullptr);
         }
-        last_frame.width=width;last_frame.height=height;
+        last_frame.width=visible_width;last_frame.height=visible_height;last_frame.source=src;last_frame.color=color;
         if(synthetic_probe_copy){
             // Private synthetic-test hook only. Copy before Present rotates the logical flip buffer.
             // No exported capture API or runtime caller supplies this argument.
@@ -339,51 +459,51 @@ struct App {
             context->CopyResource(synthetic_probe_copy,target.Get());
         }
         // Audio shares this thread: a display queue must never block its deadline.
-        const double began=now_seconds();HRESULT present=swap->Present(0,DXGI_PRESENT_DO_NOT_WAIT);
+        const double began=now_seconds();HRESULT present=synthetic_busy?DXGI_ERROR_WAS_STILL_DRAWING:swap->Present(0,DXGI_PRESENT_DO_NOT_WAIT);
         const double elapsed=now_seconds()-began;present_seconds+=elapsed;present_max_seconds=std::max(present_max_seconds,elapsed);
         // A failed nonblocking Present did not enqueue a frame or consume our slot.
         // Keep the reservation and retry on the next normal pump; DXGI need not signal it again.
         if(present==DXGI_ERROR_WAS_STILL_DRAWING){++present_busy;present_retry_at=now_seconds()+.001;return S_FALSE;}
+        if(SUCCEEDED(present)&&present!=S_OK){++present_busy;present_retry_at=now_seconds()+.05;return S_FALSE;}
         video_slot_reserved=false;present_retry_at=0;
-        CHECK(present);if(presented_width!=width||presented_height!=height){presented_width=width;presented_height=height;++presented_shape_changes;}
+        CHECK(present);shell.video_size(visible_width,visible_height);if(presented_width!=visible_width||presented_height!=visible_height){presented_width=visible_width;presented_height=visible_height;++presented_shape_changes;}
         ++presented; return S_OK;
     }
-    HRESULT tick_audio() {
-        if (!audio_running) return S_OK;
+    HRESULT fill_audio() {
+        if(!audio||!render)return AUDCLNT_E_DEVICE_INVALIDATED;
+        const double began=now_seconds();if(last_audio_service)audio_service_gap.add(began-last_audio_service);last_audio_service=began;
+        if(!sound.empty())audio_queue_age.add(began-(sound.front().pts+double(sound.front().pos/2)/44100));
+        if(audio_event_observed){audio_event_service.add(began-audio_event_observed);audio_event_observed=0;}
         UINT32 padding; CHECK(audio->GetCurrentPadding(&padding));
         if(padding>audio_capacity)return E_UNEXPECTED;
         UINT32 count = audio_capacity-padding; if (!count) return S_OK;
         BYTE* raw; CHECK(render->GetBuffer(count, &raw)); auto out = (int16_t*)raw;
-        memset(raw, 0, count*4);
         double target = now_seconds() + double(padding)/44100 + audio_latency;
         const float local_gain=shell.gain();
-        for (UINT32 f = 0; f < count; ++f) {
-            double t = target + double(f)/44100;
-            while (!sound.empty()) {
-                auto& a = sound.front(); double delta = a.pts + double(a.pos/2)/44100 - t;
-                if (delta < -0.010) {
-                    // Clamp before conversion; an untrusted timestamp must not overflow size_t.
-                    const double skip=std::min(double((a.pcm.size()-a.pos)/2),(-delta-0.002)*44100);
-                    a.pos += size_t(skip)*2;
-                }
-                if (a.pos >= a.pcm.size()) { sound.pop_front(); continue; }
-                if (delta > 0.003) break;
-                out[2*f] = int16_t(a.pcm[a.pos++]*local_gain); out[2*f+1] = int16_t(a.pcm[a.pos++]*local_gain); ++audio_frames;
-                if (a.pos >= a.pcm.size()) sound.pop_front(); break;
-            }
-        }
-        return render->ReleaseBuffer(count, 0);
+        const uint64_t before=audio_frames;
+        mix_audio(sound,out,count,target,local_gain,audio_frames,audio_skips);
+        HRESULT hr=render->ReleaseBuffer(count,0);
+        if(SUCCEEDED(hr))audio_silence+=count-(audio_frames-before);
+        else audio_frames=before; // A rejected buffer was never submitted to the endpoint.
+        audio_fill_time.add(now_seconds()-began);return hr;
     }
+    HRESULT tick_audio(){return audio_running?fill_audio():S_OK;}
+    HRESULT start_audio(){HRESULT hr=prime_audio([&]{return fill_audio();},[&]{return audio->Start();});if(SUCCEEDED(hr))audio_running=true;return hr;}
     HRESULT wait_for_media(unsigned wait_ms) {
         if(shell.quit||shell.disconnect)return S_OK;
         HANDLE handles[4]={wake.h,audio_event.h};DWORD count=2,timeout=std::min(wait_ms,1000u);
         DWORD slot_index=MAXDWORD;double deadline=0;const double now=now_seconds();
-        const bool due=!video.empty()&&(!video_sync||video.front().pts<=now);
-        const bool redraw=shell.redraw&&last_frame.sample;
+        const bool visible=!IsIconic(window);
+        const bool due=visible&&!video.empty()&&(!video_sync||video.front().pts<=now);
+        const bool redraw=visible&&shell.redraw&&last_frame.sample;
         if(due||redraw){
             if(video_slot_reserved){if(present_retry_at>now)deadline=present_retry_at;else timeout=0;}
             else {slot_index=count;handles[count++]=video_event.h;}
-        } else if(!video.empty())deadline=video.front().pts;
+        } else if(visible&&!video.empty())deadline=video.front().pts;
+        auto earlier=[&](double value){if(!deadline||value<deadline)deadline=value;};
+        if(audio_pending&&audio_retries<3)earlier(audio_retry_at);if(graphics_pending&&graphics_retries<3)earlier(graphics_retry_at);
+        if(visible&&chrome.pending)earlier(chrome.retry_at);
+        if(deadline&&deadline<=now)timeout=0;
         bool armed=false;
         if(deadline>now&&timeout){
             // Relative one-shot timer: QPC selects the deadline; tick verifies it again before drawing.
@@ -397,11 +517,14 @@ struct App {
         if(result==WAIT_FAILED)return HRESULT_FROM_WIN32(wait_error);
         // Waiting consumes an auto-reset DXGI signal. Hand its reservation to tick instead of polling twice.
         if(slot_index!=MAXDWORD&&result==WAIT_OBJECT_0+slot_index)video_slot_reserved=true;
+        if(result==WAIT_OBJECT_0+1)audio_event_observed=now_seconds();
         return S_OK;
     }
     HRESULT tick() {
         CHECK(tick_audio());CHECK(chrome.layout(shell)); double n = now_seconds();bool redraw_needed=shell.redraw.exchange(false);
-        while (video.size() > 1 && (!video_sync||video[1].pts <= n)) {video.pop_front();if(video_sync)++late_frames;else ++interactive_skips;}
+        const bool minimized=IsIconic(window)!=FALSE;
+        while (video.size() > 1 && (minimized||!video_sync||video[1].pts <= n)) {video.pop_front();if(minimized)++minimized_skips;else if(video_sync)++late_frames;else ++interactive_skips;}
+        if(minimized){shell.redraw=true;return S_OK;}
         const bool due=!video.empty()&&(!video_sync||video.front().pts<=n);
         if(!due&&!(redraw_needed&&last_frame.sample))return S_OK;
         if(present_retry_at>n){if(redraw_needed)shell.redraw=true;return S_OK;}
@@ -412,9 +535,9 @@ struct App {
             if(ready!=WAIT_OBJECT_0)return HRESULT_FROM_WIN32(GetLastError());
             video_slot_reserved=true;
         }
-        if(due){auto& frame=video.front();const auto before=presented;HRESULT hr=draw(frame.sample.Get(),frame.width,frame.height);CHECK(hr);
+        if(due){auto& frame=video.front();const auto before=presented;HRESULT hr=draw(frame.sample.Get(),frame.width,frame.height,nullptr,&frame.source,&frame.color);CHECK(hr);
             if(hr==S_OK){if(presented>before&&video_sync)presentation_late.add(now_seconds()-frame.pts);video.pop_front();}}
-        else {HRESULT hr=draw(last_frame.sample.Get(),last_frame.width,last_frame.height);CHECK(hr);if(hr==S_FALSE)shell.redraw=true;}
+        else {HRESULT hr=draw(last_frame.sample.Get(),last_frame.width,last_frame.height,nullptr,&last_frame.source,&last_frame.color);CHECK(hr);if(hr==S_FALSE)shell.redraw=true;}
         return S_OK;
     }
 };
@@ -480,7 +603,8 @@ static bool worker_pipe(const std::wstring& name,bool parent_writes,Handle& pare
 }
 extern "C" {
 const char* am_error() { return last_error.c_str(); }
-int am_lan_ipv4(uint8_t* address, uint32_t* index, uint32_t* prefix) {
+int am_lan_ipv4(const uint8_t* requested,uint8_t* address, uint32_t* index, uint32_t* prefix) {
+    if(!address||!index||!prefix){error_hr("LAN adapter output",E_POINTER);return 0;}
     ULONG bytes=16384;std::vector<uint8_t> storage(bytes);
     auto adapters=reinterpret_cast<IP_ADAPTER_ADDRESSES*>(storage.data());
     ULONG status=GetAdaptersAddresses(AF_INET,GAA_FLAG_INCLUDE_GATEWAYS,nullptr,adapters,&bytes);
@@ -488,6 +612,7 @@ int am_lan_ipv4(uint8_t* address, uint32_t* index, uint32_t* prefix) {
     if(status!=NO_ERROR){error_hr("LAN adapter query",HRESULT_FROM_WIN32(status));return 0;}
     ComPtr<INetworkListManager> networks;HRESULT hr=CoCreateInstance(CLSID_NetworkListManager,nullptr,CLSCTX_ALL,IID_PPV_ARGS(&networks));
     if(FAILED(hr)){error_hr("network profile query",hr);return 0;}
+    std::vector<LanCandidate> candidates;
     for(auto a=adapters;a;a=a->Next){
         if(a->OperStatus!=IfOperStatusUp || (a->IfType!=IF_TYPE_ETHERNET_CSMACD && a->IfType!=IF_TYPE_IEEE80211) || !a->FirstGatewayAddress)continue;
         auto name=wide(a->AdapterName);GUID adapter_id{};if(FAILED(CLSIDFromString(name.c_str(),&adapter_id)))continue;
@@ -497,13 +622,17 @@ int am_lan_ipv4(uint8_t* address, uint32_t* index, uint32_t* prefix) {
             if(SUCCEEDED(c->GetNetwork(&network)) && SUCCEEDED(network->GetCategory(&category)) && category==NLM_NETWORK_CATEGORY_PRIVATE)private_profile=true;
         }
         if(!private_profile)continue;
-        for(auto u=a->FirstUnicastAddress;u;u=u->Next){if(u->Address.lpSockaddr->sa_family!=AF_INET)continue;
+        for(auto u=a->FirstUnicastAddress;u;u=u->Next){if(!u->Address.lpSockaddr||u->Address.iSockaddrLength<static_cast<int>(sizeof(sockaddr_in))||u->Address.lpSockaddr->sa_family!=AF_INET)continue;
             auto ip=reinterpret_cast<sockaddr_in*>(u->Address.lpSockaddr);auto b=reinterpret_cast<uint8_t*>(&ip->sin_addr);
-            if(!(b[0]==10 || (b[0]==172 && b[1]>=16 && b[1]<=31) || (b[0]==192 && b[1]==168)))continue;
-            memcpy(address,b,4);*index=a->IfIndex;*prefix=u->OnLinkPrefixLength;return 1;
+            LanCandidate candidate;std::copy_n(b,4,candidate.address.begin());candidate.index=a->IfIndex;candidate.prefix=u->OnLinkPrefixLength;
+            candidate.up=true;candidate.ethernet_or_wifi=true;candidate.gateway=true;candidate.private_profile=true;
+            candidates.push_back(candidate);
         }
     }
-    error_hr("No active private Ethernet/Wi-Fi IPv4 LAN with a gateway",E_FAIL);return 0;
+    LanCandidate chosen;if(select_lan_candidate(candidates,requested,chosen)){
+        std::copy(chosen.address.begin(),chosen.address.end(),address);*index=chosen.index;*prefix=chosen.prefix;return 1;
+    }
+    error_hr(requested?"Requested address is not on an active private Ethernet/Wi-Fi LAN with a gateway":"No active private Ethernet/Wi-Fi IPv4 LAN with a gateway",E_FAIL);return 0;
 }
 void am_show_error(const char* message) { auto s=wide(message);MessageBoxW(nullptr,s.c_str(),L"AirMirrorLite error",MB_OK|MB_ICONERROR); }
 double am_now() { return now_seconds(); }
@@ -517,14 +646,23 @@ void* am_wake_handle(void* p) {
 }
 void am_signal(void* handle) { SetEvent(handle); }
 void am_signal_close(void* handle) { CloseHandle(handle); }
-void am_title(void* p, const char* title) { auto s = wide(title); static_cast<App*>(p)->shell.set_status(s); }
-int am_pump(void* p, unsigned wait_ms) {
+void am_title(void* p, const char* title) { auto s = wide(title); static_cast<App*>(p)->shell.set_title(s); }
+void am_status(void* p,unsigned kind,const char* reason){auto a=static_cast<App*>(p);if(kind==5)a->external_unavailable=true;else if(kind==6)a->external_unavailable=false;a->shell.set_status(int(kind),wide(reason));}
+int am_status_dismissed(void* p){return static_cast<App*>(p)->shell.status_dismissed.exchange(false)?1:0;}
+int am_wait(void* p,unsigned wait_ms){
     auto a = static_cast<App*>(p);
     HRESULT hr=a->wait_for_media(wait_ms);if(FAILED(hr)){error_hr("media wait",hr);return -1;}
-    if (a->shell.quit) return 0;
-    hr = a->tick(); if (FAILED(hr)) { error_hr("media presentation", hr); return -1; }
+    return a->shell.quit?0:1;
+}
+int am_dispatch(void* p){
+    auto a=static_cast<App*>(p);if(a->shell.quit)return 0;
+    a->service_recovery();
+    if(a->shell.disconnect.exchange(false))return 2;
+    HRESULT hr=a->graphics_pending?S_OK:a->tick();
+    if(FAILED(hr)){if(!a->recover_fault(hr)){error_hr("media presentation",hr);return -1;}}
     if (a->shell.disconnect.exchange(false)) return 2; return 1;
 }
+int am_pump(void* p,unsigned wait_ms){int ready=am_wait(p,wait_ms);return ready<=0?ready:am_dispatch(p);}
 unsigned long long am_presented(void* p){return static_cast<App*>(p)->presented;}
 void am_flush_audio(void* p);
 void am_video_sync(void* p,int enabled){
@@ -537,19 +675,22 @@ void am_video_sync(void* p,int enabled){
 }
 int am_prepare_video(void* p,unsigned codec,unsigned width,unsigned height,unsigned fps){
     auto a=static_cast<App*>(p);if((codec!=264&&codec!=265)||(fps!=30&&fps!=60))return 0;
+    if(a->graphics_pending||a->audio_pending){error_hr("native devices are recovering",MF_E_NOTACCEPTING);return 0;}
     a->expected_fps=fps;if(a->decoder_ready&&a->codec==codec)return 1;
-    HRESULT hr=a->init_decoder(codec,width,height);if(FAILED(hr)){error_hr("prepare video decoder",hr);return 0;}return 1;
+    HRESULT hr=a->init_decoder(codec,width,height);if(FAILED(hr)){a->recover_fault(hr);error_hr("prepare video decoder",hr);return 0;}return 1;
 }
 int am_hevc_available(void* p) {return static_cast<App*>(p)->hevc_available?1:0;}
 int am_video(void* p, const uint8_t* data, unsigned len, double pts, unsigned codec,unsigned width,unsigned height) {
     auto app=static_cast<App*>(p);if(codec!=264&&codec!=265)return 0;
+    if(app->graphics_pending||app->audio_pending){error_hr("native devices are recovering",MF_E_NOTACCEPTING);return 0;}
     if(app->codec!=codec||!app->decoder_ready){HRESULT hr=app->init_decoder(codec,width,height);if(FAILED(hr)){error_hr("video codec selection",hr);return 0;}}
-    HRESULT hr = app->submit(data, len, pts); if (FAILED(hr)) { error_hr("video decode", hr); return 0; } return 1;
+    HRESULT hr = app->submit(data, len, pts); if (FAILED(hr)) {app->recover_fault(hr);error_hr("video decode", hr); return 0; } return 1;
 }
 int am_video_ready(void* p) {auto a=static_cast<App*>(p);return a->video.size()<(a->codec==265?3:6);}
 int am_audio(void* p, const int16_t* pcm, unsigned samples, double pts) {
     auto a = static_cast<App*>(p);
     if (!pcm || !samples || samples > 4096 || samples % 2 || !valid_media_time(pts)) {error_hr("invalid PCM sample",E_INVALIDARG);return 0;}
+    if(a->audio_pending||a->graphics_pending){error_hr("native devices are recovering",MF_E_NOTACCEPTING);return 0;}
     if (a->sound.size() >= 32) {
         UINT32 padding=0;a->audio->GetCurrentPadding(&padding);char detail[300];
         sprintf_s(detail,"audio queue full padding=%u capacity=%u latency=%.4f now=%.4f first_pts=%.4f played=%llu",padding,a->audio_capacity,a->audio_latency,now_seconds(),a->sound.front().pts,(unsigned long long)a->audio_frames);
@@ -559,11 +700,11 @@ int am_audio(void* p, const int16_t* pcm, unsigned samples, double pts) {
     am_video_sync(p,1);
     a->sound.push_back({std::vector<int16_t>(pcm, pcm+samples), 0, pts});
     a->audio_high_water=std::max(a->audio_high_water,a->sound.size());
-    if (!a->audio_running) { HRESULT hr=a->audio->Start(); if (FAILED(hr)) {error_hr("WASAPI start",hr);return 0;} a->audio_running=true; }
+    if (!a->audio_running) {HRESULT hr=a->start_audio();if(FAILED(hr)){a->recover_fault(hr);error_hr("WASAPI prefill/start",hr);return 0;}}
     return 1;
 }
 void am_flush_audio(void* p) {
-    auto a=static_cast<App*>(p);a->sound.clear();a->audio->Stop();a->audio->Reset();a->audio_running=false;
+    auto a=static_cast<App*>(p);HRESULT hr=a->flush_audio();if(FAILED(hr)){a->recover_fault(App::audio_fault(hr)?hr:AUDCLNT_E_DEVICE_INVALIDATED);error_hr("WASAPI stop/reset",hr);}
 }
 int am_reset(void* p) {
     auto a = static_cast<App*>(p); am_flush_audio(p); a->video.clear();
@@ -571,7 +712,10 @@ int am_reset(void* p) {
     a->shell.reset_video();
     a->reset_video_decoder();a->output_ahead={};a->presentation_late={};a->decoder_residence={};
     a->source_width=a->source_height=a->presented_width=a->presented_height=0;a->source_shape_changes=a->presented_shape_changes=0;
-    a->video_sync=true;a->interactive_skips=0;return 1;
+    a->video_sync=true;a->interactive_skips=0;
+    if(a->audio_pending&&a->audio_retries>=3){a->audio_retries=0;a->audio_retry_at=now_seconds();}
+    if(a->graphics_pending&&a->graphics_retries>=3){a->graphics_retries=0;a->graphics_retry_at=now_seconds();}
+    return 1;
 }
 const char* am_stats(void* p) {
     auto a = static_cast<App*>(p); static thread_local std::string text;
@@ -587,9 +731,10 @@ const char* am_stats(void* p) {
         + " audio_capacity="+std::to_string(a->audio_capacity)+" audio_latency_ms="+std::to_string(a->audio_latency*1000)
         + " video_queue_max="+std::to_string(a->video_high_water)+" audio_queue_max="+std::to_string(a->audio_high_water)
         + " video_waits="+std::to_string(a->video_waits)+" present_busy="+std::to_string(a->present_busy)
-        + " video_sync="+std::to_string(a->video_sync)+" interactive_skips="+std::to_string(a->interactive_skips)
+        + " video_sync="+std::to_string(a->video_sync)+" interactive_skips="+std::to_string(a->interactive_skips)+" minimized_skips="+std::to_string(a->minimized_skips)
         + " submit_avg_ms="+std::to_string(a->submit_calls?a->submit_seconds*1000/a->submit_calls:0)
         + " submit_max_ms="+std::to_string(a->submit_max_seconds*1000)
+        + " input_prepare_avg_ms="+std::to_string(a->input_prepare.average()*1000)+" input_prepare_p95_ms="+std::to_string(a->input_prepare.percentile(.95)*1000)+" input_prepare_max_ms="+std::to_string(a->input_prepare.maximum*1000)
         + " present_avg_ms="+std::to_string(a->presented+a->present_busy?a->present_seconds*1000/(a->presented+a->present_busy):0)
         + " present_max_ms="+std::to_string(a->present_max_seconds*1000)
         + " output_ahead_avg_ms="+std::to_string(a->output_ahead.average()*1000)
@@ -601,7 +746,13 @@ const char* am_stats(void* p) {
         + " mf_residence_samples="+std::to_string(a->decoder_residence.count)
         + " high_resolution_timer="+std::to_string(a->high_resolution_timer)
         + " lowlat_attr="+std::to_string(a->low_latency_attribute)+" lowlat_value="+std::to_string(a->low_latency_value)
-        + " lowlat_set_hr="+std::to_string(uint32_t(a->low_latency_set))+" lowlat_get_hr="+std::to_string(uint32_t(a->low_latency_get));
+        + " lowlat_set_hr="+std::to_string(uint32_t(a->low_latency_set))+" lowlat_get_hr="+std::to_string(uint32_t(a->low_latency_get))
+        + " audio_gap_p95_ms="+std::to_string(a->audio_service_gap.percentile(.95)*1000)+" audio_gap_p99_ms="+std::to_string(a->audio_service_gap.percentile(.99)*1000)
+        + " audio_gap_max_ms="+std::to_string(a->audio_service_gap.maximum*1000)+" audio_wake_to_fill_max_ms="+std::to_string(a->audio_event_service.maximum*1000)
+        + " audio_queue_age_avg_ms="+std::to_string(a->audio_queue_age.average()*1000)+" audio_queue_age_min_ms="+std::to_string(a->audio_queue_age.minimum*1000)+" audio_queue_age_max_ms="+std::to_string(a->audio_queue_age.maximum*1000)
+        + " audio_fill_max_ms="+std::to_string(a->audio_fill_time.maximum*1000)+" audio_silence_frames="+std::to_string(a->audio_silence)+" audio_skip_frames="+std::to_string(a->audio_skips)
+        + " chrome_present_max_ms="+std::to_string(a->chrome.present_max_seconds*1000)+" chrome_present_busy="+std::to_string(a->chrome.present_busy)
+        + " audio_recoveries="+std::to_string(a->audio_recoveries)+" graphics_recoveries="+std::to_string(a->graphics_recoveries);
     return text.c_str();
 }
 void* am_discover(const char* name, const char* host, unsigned short port, const uint8_t* address, uint32_t interface_index, const char* const* keys, const char* const* values, unsigned count) {
@@ -658,25 +809,24 @@ int am_is_sandboxed() {
     std::vector<uint8_t> storage(needed); if (!GetTokenInformation(token.h, TokenCapabilities, storage.data(), needed, &needed)) return 0;
     return reinterpret_cast<TOKEN_GROUPS*>(storage.data())->GroupCount == 0;
 }
+int am_worker_provision() {
+    PSID sid=nullptr;HRESULT hr=worker_profile_sid(&sid);
+    if(FAILED(hr)){error_hr("AppContainer profile",hr);return 0;}
+    struct SidGuard { PSID s;~SidGuard(){FreeSid(s);} } guard{sid};
+    std::wstring path;hr=current_executable(path);
+    if(SUCCEEDED(hr))hr=worker_executable_access(path,sid,true);
+    if(FAILED(hr)){error_hr("Provision worker execute access on this executable as its owner",hr);return 0;}
+    return 1;
+}
 void* am_worker_start() {
     auto w = std::make_unique<Worker>();
     PSID sid = nullptr;
-    HRESULT hr = CreateAppContainerProfile(L"AirMirrorLite.Codec", L"AirMirrorLite codec", L"No network capabilities", nullptr, 0, &sid);
-    if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) hr = DeriveAppContainerSidFromAppContainerName(L"AirMirrorLite.Codec", &sid);
+    HRESULT hr = worker_profile_sid(&sid);
     if (FAILED(hr)) { error_hr("AppContainer profile", hr); return nullptr; }
     struct SidGuard { PSID s; ~SidGuard() { FreeSid(s); } } sg{sid};
-    wchar_t path[32768]; DWORD length = GetModuleFileNameW(nullptr, path, 32768);
-    if (!length || length >= 32768) return nullptr;
-    // Grant this worker identity read/execute access only to this exact executable.
-    PACL oldacl = nullptr, newacl = nullptr; PSECURITY_DESCRIPTOR sd = nullptr;
-    DWORD rc = GetNamedSecurityInfoW(path, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &oldacl, nullptr, &sd);
-    if (rc != ERROR_SUCCESS) { error_hr("worker executable ACL read", HRESULT_FROM_WIN32(rc)); return nullptr; }
-    EXPLICIT_ACCESSW access{}; access.grfAccessPermissions = GENERIC_READ | GENERIC_EXECUTE;
-    access.grfAccessMode = GRANT_ACCESS; access.Trustee.TrusteeForm = TRUSTEE_IS_SID; access.Trustee.ptstrName = (LPWSTR)sid;
-    rc = SetEntriesInAclW(1, &access, oldacl, &newacl);
-    if (rc == ERROR_SUCCESS) rc = SetNamedSecurityInfoW(path, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, newacl, nullptr);
-    if (newacl) LocalFree(newacl); if (sd) LocalFree(sd);
-    if (rc != ERROR_SUCCESS) { error_hr("worker executable ACL grant", HRESULT_FROM_WIN32(rc)); return nullptr; }
+    std::wstring path;hr=current_executable(path);
+    if(SUCCEEDED(hr))hr=worker_executable_access(path,sid,false);
+    if(FAILED(hr)){error_hr("Worker execute access unavailable: run --provision-worker once as this executable's owner",hr);return nullptr;}
     Handle child_in, child_out;
     GUID pipe_id{};if(FAILED(CoCreateGuid(&pipe_id)))return nullptr;wchar_t guid[40];StringFromGUID2(pipe_id,guid,40);
     std::wstring pipe_name=L"\\\\.\\pipe\\AirMirrorLite-"+std::to_wstring(GetCurrentProcessId())+L"-"+guid;
@@ -700,8 +850,10 @@ void* am_worker_start() {
     si.StartupInfo.hStdOutput = child_out.h; si.StartupInfo.hStdError = child_out.h;
     std::wstring cmd = L"\"" + std::wstring(path) + L"\" --codec-worker";
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(path, cmd.data(), nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW,
-        nullptr, L"C:\\Windows\\System32", &si.StartupInfo, &pi)) {
+    wchar_t system_directory[32768];UINT system_length=GetSystemDirectoryW(system_directory,32768);
+    if(!system_length||system_length>=32768){error_hr("Windows system directory",system_length?HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER):HRESULT_FROM_WIN32(GetLastError()));return nullptr;}
+    if (!CreateProcessW(path.c_str(), cmd.data(), nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW,
+        nullptr, system_directory, &si.StartupInfo, &pi)) {
         error_hr("AppContainer launch", HRESULT_FROM_WIN32(GetLastError())); return nullptr;
     }
     w->process.h = pi.hProcess; Handle thread; thread.h = pi.hThread;

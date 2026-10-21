@@ -18,6 +18,16 @@ HRESULT PhoneShell::test_on_ui_thread(const wchar_t* directory){
         if(info.hbmColor)DeleteObject(info.hbmColor);if(info.hbmMask)DeleteObject(info.hbmMask);DestroyIcon(icon);UI_REQUIRE(ok);
     }
     UI_REQUIRE((GetWindowLongPtrW(window,GWL_STYLE)&WS_CAPTION)==0);
+    // The rail remains inside each work area even when neither external side
+    // fits (the original 1830-wide window at the left edge is included).
+    for(float scale:{1.0f,1.25f,2.0f})for(bool collapsed:{false,true})for(bool popup:{false,true}){
+        RECT area{0,0,1920,1080};const int width=1920-int(90*scale);
+        for(POINT origin:{POINT{0,0},POINT{-100,-100},POINT{1800,900}}){
+            RECT phone{origin.x,origin.y,origin.x+width,origin.y+400};auto p=palette_placement(phone,area,scale,collapsed,popup&&!collapsed,false);
+            UI_REQUIRE(p.x>=area.left&&p.x+p.width<=area.right&&p.y>=area.top&&p.y+p.height<=area.bottom);
+            UI_REQUIRE(rail_clearance(scale)>=int((PALETTE_WIDTH+RAIL_GAP)*scale));
+        }
+    }
     RECT client,outer;GetClientRect(window,&client);GetWindowRect(window,&outer);
     UI_REQUIRE(client.right==outer.right-outer.left&&client.bottom==outer.bottom-outer.top);
     set_volume(.65f);click(0);UI_REQUIRE(muted&&gain()==0);click(0);UI_REQUIRE(!muted&&std::abs(gain()-.65f)<.001f);
@@ -72,7 +82,7 @@ HRESULT PhoneShell::test_on_ui_thread(const wchar_t* directory){
         UI_REQUIRE(user_sized_);SetWindowPos(window,nullptr,proposed.left,proposed.top,proposed.right-proposed.left,proposed.bottom-proposed.top,SWP_NOZORDER|SWP_NOACTIVATE);
         UI_REQUIRE(std::abs(ratio()-float(format.first)/format.second)<.01f);click(1);UI_REQUIRE(!user_sized_);
     }
-    click(2);UI_REQUIRE(fullscreen);main_proc(window,WM_FORMAT,1920,1080);key(VK_ESCAPE);
+    click(2);UI_REQUIRE(fullscreen);GetWindowRect(window,&outer);MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST),&monitor);UI_REQUIRE(EqualRect(&outer,&monitor.rcMonitor));main_proc(window,WM_FORMAT,1920,1080);key(VK_ESCAPE);
     UI_REQUIRE(!fullscreen&&std::abs(ratio()-1920.0f/1080)<.01f);
     UI_REQUIRE((GetWindowLongPtrW(window,GWL_STYLE)&WS_CAPTION)==0);
     // Rapid Photos-style format changes must restore the final portrait shape
@@ -149,6 +159,44 @@ HRESULT PhoneShell::test_on_ui_thread(const wchar_t* directory){
     UI_REQUIRE(GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS)==objects);
     palette_proc(palette_,WM_MOUSEMOVE,0,point(1));UI_REQUIRE(palette_surface_->draws==draws+1&&palette_surface_->allocations==allocations);
     set_volume(.42f);UI_REQUIRE(palette_surface_->draws==draws+2&&palette_surface_->allocations==allocations);
+    // Explicit failures stay visible through cleanup; a dead listener must not
+    // become Ready merely because its error is dismissed or a session ends.
+    set_status(4,L"Synthetic decoder failure");reset_video();set_status(0,L"Ready");paint_status_panel();
+    UI_REQUIRE(status==4&&status_message()==L"Synthetic decoder failure"&&painted_status_kind_==4&&status_surface_->width>0);
+    key(VK_ESCAPE);UI_REQUIRE(status<3&&status_dismissed.exchange(false));
+    set_status(5,L"Listener unavailable");set_status(0,L"Ready");UI_REQUIRE(!dismiss_error()&&status==5);
+    set_status(3,L"Restoring Windows playback");UI_REQUIRE(status==3);set_status(6,L"");UI_REQUIRE(status<3);
+    set_status(4,std::wstring(300,L'x')+L"\n");UI_REQUIRE(status_message().size()==256);set_status(6,L"");
+    // Query and operate the real native providers directly in this hidden
+    // window; no external UI Automation client or desktop input is involved.
+    {
+        ComPtr<IRawElementProviderSimple> root;root.Attach(accessibility_->provider_for_test(0));
+        ComPtr<IRawElementProviderFragment> fragment;UI_REQUIRE(SUCCEEDED(root.As(&fragment)));
+        VARIANT focusable{};UI_REQUIRE(SUCCEEDED(root->GetPropertyValue(UIA_IsKeyboardFocusablePropertyId,&focusable))&&focusable.vt==VT_BOOL&&focusable.boolVal==VARIANT_TRUE);VariantClear(&focusable);
+        keyboard_focus_=0;UI_REQUIRE(SUCCEEDED(fragment->SetFocus())&&keyboard_focus_==-1);
+        ComPtr<IRawElementProviderFragment> rail;UI_REQUIRE(SUCCEEDED(fragment->Navigate(NavigateDirection_FirstChild,&rail))&&rail);
+        ComPtr<IRawElementProviderFragment> child;UI_REQUIRE(SUCCEEDED(rail->Navigate(NavigateDirection_FirstChild,&child))&&child);
+        ComPtr<IRawElementProviderSimple> rail_provider;UI_REQUIRE(SUCCEEDED(rail.As(&rail_provider)));ComPtr<IRawElementProviderSimple> host;UI_REQUIRE(SUCCEEDED(rail_provider->get_HostRawElementProvider(&host))&&host);
+        ComPtr<IRawElementProviderFragment> parent;UI_REQUIRE(SUCCEEDED(rail->Navigate(NavigateDirection_Parent,&parent))&&parent);
+        ComPtr<IUnknown> root_identity,parent_identity;root.As(&root_identity);parent.As(&parent_identity);UI_REQUIRE(root_identity.Get()==parent_identity.Get());
+        for(int id=1;id<=6;++id){ComPtr<IRawElementProviderSimple> node;node.Attach(accessibility_->provider_for_test(id));VARIANT value{};
+            UI_REQUIRE(SUCCEEDED(node->GetPropertyValue(UIA_NamePropertyId,&value))&&value.vt==VT_BSTR&&SysStringLen(value.bstrVal)>0);VariantClear(&value);
+            UI_REQUIRE(SUCCEEDED(node->GetPropertyValue(UIA_ControlTypePropertyId,&value))&&value.vt==VT_I4&&value.lVal==(id==6?UIA_SliderControlTypeId:UIA_ButtonControlTypeId));VariantClear(&value);
+        }
+        ComPtr<IRawElementProviderSimple> speaker; speaker.Attach(accessibility_->provider_for_test(1));ComPtr<IToggleProvider> toggle;
+        UI_REQUIRE(SUCCEEDED(speaker.As(&toggle)));ToggleState before,after;UI_REQUIRE(SUCCEEDED(toggle->get_ToggleState(&before))&&SUCCEEDED(toggle->Toggle())&&SUCCEEDED(toggle->get_ToggleState(&after))&&before!=after);toggle->Toggle();
+        ComPtr<IRawElementProviderSimple> slider_provider;slider_provider.Attach(accessibility_->provider_for_test(6));ComPtr<IRangeValueProvider> range;UI_REQUIRE(SUCCEEDED(slider_provider.As(&range)));
+        double value=0;UI_REQUIRE(SUCCEEDED(range->SetValue(37))&&SUCCEEDED(range->get_Value(&value))&&std::abs(value-37)<.01);
+        UI_REQUIRE(range->SetValue(101)==E_INVALIDARG&&range->SetValue(std::nan(""))==E_INVALIDARG);
+        ComPtr<IRawElementProviderFragment> slider_fragment;UI_REQUIRE(SUCCEEDED(slider_provider.As(&slider_fragment))&&SUCCEEDED(slider_fragment->SetFocus())&&keyboard_focus_==5&&popup_);
+        key(VK_HOME);UI_REQUIRE(volume==0);key(VK_END);UI_REQUIRE(volume==1);key(VK_NEXT);UI_REQUIRE(std::abs(volume-.9f)<.001f);key(VK_UP);UI_REQUIRE(std::abs(volume-.91f)<.001f);key(VK_SPACE);UI_REQUIRE(!quit&&!controls_collapsed_);dismiss_volume();
+        ComPtr<IRawElementProviderSimple> collapse;collapse.Attach(accessibility_->provider_for_test(5));ComPtr<IInvokeProvider> action;UI_REQUIRE(SUCCEEDED(collapse.As(&action))&&SUCCEEDED(action->Invoke())&&controls_collapsed_);
+        child.Reset();UI_REQUIRE(SUCCEEDED(rail->Navigate(NavigateDirection_FirstChild,&child))&&child);ComPtr<IRawElementProviderSimple> first;UI_REQUIRE(SUCCEEDED(child.As(&first)));
+        VARIANT name{};UI_REQUIRE(SUCCEEDED(first->GetPropertyValue(UIA_NamePropertyId,&name))&&std::wstring(name.bstrVal)==L"Show controls");VariantClear(&name);action->Invoke();
+        ComPtr<IRawElementProviderSimple> close;close.Attach(accessibility_->provider_for_test(4));action.Reset();UI_REQUIRE(SUCCEEDED(close.As(&action))&&SUCCEEDED(action->Invoke())&&quit.exchange(false));
+        PhoneAccessibility detached;ComPtr<IRawElementProviderSimple> expired;expired.Attach(detached.provider_for_test(1));VARIANT unavailable{};UI_REQUIRE(expired->GetPropertyValue(UIA_NamePropertyId,&unavailable)==UIA_E_ELEMENTNOTAVAILABLE);
+        UI_REQUIRE(SUCCEEDED(accessibility_->transport_test()));
+    }
     key('D');UI_REQUIRE(disconnect.exchange(false));click(3);UI_REQUIRE(quit.exchange(false));
     UI_REQUIRE(!IsWindowVisible(window)&&!IsWindowVisible(palette_));
     hot_=keyboard_focus_=-1;dismiss_volume();set_volume(1);muted=false;place_palette();return S_OK;

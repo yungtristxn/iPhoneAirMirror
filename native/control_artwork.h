@@ -97,6 +97,7 @@ public:
             color(a.muted?0x8c929d:0x9cc8ff);canvas->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(left,56,thumb,60),2,2),brush.Get());
             color(0xf4f6fa);canvas->FillEllipse(D2D1::Ellipse(D2D1::Point2F(thumb,58),8,8),brush.Get());
             color(a.muted?0x8c929d:0x709ed6);canvas->FillEllipse(D2D1::Ellipse(D2D1::Point2F(thumb,58),3,3),brush.Get());
+            if(a.focus==5){color(0x9cc8ff);canvas->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(left-14,42,right+14,74),8,8),brush.Get(),1/a.scale);}
         }
         }
         HRESULT result=canvas->EndDraw();if(result==D2DERR_RECREATE_TARGET){brush.Reset();canvas.Reset();}return result;

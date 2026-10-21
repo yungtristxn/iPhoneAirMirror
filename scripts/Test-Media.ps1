@@ -7,10 +7,11 @@ New-Item -ItemType Directory -Force -Path $data | Out-Null
 $result = Join-Path $data 'result.json'
 if (Test-Path -LiteralPath $result) { Remove-Item -LiteralPath $result }
 $Executable = (Resolve-Path -LiteralPath $Executable).Path
+& (Join-Path $PSScriptRoot 'Initialize-Worker.ps1') -Executable $Executable
 $arguments = @($(if ($Audio) { '--self-test' } else { '--ui-test' }))
 if ($UiRenderDirectory) { $arguments += @('--ui-test-dir', ('"' + $UiRenderDirectory + '"')) }
 $process = Start-Process -FilePath $Executable -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $data 'stdout.txt') -RedirectStandardError (Join-Path $data 'stderr.txt')
-if (-not $process.WaitForExit(45000)) { Stop-Process -Id $process.Id; throw 'Media test exceeded 45 seconds' }
+if (-not $process.WaitForExit(45000)) { $process.Kill(); [void]$process.WaitForExit(5000); throw 'Media test exceeded 45 seconds' }
 Get-Content (Join-Path $data 'stdout.txt'),(Join-Path $data 'stderr.txt')
 if ($process.ExitCode -ne 0) { throw ('Media probe failed: ' + $process.ExitCode) }
 @{timeUtc=[DateTime]::UtcNow.ToString('o');executable=$Executable;sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $Executable).Hash;exitCode=$process.ExitCode;audioTest=[bool]$Audio;evidence=$(if($Audio){'Synthetic H.264/AAC + native GPU/WASAPI + isolated worker. No iPhone acceptance.'}else{'Silent native UI/icon and synthetic H.264/HEVC GPU checks; no PCM submitted. No phone or sound acceptance.'})} | ConvertTo-Json | Set-Content (Join-Path $data 'result.json')

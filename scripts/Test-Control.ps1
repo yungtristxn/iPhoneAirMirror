@@ -7,6 +7,7 @@ New-Item -ItemType Directory -Force -Path $data | Out-Null
 $result = Join-Path $data 'result.json'
 if (Test-Path -LiteralPath $result) { Remove-Item -LiteralPath $result }
 $Executable = (Resolve-Path -LiteralPath $Executable).Path
+& (Join-Path $PSScriptRoot 'Initialize-Worker.ps1') -Executable $Executable
 $process = Start-Process -FilePath $Executable -ArgumentList @('--no-discovery','--hidden','--bind','127.0.0.1','--port','17000','--seconds','12','--data-dir',('"' + $data + '"')) -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $data 'stdout.txt') -RedirectStandardError (Join-Path $data 'stderr.txt')
 function Send-Request([string]$Request) {
     $client = [Net.Sockets.TcpClient]::new()
@@ -51,4 +52,4 @@ try {
     $probe=[Net.Sockets.TcpClient]::new();try{$probe.Connect('127.0.0.1',17000);throw 'Listener remains after shutdown'}catch [Net.Sockets.SocketException]{}finally{$probe.Dispose()}
     @{timeUtc=[DateTime]::UtcNow.ToString('o');executable=$Executable;sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $Executable).Hash;exitCode=$process.ExitCode;evidence='Silent loopback control, one-owner admission, malformed framing/state rejection and timed shutdown. No phone acceptance.'} | ConvertTo-Json | Set-Content -LiteralPath $result -Encoding utf8
     'PASS: real loopback control requests, one-owner admission, malformed framing/state rejection, listener survives, timed shutdown removes listener.'
-} finally { if(-not $process.HasExited){Stop-Process -Id $process.Id -ErrorAction SilentlyContinue} }
+} finally { if(-not $process.HasExited){$process.Kill();[void]$process.WaitForExit(5000)} }

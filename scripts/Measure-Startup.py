@@ -29,6 +29,9 @@ if args.discovery:
     except OSError:
         pass
 executable = pathlib.Path(args.exe).resolve(strict=True)
+# One-time deployment preparation is outside the measured ordinary-user launch.
+subprocess.run([str(executable), "--provision-worker"], check=True, timeout=10,
+               stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
 executable_hash = hashlib.sha256(executable.read_bytes()).hexdigest().upper()
 samples = []
 for trial in range(3):

@@ -18,6 +18,7 @@ struct PhoneCompositor {
     UINT width=0,height=0;
     UINT video_width=1,video_height=1;
     uint64_t redraws=0;
+    bool pending=false;double retry_at=0,present_seconds=0,present_max_seconds=0;uint64_t present_busy=0;
     HRESULT init(ID3D11Device* device,IDXGIFactory2* factory,HWND window,IDXGISwapChain1* video) {
         ComPtr<IDXGIDevice> dxgi;CHECK(device->QueryInterface(IID_PPV_ARGS(&dxgi)));
         CHECK(DCompositionCreateDevice(dxgi.Get(),IID_PPV_ARGS(&composition)));
@@ -51,6 +52,7 @@ struct PhoneCompositor {
         CHECK(bitmap->Commit());return encoder->Commit();
     }
     HRESULT layout(PhoneShell& shell,const wchar_t* diagnostic_path=nullptr) {
+        if(pending&&now_seconds()<retry_at&&!diagnostic_path)return S_OK;
         if(diagnostic_path && shell.has_video)return E_INVALIDARG;
         RECT r{};GetClientRect(shell.window,&r);UINT w=UINT(r.right),h=UINT(r.bottom);
         if(!w||!h||IsIconic(shell.window))return S_OK;
@@ -103,11 +105,15 @@ struct PhoneCompositor {
                 brush->SetColor(D2D1::ColorF(color));canvas->DrawText(text,UINT32(wcslen(text)),format.Get(),D2D1::RectF(18*scale,y,float(w)-18*scale,y+box_h*scale),brush.Get());
             };
             label(L"AirMirrorLite",11,cy-(compact?63:33)*scale,24,0x9299a6,DWRITE_FONT_WEIGHT_MEDIUM);
-            label(shell.status==1?L"Connecting…":L"Ready to mirror",23,cy-(compact?35:2)*scale,35,0xf1f2f6,DWRITE_FONT_WEIGHT_SEMI_BOLD);
-            label(shell.status==1?L"Your screen will appear here":L"Open Screen Mirroring\non your iPhone",12,cy+(compact?8:44)*scale,42,0x939aa7,DWRITE_FONT_WEIGHT_NORMAL);
+            const int state=shell.status;const auto reason=shell.status_message();
+            label(state==3?L"Restoring playback…":state==4?L"Connection failed":state==5?L"Receiver unavailable":state==1?L"Connecting…":L"Ready to mirror",23,cy-(compact?35:2)*scale,35,0xf1f2f6,DWRITE_FONT_WEIGHT_SEMI_BOLD);
+            label(state>=3?reason.c_str():state==1?L"Your screen will appear here":L"Open Screen Mirroring\non your iPhone",12,cy+(compact?8:44)*scale,42,0x939aa7,DWRITE_FONT_WEIGHT_NORMAL);
             if(!compact)label(L"Drag to move  ·  Resize from the corner",10,float(h)-66*scale,24,0x666e7b,DWRITE_FONT_WEIGHT_NORMAL);
         }
         CHECK(canvas->EndDraw());if(diagnostic_path){CHECK(save_idle_artwork(surface.Get(),diagnostic_path));}
-        CHECK(frame->Present(0,0));CHECK(composition->Commit());++redraws;return S_OK;
+        const double began=now_seconds();HRESULT present=frame->Present(0,DXGI_PRESENT_DO_NOT_WAIT);const double elapsed=now_seconds()-began;
+        present_seconds+=elapsed;present_max_seconds=std::max(present_max_seconds,elapsed);
+        if(present==DXGI_ERROR_WAS_STILL_DRAWING){pending=true;retry_at=now_seconds()+.005;++present_busy;shell.chrome_dirty=true;return S_OK;}
+        CHECK(present);pending=false;CHECK(composition->Commit());++redraws;return S_OK;
     }
 };

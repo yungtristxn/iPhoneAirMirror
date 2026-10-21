@@ -6,7 +6,12 @@ use std::{
 
 unsafe extern "C" {
     fn am_error() -> *const c_char;
-    fn am_lan_ipv4(address: *mut u8, index: *mut u32, prefix: *mut u32) -> i32;
+    fn am_lan_ipv4(
+        requested: *const u8,
+        address: *mut u8,
+        index: *mut u32,
+        prefix: *mut u32,
+    ) -> i32;
     fn am_show_error(message: *const c_char);
     fn am_now() -> f64;
     fn am_open(hidden: i32) -> *mut c_void;
@@ -19,6 +24,10 @@ unsafe extern "C" {
     fn am_flush_audio(app: *mut c_void);
     fn am_title(app: *mut c_void, title: *const c_char);
     fn am_pump(app: *mut c_void, wait_ms: u32) -> i32;
+    fn am_wait(app: *mut c_void, wait_ms: u32) -> i32;
+    fn am_dispatch(app: *mut c_void) -> i32;
+    fn am_status(app: *mut c_void, kind: u32, detail: *const c_char);
+    fn am_status_dismissed(app: *mut c_void) -> i32;
     fn am_prepare_video(app: *mut c_void, codec: u32, width: u32, height: u32, fps: u32) -> i32;
     fn am_presented(app: *mut c_void) -> u64;
     fn am_discovery_status(discovery: *mut c_void) -> i32;
@@ -51,6 +60,7 @@ unsafe extern "C" {
     fn am_protect(input: *const u8, len: u32, output: *mut u8, cap: u32, decrypt: i32) -> i32;
     fn am_is_sandboxed() -> i32;
     fn am_worker_start() -> *mut c_void;
+    fn am_worker_provision() -> i32;
     fn am_worker_close(worker: *mut c_void);
     fn am_worker_call(
         worker: *mut c_void,
@@ -86,10 +96,19 @@ pub fn show_error(message: &str) {
 pub fn now() -> f64 {
     unsafe { am_now() }
 }
-pub fn lan_ipv4() -> Result<(std::net::Ipv4Addr, u32, u32)> {
+pub fn lan_ipv4(requested: Option<std::net::Ipv4Addr>) -> Result<(std::net::Ipv4Addr, u32, u32)> {
     let mut address = [0; 4];
     let (mut index, mut prefix) = (0, 0);
-    if unsafe { am_lan_ipv4(address.as_mut_ptr(), &mut index, &mut prefix) } == 0 {
+    let requested = requested.map(|value| value.octets());
+    if unsafe {
+        am_lan_ipv4(
+            requested.as_ref().map_or(std::ptr::null(), |v| v.as_ptr()),
+            address.as_mut_ptr(),
+            &mut index,
+            &mut prefix,
+        )
+    } == 0
+    {
         return Err(error());
     }
     Ok((address.into(), index, prefix))
@@ -110,6 +129,22 @@ impl Drop for Wake {
     }
 }
 impl App {
+    pub fn status(&self, kind: u32, detail: &str) {
+        if let Ok(text) = CString::new(detail) {
+            unsafe { am_status(self.0.as_ptr(), kind, text.as_ptr()) }
+        }
+    }
+    pub fn take_status_dismissed(&self) -> bool {
+        unsafe { am_status_dismissed(self.0.as_ptr()) != 0 }
+    }
+    pub fn wait(&self, timeout: u32) -> Result<i32> {
+        let result = unsafe { am_wait(self.0.as_ptr(), timeout) };
+        if result < 0 { Err(error()) } else { Ok(result) }
+    }
+    pub fn dispatch(&self) -> Result<i32> {
+        let result = unsafe { am_dispatch(self.0.as_ptr()) };
+        if result < 0 { Err(error()) } else { Ok(result) }
+    }
     pub fn video_sync(&self, synchronized: bool) {
         unsafe { am_video_sync(self.0.as_ptr(), synchronized.into()) }
     }
@@ -288,6 +323,12 @@ pub fn protect(input: &[u8], decrypt: bool) -> Result<Vec<u8>> {
 pub struct Worker {
     handle: NonNull<c_void>,
     reply: Box<[u8; 16384]>,
+}
+pub fn provision_worker() -> Result<()> {
+    if unsafe { am_worker_provision() } == 0 {
+        return Err(error());
+    }
+    Ok(())
 }
 impl Worker {
     pub fn start() -> Result<Self> {
@@ -522,15 +563,19 @@ pub fn codec_probe_silent() -> Result<()> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
     let mut worker = checked_worker()?;
-    let fixture = include_bytes!("../tests/fixtures/tone-44100-stereo-eld.frames");
-    let mut reference = None;
+    let eld = include_bytes!("../tests/fixtures/tone-44100-stereo-eld.frames");
+    let lc = include_bytes!("../tests/fixtures/triangle-44100-stereo-lc.frames");
+    let mut references = [None, None];
     let mut total_frames = 0;
-    for _ in 0..3 {
-        worker.configure(4)?;
-        worker.configure(8)?;
+    // Exercise a real format transition, same-format FLUSH/reset, then restoration.
+    for codec in [8, 4, 4, 8] {
+        worker.configure(codec)?;
+        let fixture: &[u8] = if codec == 8 { eld } else { lc };
+        let expected_samples = if codec == 8 { 960 } else { 2048 };
         let mut input = std::io::Cursor::new(fixture);
         let mut hash = Sha256::new();
         let mut frames = 0;
+        let mut samples = 0;
         let mut energy = 0f64;
         while (input.position() as usize) < fixture.len() {
             let mut len = [0; 4];
@@ -542,7 +587,8 @@ pub fn codec_probe_silent() -> Result<()> {
             let packet = fixture.get(start..end).context("truncated AAC fixture")?;
             input.set_position(end as u64);
             let pcm = worker.decode(packet)?;
-            ensure!(pcm.len() == 960, "AAC-ELD 480-frame contract");
+            ensure!(pcm.len() == expected_samples, "AAC sample-count contract");
+            samples += pcm.len();
             for sample in pcm {
                 hash.update(sample.to_le_bytes());
                 energy += f64::from(sample).powi(2);
@@ -554,17 +600,33 @@ pub fn codec_probe_silent() -> Result<()> {
             "AAC fixture decoded no signal"
         );
         let digest = hash.finalize();
+        if codec == 4 {
+            ensure!(frames == 120 && samples == 245760, "AAC-LC fixture count");
+            ensure!(
+                format!("{digest:x}")
+                    == "ec0e0ecf994a43665ab2ef72c245ca49385d5927353a531e97dbe84707b59ae9",
+                "AAC-LC pinned PCM golden hash mismatch"
+            );
+        } else {
+            ensure!(frames == 120 && samples == 115200, "AAC-ELD fixture count");
+            ensure!(
+                format!("{digest:x}")
+                    == "c5679c95ef23189c71327d0e78e26ffd94c596f40902ccdfb7f5feaf256f8f6f",
+                "AAC-ELD pinned PCM golden hash mismatch"
+            );
+        }
+        let reference = &mut references[usize::from(codec == 4)];
         if let Some(previous) = reference {
             ensure!(
-                digest == previous,
+                digest == *previous,
                 "AAC reset/reuse changed decoded samples"
             );
         }
-        reference = Some(digest);
+        *reference = Some(digest);
         total_frames += frames;
     }
     println!(
-        "PASS: silent isolated codec regression: FairPlay known-answer, sandbox denials, {total_frames} AAC frames, identical hashes after reset. No audio samples submitted."
+        "PASS: silent isolated codec regression: FairPlay known-answer, sandbox checks, {total_frames} AAC-ELD/AAC-LC frames, both pinned golden hashes and identical hashes after reset. No audio samples submitted."
     );
     Ok(())
 }

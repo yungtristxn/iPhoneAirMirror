@@ -60,8 +60,15 @@ impl Clock {
     pub fn video(&self, remote: u64) -> Option<f64> {
         self.map(remote.wrapping_add(NTP_EPOCH))
     }
-    pub fn sync_audio(&mut self, rtp: u32, remote: u64) {
+    pub fn sync_audio(&mut self, rtp: u32, remote: u64) -> bool {
+        if self
+            .audio
+            .is_some_and(|(_, previous)| difference(remote, previous) < 0.0)
+        {
+            return false;
+        }
         self.audio = Some((rtp, remote));
+        true
     }
     pub fn clear_audio(&mut self) {
         self.audio = None;
@@ -123,5 +130,17 @@ mod tests {
         c.observe(remote.wrapping_add(ntp(1.0)), 21.0, 0.002)
             .unwrap();
         assert!((c.video(ntp(1001.0)).unwrap() - 21.0).abs() < 1e-6);
+    }
+    #[test]
+    fn reordered_audio_anchor_cannot_rewind_new_mapping() {
+        let mut c = Clock::default();
+        c.observe(ntp(1000.0), 20.0, 0.002).unwrap();
+        assert!(c.sync_audio(480, ntp(1000.0)));
+        assert!(c.sync_audio(44580, ntp(1001.0)));
+        let before = c.audio(44580);
+        assert!(!c.sync_audio(480, ntp(1000.0)));
+        assert_eq!(c.audio(44580), before);
+        c.clear_audio();
+        assert_eq!(c.audio(44580), None);
     }
 }

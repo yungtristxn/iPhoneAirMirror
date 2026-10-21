@@ -74,7 +74,9 @@ void modified_md5(unsigned char* originalblockIn, unsigned char* keyIn, unsigned
       else if (i < 64)
          j = 7*i % 16;
 
-      input = blockIn[4*j] << 24 | blockIn[4*j+1] << 16 | blockIn[4*j+2] << 8 | blockIn[4*j+3];
+      /* AirMirrorLite patch: promote bytes to uint32_t before left shifts. */
+      input = (uint32_t)blockIn[4*j] << 24 | (uint32_t)blockIn[4*j+1] << 16 |
+              (uint32_t)blockIn[4*j+2] << 8 | (uint32_t)blockIn[4*j+3];
       printf("Key = %08x\n", A);
       Z = A + input + (int)(long long)((1LL << 32) * fabs(sin(i + 1)));
       if (i < 16)

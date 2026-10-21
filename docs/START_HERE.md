@@ -1,6 +1,10 @@
-# AirMirrorLite implementation prompt
+# Original AirMirrorLite bootstrap brief
 
-Work in C:\Users\oetri\VibeCoding\AirMirrorLite.
+Historical starting instructions, retained to explain the original scope. The
+bootstrap has already been implemented. For current work, use SPEC.md and STATE.md;
+do not recreate the branch or replace the current application with a scaffold.
+
+Original prompt (repository root):
 
 Build the first usable version of this minimal Windows AirPlay receiver: iPhone screen mirroring **with synchronized phone sound**, one active sender, one native resizable/fullscreen window, disconnect, and complete shutdown when the window closes.
 

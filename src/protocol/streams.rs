@@ -86,6 +86,7 @@ impl Streams {
         self.threads.push(thread::spawn(move || {
             if let Err(e) = job(stop.clone(), clock, shared.clone(), epoch) {
                 shared.log(&format!("{name}: {e}"));
+                shared.failure(&format!("{name} stream stopped. Reconnect mirroring. {e}"));
                 stop.store(true, Ordering::Release);
             }
         }));
@@ -139,6 +140,7 @@ impl Streams {
                 epoch,
             ) {
                 shared.log(&format!("audio: {e}"));
+                shared.failure(&format!("Audio stream stopped. Reconnect mirroring. {e}"));
                 stop.store(true, Ordering::Release);
             }
         }));
@@ -148,7 +150,7 @@ impl Streams {
         self.shared.audio_started(self.epoch)?;
         Ok(ports)
     }
-    pub fn stop_audio(&mut self) {
+    pub fn stop_audio(&mut self) -> Result<()> {
         if let Some(stop) = self.audio_stop.take() {
             stop.store(true, Ordering::Release);
         }
@@ -157,15 +159,14 @@ impl Streams {
         }
         self.audio_ports = None;
         self.clock.lock().unwrap().clear_audio();
-        self.shared.flush.fetch_add(1, Ordering::AcqRel);
-        self.shared.audio_stopped(self.epoch);
+        self.shared.audio_stopped(self.epoch)
     }
 }
 impl Drop for Streams {
     fn drop(&mut self) {
         use zeroize::Zeroize;
         self.stop.store(true, Ordering::Release);
-        self.stop_audio();
+        let _ = self.stop_audio();
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
@@ -521,6 +522,7 @@ struct AudioQueue {
     packets: BTreeMap<u16, AudioPacket>,
     expected: Option<u16>,
     restart: Option<u16>,
+    fence: Option<super::AudioCutoff>,
 }
 #[derive(Debug, PartialEq, Eq)]
 enum AudioAdmission {
@@ -531,10 +533,31 @@ enum AudioAdmission {
 impl AudioQueue {
     fn clear(&mut self) {
         self.packets.clear();
-        self.expected = None;
+        self.expected = self.fence.map(|cutoff| cutoff.sequence);
         self.restart = None;
     }
+    fn flush(&mut self, cutoff: Option<super::AudioCutoff>) {
+        self.fence = cutoff;
+        self.clear();
+    }
+    fn consumed(&mut self, sequence: u16, timestamp: u32, samples_per_frame: u32) {
+        self.expected = Some(sequence.wrapping_add(1));
+        // Move the fence as playback advances, so a long session remains valid
+        // across both half-range and complete RTP counter wraparounds.
+        if self.fence.is_some() {
+            self.fence = Some(super::AudioCutoff {
+                sequence: sequence.wrapping_add(1),
+                timestamp: timestamp.wrapping_add(samples_per_frame),
+            });
+        }
+    }
     fn insert(&mut self, packet: RtpPacket<'_>, retransmit: bool) -> AudioAdmission {
+        if self.fence.is_some_and(|cutoff| {
+            (packet.seq.wrapping_sub(cutoff.sequence) as i16) < 0
+                || (packet.rtp.wrapping_sub(cutoff.timestamp) as i32) < 0
+        }) {
+            return AudioAdmission::Ignored;
+        }
         if retransmit && self.expected.is_none() {
             return AudioAdmission::Ignored;
         }
@@ -591,19 +614,25 @@ fn audio_loop(
         "audio codec={} sample_rate=44100 channels=2 AppContainer=yes",
         if codec == 8 { "AAC-ELD" } else { "AAC-LC" }
     ));
+    let initial_flush = shared.flush_snapshot();
     let mut queue = AudioQueue::default();
+    queue.flush(initial_flush.cutoff);
+    let mut anchor_after = initial_flush.anchor_after;
     let mut pinned_port = None;
     let mut last = Instant::now();
     let mut errors = 0;
     let mut resend_at = Instant::now() - Duration::from_secs(1);
-    let mut serial = shared.flush.load(Ordering::Acquire);
+    let mut serial = initial_flush.serial;
     let mut packet = [0u8; 8193];
     while !stop.load(Ordering::Acquire) && !local_stop.load(Ordering::Acquire) {
         let next_serial = shared.flush.load(Ordering::Acquire);
         if next_serial != serial {
-            queue.clear();
+            let flush = shared.flush_snapshot();
+            queue.flush(flush.cutoff);
+            clock.lock().unwrap().clear_audio();
+            anchor_after = flush.anchor_after;
             worker.configure(codec)?;
-            serial = next_serial;
+            serial = flush.serial;
         }
         match data.recv_from(&mut packet) {
             Ok((n, addr)) if addr.ip() == peer && pinned_port.is_none_or(|p| p == addr.port()) => {
@@ -638,8 +667,10 @@ fn audio_loop(
                         let mapped = clock.map(remote);
                         if let Some(t) = mapped
                             && (t - native::now()).abs() < 3.0
+                            && anchor_after.is_none_or(|boundary| t >= boundary)
+                            && clock.sync_audio(rtp, remote)
                         {
-                            clock.sync_audio(rtp, remote);
+                            anchor_after = None;
                         }
                     } else if n > 16
                         && packet[1] & 0x7f == 0x56
@@ -662,7 +693,7 @@ fn audio_loop(
                     break;
                 }
                 let mut p = queue.packets.remove(&seq).unwrap();
-                queue.expected = Some(seq.wrapping_add(1));
+                queue.consumed(seq, p.rtp, if codec == 8 { 480 } else { 1024 });
                 let Some(pts) = pts else { continue };
                 let encrypted = p.payload.len() / 16 * 16;
                 cbc::Decryptor::<aes::Aes128>::new(&key.into(), &iv.into())
@@ -897,6 +928,99 @@ mod tests {
         assert_eq!(queue.expected, Some(1201));
         assert_eq!(queue.packets.keys().copied().collect::<Vec<_>>(), [1201]);
         assert_eq!(queue.insert(rtp(1202), false), AudioAdmission::Queued);
+    }
+    #[test]
+    fn flush_fence_rejects_old_future_audio_and_retransmits_before_decode() {
+        let mut queue = AudioQueue::default();
+        let old = RtpPacket {
+            seq: 100,
+            rtp: 48000,
+            payload: &[1, 2],
+        };
+        assert_eq!(queue.insert(old, false), AudioAdmission::Queued);
+        // A still-future presentation timestamp cannot rescue pre-FLUSH wire data.
+        queue.flush(Some(super::super::AudioCutoff {
+            sequence: 101,
+            timestamp: 48480,
+        }));
+        assert!(queue.packets.is_empty());
+        let mut decoded = 0;
+        for retransmit in [false, true] {
+            if queue.insert(old, retransmit) != AudioAdmission::Ignored {
+                decoded += 1;
+            }
+        }
+        assert_eq!(decoded, 0);
+        assert_eq!(
+            queue.insert(
+                RtpPacket {
+                    seq: 101,
+                    rtp: 48000,
+                    ..old
+                },
+                false
+            ),
+            AudioAdmission::Ignored
+        );
+        assert_eq!(
+            queue.insert(
+                RtpPacket {
+                    seq: 100,
+                    rtp: 48480,
+                    ..old
+                },
+                true
+            ),
+            AudioAdmission::Ignored
+        );
+        let next = RtpPacket {
+            seq: 101,
+            rtp: 48480,
+            ..old
+        };
+        assert_eq!(queue.insert(next, false), AudioAdmission::Queued);
+        decoded += 1;
+        assert_eq!(decoded, 1);
+        queue.packets.remove(&101);
+        queue.consumed(101, 48480, 480);
+        assert_eq!(queue.insert(next, true), AudioAdmission::Ignored);
+        queue.clear(); // Idle reset must retain the moving transport fence.
+        assert_eq!(queue.insert(old, false), AudioAdmission::Ignored);
+    }
+    #[test]
+    fn flush_fence_tracks_sequence_and_timestamp_wrap_for_long_sessions() {
+        let mut queue = AudioQueue::default();
+        let mut sequence = u16::MAX - 1;
+        let mut timestamp = u32::MAX - 959;
+        queue.flush(Some(super::super::AudioCutoff {
+            sequence,
+            timestamp,
+        }));
+        assert_eq!(
+            queue.insert(
+                RtpPacket {
+                    seq: sequence.wrapping_sub(1),
+                    rtp: timestamp.wrapping_sub(480),
+                    payload: &[1]
+                },
+                false
+            ),
+            AudioAdmission::Ignored
+        );
+        for _ in 0..65540 {
+            let packet = RtpPacket {
+                seq: sequence,
+                rtp: timestamp,
+                payload: &[1],
+            };
+            assert_eq!(queue.insert(packet, false), AudioAdmission::Queued);
+            queue.packets.remove(&sequence);
+            queue.consumed(sequence, timestamp, 480);
+            assert_eq!(queue.insert(packet, true), AudioAdmission::Ignored);
+            sequence = sequence.wrapping_add(1);
+            timestamp = timestamp.wrapping_add(480);
+        }
+        assert!(queue.packets.is_empty());
     }
     #[test]
     fn audio_reordering_duplicates_wrap_and_outliers_stay_bounded() {

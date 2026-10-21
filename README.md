@@ -2,7 +2,7 @@
 
 A minimal Windows receiver for iPhone AirPlay **screen mirroring with synchronized sound** over the local network.
 
-**Status:** working local implementation on `feat/airplay-mvp`. Real iPhone HEVC mirroring is confirmed at **994×2160**, up from 498×1080. A previous H.264 session passed five minutes with user-confirmed synchronized audio and no freezes. Current high-resolution checks are silent; HEVC A/V sync has not been re-tested. See docs/STATE.md for evidence and remaining checks.
+**Status:** working local implementation on `feat/airplay-mvp`. Real iPhone HEVC mirroring works at **994×2160**, up from 498×1080. The current review fixes pass silent automated checks, and the user confirmed the quiet Photos/rotation/reconnect check. An older H.264 session passed five minutes with synchronized audio and no freezes; current HEVC A/V sync and adverse-device recovery have not been physically re-tested. See docs/STATE.md and docs/REVIEW_FOLLOWUP.md for evidence and remaining checks.
 
 ## Run
 
@@ -11,6 +11,12 @@ Launch `dist/AirMirrorLite/AirMirrorLite.exe`, select **AirMirrorLite** in iPhon
 Control Center → Screen Mirroring, and play a local non-DRM video with sound.
 Both devices must be on the same trusted private LAN. Normal operation requires
 no administrator rights, Bonjour service, account or cloud connection.
+
+Build/package scripts provision the restricted worker's read/execute permission
+on the exact executable. If building or deploying it manually, its owner runs
+`AirMirrorLite.exe --provision-worker` once. Ordinary launches only read that
+permission; they do not rewrite the executable's access rules or use an
+unrestricted worker if permission is missing.
 
 - Frameless, rounded phone view that learns the screen's proportions from the
   first mirrored frame. Matching screen rotations and resolution changes resize
@@ -31,11 +37,18 @@ no administrator rights, Bonjour service, account or cloud connection.
   `D` disconnect; Escape leaves fullscreen or disconnects. Double-click the
   picture to toggle fullscreen. Tab then Enter/Space operates the side controls;
   Left/Right adjusts volume in 1% steps when the speaker has keyboard focus.
-  Escape dismisses the volume flyout before leaving fullscreen or disconnecting.
+  Escape dismisses the volume flyout or a dismissible connection error before
+  leaving fullscreen or disconnecting. Unavailable-device/listener messages remain
+  until recovery; their instructions explain when a reconnect or restart is needed.
+- Custom controls expose native accessibility names, roles, focus, invoke/toggle
+  actions and volume range values. Keyboard volume also supports Home/End and
+  Page Up/Down when the slider has focus.
 - Close the receiver window to stop discovery, sockets and codec workers.
 - Identity is random and protected by Windows DPAPI in `local/identity.dpapi`
-  next to the executable. `local/receiver.log` is bounded to 1 MiB and contains
-  protocol stage names and counters, not media or pairing secrets.
+  next to a writable executable directory. Read-only deployments use
+  `%LOCALAPPDATA%/AirMirrorLite`; `--data-dir` explicitly chooses another directory.
+  `receiver.log` in that data directory is bounded to 1 MiB and contains protocol
+  stage names and counters, not media or pairing secrets.
 - The receiver has no PIN/admission whitelist: any reachable permitted LAN peer
   can request the single available session. Pair-verify proves key possession;
   it is not an allowlist of trusted people.
@@ -66,6 +79,8 @@ synchronization in a configured audio session. The hint is not measured
 phone-to-screen latency.
 Hosts without native HEVC support default to
 1080; explicitly selecting a higher mode requires native HEVC and GPU support.
+`--bind` can select any eligible private Ethernet/Wi-Fi IPv4 adapter, including
+one that is not enumerated first; discovery uses the same selected interface.
 
 To keep Photos proportional to the phone, the local data directory can contain
 `display-aspect.txt` with a reference width and height, for example `994 2160`.
@@ -73,6 +88,13 @@ The receiver scales this ratio to the selected resolution and requests that
 display geometry from the sender. The validated local installation uses this
 setting. `--display-width N` overrides it for one launch; without either setting,
 the usual widescreen request is used. Native decoder limits remain unchanged.
+
+Active-audio FLUSH requests must include valid RTP sequence and timestamp
+boundaries. This prevents canceled packets still in flight from entering the new
+playback interval. A sender that omits the boundary receives a rejection and a
+visible reconnect instruction. Screen-only FLUSH is harmless and does not affect
+a later audio connection. Compatibility with this stricter boundary still needs
+real-phone seek/pause evidence on the updated build.
 
 The executable includes its own multi-size icon for Explorer, the taskbar and
 Alt-Tab; no separate icon installation is needed.
@@ -87,6 +109,8 @@ No silent software-video or video-only fallback is enabled.
 
 This package is for local development/device acceptance. See
 [component licenses and distribution limits](docs/THIRD_PARTY.md) before redistribution.
+`scripts/Package.ps1 -ForDistribution` refuses while the current static component
+combination lacks an established compatible distribution grant.
 
 ## Start
 - [Implementation prompt](docs/START_HERE.md)

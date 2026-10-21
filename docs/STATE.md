@@ -4,75 +4,87 @@ Updated: 2026-10-21
 
 ## Runnable build
 - Branch `feat/airplay-mvp`; local commits only. Run
-  `dist/AirMirrorLite/AirMirrorLite.exe`. SHA-256:
-  `A89C05D194657E7C73BB4E870C71F811DDA943B1E2B1B7074644E9172477C307`.
-- Final phone check accepted: **responsive and correctly sized** after requested
-  Photos scrolling, return to Settings and brief rotation. The app subsequently
-  closed cleanly; no further phone interaction is pending for this correction.
-- This local installation saves `994 2160` in
-  `dist/AirMirrorLite/local/display-aspect.txt`. Normal launches load it and request
-  phone-proportioned output; the final run needed no command-line override.
-  Fresh installations without the file retain the normal widescreen request.
+  `dist/AirMirrorLite/AirMirrorLite.exe`. Current SHA-256:
+  `CCD1192625E6193A2CD2564621294CDEE810C8B2198B1639D40DA52E3755ED43`.
+- The user confirmed the quiet current-build phone check: **Everything works**
+  after requested Settings/Photos/rotation and disconnect/reconnect actions.
+  Saved `local/display-aspect.txt` remains `994 2160`; no launch override is needed.
+- All twelve implementation findings from the supplied final review were checked
+  against source and addressed. Details and limits are in REVIEW_FOLLOWUP.md.
 
-## Photo size and responsiveness
-- Earlier logs proved Photos changed the transmitted source/display from
-  994x2160 to 3840x2160. Keeping a portrait outline alone made the wide feed small.
-  Requesting 994x2160 instead kept the source phone-proportioned, and the user
-  confirmed that the full photo matched the phone. This is tested-phone evidence,
-  not a compatibility claim for all senders. See RESEARCH.md for other receivers.
-- The bounded, read-only saved aspect scales to 498x1080, 662x1440 or 994x2160.
-  `--display-width` overrides it. Native codec/dimension limits are unchanged.
-- The shell learns the first frame's normalized aspect. Matching ratios may
-  rotate/resize; different-aspect media fits completely inside the established
-  frame. Session-tagged messages reject stale formats/resets. Start from Home or
-  Settings: physical orientation cannot be inferred from arbitrary media alone.
-- Photos supplied presentation timestamps up to about 320 ms ahead of arrival.
-  Screen-only sessions now present fresh decoded frames promptly. Audio SETUP
-  restores shared-clock scheduling before PCM; audio teardown flushes old PCM
-  before returning to interactive presentation. Mute and silence never switch
-  modes. An audio transition can briefly hold the current picture to regain its
-  deadline. Advertised latency remains an 80 ms hint, not an added local delay.
-- Hardware decoding, bounded queues/IPC/logs, AppContainer, DPAPI and private-LAN
-  scope remain. No new dependency, firewall or Defender change.
+## Main corrections
+- Native waiting is separate from dispatch. Owner/audio/flush transitions are
+  applied under one gate before dispatch; audio SETUP, FLUSH and teardown wait for
+  that boundary. Full TEARDOWN also stops producers and clears the native session
+  before acknowledging, without clearing a newer owner.
+- FLUSH fences ordinary/retransmitted audio by validated sequence and RTP time,
+  including wrapping counters. A new transport clears old fences. Active audio
+  with missing/invalid RTP-Info gets 455 plus a reconnect instruction; screen-only
+  FLUSH does not poison later audio. Phone pause/seek compatibility is unverified.
+- Endpoint and graphics faults have bounded owner-thread recovery and persistent
+  actionable status. Unrelated capture-device notifications do not disconnect a
+  healthy output route. Failed Stop/Reset releases the old endpoint immediately.
+- Successful Present establishes shape/readiness; busy/occluded candidates cannot
+  establish a false first frame. Validated aperture origin, visible extent and
+  BT.601/709 full/studio range survive queued and paused frames.
+- WASAPI prefill precedes Start; chrome Present is nonblocking with dirty retry.
+  Minimized output drains dependencies and retains a bounded fresh picture without
+  unnecessary presentation. New bounded metrics expose copy cost and audio service.
+- Persistent errors have a software panel independent of D3D. Rail placement stays
+  within the work area; native accessibility covers controls, popup parenting,
+  range/focus/actions and bounded cross-thread requests.
+- Worker permissions are provisioned explicitly for the exact EXE, not rewritten
+  on each launch. Read-only deployment has per-user data fallback. Explicit bind
+  can select a second eligible private adapter. No isolation/Defender/firewall change.
+- Minimal unsigned PlayFair assembly patch removes signed-shift UB. Package target,
+  PE machine, toolchain/source provenance, dependency notices and linked docs agree.
 
-## Verification
-- 56 Rust tests, cargo fmt, strict clippy and release build pass.
-- Silent native suite: 100 decoder-bound H.264/HEVC GPU surfaces, two decoder
-  instances, 125 presentations including synthetic checks, audio_samples=0.
-  Synthetic pixel readback verifies full-image markers and letterboxing inside
-  a retained portrait frame; no sender pixels or desktop capture are read back.
-- Focused checks cover stable frame/default size, rotation, stale session
-  messages, interactive-to-synchronized timing, future deadlines, paused redraw,
-  resize/fullscreen and bounded ownership transitions. 360 AAC-ELD frames decode
-  in the isolated worker with repeat hashes and sandbox checks; no PCM reaches
-  WASAPI. Native codec/crypto sources are unchanged; prior ASan is historical.
-- Real loopback control/ownership/negative-state/shutdown checks and all three
-  saved-aspect /info profiles pass on this exact executable.
-- Commands: cargo fmt --check; cargo test --locked --offline;
-  cargo clippy --all-targets --locked --offline -- -D warnings;
-  cargo build --release --locked --offline; scripts/Test-Media.ps1;
-  scripts/Test-Control.ps1;
-  python -O scripts/Test-VideoProfiles.py --display-aspect 994 2160;
-  scripts/Package.ps1. Evidence: work/photo-final-*.log and
-  local/{media-test,control-test,profile-test}/result.json.
-- **Automated tests silent; no Computer Use.** Do not run --self-test or
-  Test-Media.ps1 -Audio without a new explicit request. Normal Windows toolchain
-  builds run outside the restricted sandbox; no protection was weakened.
+## Verified checks
+- 64 Rust tests, fmt, strict Clippy and release build pass.
+- Silent native suite: 100 decoder-bound GPU surfaces, 131 presentations including
+  redraws, one forced busy Present, endpoint and graphics recovery tests, and
+  audio_samples=0. Four decoder instances span the injected graphics rebuild.
+- Intrinsic tests cover transition/wait ordering, first-present geometry, aperture
+  and color pixels, minimized restore, prefill, persistent status, rail/DPI edges,
+  fullscreen, UIA behavior, timeout and detached providers. No Computer Use.
+- Isolated worker: 480 ELD/LC frames with pinned PCM hashes and reset comparisons.
+  Separate MSVC ASan: 120 ELD + 120 LC, pinned hashes and known signal controls,
+  1,024 FairPlay mutations and 1,024 malformed AAC packets, canaries intact.
+- Clang shift instrumentation: bad control traps, 20 public expected keys/high-bit
+  input pass. This is targeted verification, not exhaustive native-code safety.
+- Loopback control, worker owned-copy deployment/idempotent provisioning, and all
+  three saved-aspect /info profiles pass with the current executable hash.
+- Windows 11 Pro 10.0.26200 / RTX 4070 SUPER driver 32.0.16.1692. Synthetic input
+  preparation averages 0.002567 ms, maximum 0.0781 ms; no pooling is justified by
+  that workload. Startup medians: baseline 396.6 ms, revised 380.8 ms (three warm
+  runs each). Both are about 0.4 s; no significant or end-to-end speedup is claimed.
+- Commands: cargo fmt --check; cargo clippy --all-targets --locked --offline --
+  -D warnings; cargo test --locked --offline; cargo build --release --locked
+  --offline; scripts/Test-Media.ps1; scripts/Test-Control.ps1;
+  scripts/Test-WorkerDeployment.ps1; python -O scripts/Test-VideoProfiles.py
+  --display-aspect 994 2160; scripts/Test-PlayfairUB.ps1;
+  cargo run --manifest-path tests/native-sanitizer/Cargo.toml --locked --offline
+  (CARGO_TARGET_DIR=work/san-target); scripts/Package.ps1.
+  Evidence: work/review-followup-*.log and local result JSON; see REVIEW_FOLLOWUP.md.
 
-## Physical evidence and remaining validation
-- Final run: HEVC 994x2160 throughout, 1,156 decoder surfaces, 1,131 presentations,
-  zero late drops, 26 interactive superseded-frame skips; clean joined shutdown.
-  First picture was 177.9 ms after session claim, not phone-tap/display latency.
-- The phone itself negotiated AAC-ELD during the user's interaction: logs show
-  video_sync=0 -> 1, 147,068 audio samples, then audio teardown -> video_sync=0
-  with screen mirroring retained. This verifies the live mode transition, not
-  subjective sound quality or physical A/V sync. No sound playback was requested.
-- The user confirmed lower delay after the earlier timestamp fix and responsive,
-  correctly sized Photos on this final build. No numeric glass-to-glass latency
-  is claimed. Logs did not independently show a landscape format during the
-  final requested rotation check.
-- Older H.264 picture/audio passed five minutes with user-confirmed sync and no
-  freezes. Current physical A/V sync, 30-minute drift, lock/unlock and Wi-Fi-loss
-  recovery remain unverified; do not substitute silent or loopback checks.
-- Development package; distribution licensing remains unresolved. See
-  VALIDATION.md and THIRD_PARTY.md. No keys, captures or private logs committed.
+## Physical evidence and remaining boundaries
+- The user accepted the quiet current-build display/reconnect check. Observed
+  telemetry includes HEVC 994x2160, 1,386 decoded / 1,366 presented frames and
+  zero audio samples; first picture was 223.0 ms after session claim. These are
+  snapshots, not a measured physical latency or sustained-performance result.
+  Native startup/listener readiness was 264.4/313.9 ms; discovery took 808.9 ms
+  after its phase start. User-reported rotation/reconnect is distinct from logged
+  portrait snapshots. See local/review-followup-phone/result.json.
+- Prior accepted build `1ec851b`: responsive, correctly sized Photos, HEVC 994x2160,
+  real audio transport activation/deactivation and clean shutdown. Those phone
+  audio results do not automatically accept the new audio lifecycle/FLUSH changes.
+- Older H.264 picture/audio passed five minutes with user-confirmed sync/no freezes.
+  Current subjective HEVC A/V sync, 30-minute drift, physical hotplug/device loss,
+  lock/unlock, Wi-Fi loss, screen-reader behavior and glass-to-glass latency remain
+  unverified. Separate-admin-owner deployment and real multi-adapter choice are
+  also distinct from owned-copy and synthetic selection tests.
+- Automated tests remain silent. Do not run --self-test or Test-Media.ps1 -Audio
+  without a new explicit request. No phone captures, private logs or keys in Git.
+- R1 remains an external distribution-rights gate: the static GPL PlayFair/FDK
+  combination has no established compatible grant. -ForDistribution fails;
+  ordinary packaging is local development only. Notices do not resolve licensing.

@@ -30,6 +30,8 @@ aspect_fixture.unlink(missing_ok=True)
 if args.display_aspect:
     aspect_fixture.write_text("{} {}\n".format(*args.display_aspect), encoding="ascii")
 exe = args.exe.resolve(strict=True)
+subprocess.run([str(exe), "--provision-worker"], check=True, timeout=10,
+               stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
 executable_hash = hashlib.sha256(exe.read_bytes()).hexdigest().upper()
 checked = []
 

@@ -2,6 +2,10 @@
 
 ## Commands
 
+The current review-remediation results and per-finding limits are in
+[REVIEW_FOLLOWUP.md](REVIEW_FOLLOWUP.md). Sections below retain historical build
+evidence; a successful earlier phone session is not current-build acceptance.
+
 From the repository root, PowerShell (MSVC C++ tools and Rust installed):
 
 ```powershell
@@ -12,6 +16,7 @@ cargo test --locked --offline
 cargo build --release --locked --offline
 ./scripts/Test-Media.ps1
 ./scripts/Test-Control.ps1 -Executable "$PWD/target/release/airmirror-lite.exe"
+./scripts/Test-WorkerDeployment.ps1
 python -O scripts/Test-VideoProfiles.py --display-aspect 994 2160
 ```
 
@@ -26,6 +31,13 @@ Remove-Item Env:CARGO_TARGET_DIR
 The native harness requires the MSVC AddressSanitizer component. It compiles
 the retained native sources with `/fsanitize=address`; no sanitizer runtime ships
 in the receiver package. The AAC fixture generator is also development-only.
+
+`scripts/Test-PlayfairUB.ps1` is the separate Clang shift-undefined-behavior check;
+see `tests/native-sanitizer/README.md` for its portable development compiler,
+mandatory failing control and published known-answer vectors. ASan alone cannot
+establish absence of signed-shift UB. The current ASan harness covers both AAC
+fixtures, pinned hashes and independent signal-content expectations; hashes do
+not represent an independent decoder implementation.
 
 ## What each result establishes
 

@@ -10,11 +10,54 @@ fn sources(build: &mut cc::Build, dir: &str, extension: &str) {
     build.files(files);
 }
 
+fn json_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for character in value.chars() {
+        match character {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn compiler_provenance(build: &cc::Build) -> String {
+    let compiler = build.get_compiler();
+    let flags = compiler
+        .args()
+        .iter()
+        .map(|v| json_string(&v.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let environment = compiler
+        .env()
+        .iter()
+        .filter(|(key, _)| matches!(key.to_str(), Some("INCLUDE" | "LIB")))
+        .map(|(key, value)| {
+            format!(
+                "{}:{}",
+                json_string(&key.to_string_lossy()),
+                json_string(&value.to_string_lossy())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"path\":{},\"flags\":[{}],\"sdkEnvironment\":{{{}}}}}",
+        json_string(&compiler.path().to_string_lossy()),
+        flags,
+        environment
+    )
+}
+
 fn main() {
     assert_eq!(
-        std::env::var("CARGO_CFG_TARGET_OS").as_deref(),
-        Ok("windows"),
-        "AirMirrorLite requires Windows"
+        std::env::var("TARGET").as_deref(),
+        Ok("x86_64-pc-windows-msvc"),
+        "AirMirrorLite requires the x86_64-pc-windows-msvc target"
     );
     println!("cargo:rerun-if-changed=native");
     println!("cargo:rerun-if-changed=vendor");
@@ -73,7 +116,8 @@ fn main() {
         }
     }
     aac.file("native/codec.cpp").compile("aac_decoder");
-    cc::Build::new()
+    let mut bridge = cc::Build::new();
+    bridge
         .cpp(true)
         .std("c++17")
         .flag("/EHsc")
@@ -84,7 +128,20 @@ fn main() {
         .define("NOMINMAX", None)
         .file("native/windows.cpp")
         .file("native/phone_shell.cpp")
+        .file("native/phone_accessibility.cpp")
         .compile("windows_bridge");
+    let provenance = format!(
+        "{{\"target\":\"x86_64-pc-windows-msvc\",\"resourceCompiler\":{},\"resourceFlags\":[\"/nologo\",\"/fo <OUT_DIR>/app.res\",\"app.rc\"],\"playfair\":{},\"aac\":{},\"bridge\":{}}}",
+        json_string(&rc.to_string_lossy()),
+        compiler_provenance(&fairplay),
+        compiler_provenance(&aac),
+        compiler_provenance(&bridge)
+    );
+    fs::write(
+        Path::new(&std::env::var_os("OUT_DIR").unwrap()).join("native-build.json"),
+        provenance,
+    )
+    .expect("write native compiler provenance");
     for lib in [
         "mfplat",
         "mfuuid",
@@ -103,6 +160,7 @@ fn main() {
         "ole32",
         "oleaut32",
         "user32",
+        "uiautomationcore",
         "gdi32",
         "dnsapi",
         "iphlpapi",

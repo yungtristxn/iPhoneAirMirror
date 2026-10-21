@@ -5,7 +5,10 @@ pub mod hevc;
 pub mod pairing;
 pub mod plist;
 mod streams;
-use crate::{native, runtime::Shared};
+use crate::{
+    native,
+    runtime::{ReceiverStatus, Shared},
+};
 use ::plist::Value;
 use anyhow::{Result, bail, ensure};
 use plist::{bytes, dict, get, num, number};
@@ -35,6 +38,11 @@ pub struct VideoProfile {
     pub height: u32,
     pub fps: u32,
     pub hevc: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioCutoff {
+    pub sequence: u16,
+    pub timestamp: u32,
 }
 impl VideoProfile {
     fn default_width(height: u32) -> Result<u32> {
@@ -91,22 +99,24 @@ struct Session {
     claimed: bool,
 }
 impl Session {
+    fn teardown_all(&mut self) -> Result<()> {
+        // Join producers before releasing ownership, then wait for the media
+        // thread's applied reset boundary before acknowledging full TEARDOWN.
+        drop(self.streams.take());
+        if std::mem::take(&mut self.claimed) {
+            self.shared.release_applied(self.id)?;
+            self.shared.status(ReceiverStatus::Ready);
+        }
+        Ok(())
+    }
     fn claim(&mut self) -> Result<()> {
         if self.claimed {
             return Ok(());
         }
-        ensure!(
-            self.shared
-                .owner
-                .compare_exchange(0, self.id, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok(),
-            "receiver busy"
-        );
-        self.shared
-            .owner_started
-            .store(native::now().to_bits(), Ordering::Release);
+        self.shared.claim(self.id)?;
         self.claimed = true;
-        self.shared.status("Connecting iPhone");
+        self.shared
+            .status(ReceiverStatus::Connecting("Connecting iPhone"));
         Ok(())
     }
     fn setup(&mut self, body: &[u8], peer: IpAddr, local: IpAddr) -> Result<Vec<u8>> {
@@ -182,8 +192,9 @@ impl Session {
             }
             response.insert("streams".into(), Value::Array(replies));
         }
-        self.shared
-            .status("Connected — waiting for picture and sound");
+        self.shared.status(ReceiverStatus::Connecting(
+            "Connected — waiting for picture and sound",
+        ));
         plist::encode(&Value::Dictionary(response))
     }
 }
@@ -191,11 +202,8 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.streams.take();
         if self.claimed {
-            self.shared
-                .owner
-                .compare_exchange(self.id, 0, Ordering::AcqRel, Ordering::Acquire)
-                .ok();
-            self.shared.status("Ready — select AirMirrorLite on iPhone");
+            self.shared.release(self.id);
+            self.shared.status(ReceiverStatus::Ready);
         }
     }
 }
@@ -454,20 +462,35 @@ pub fn serve(mut socket: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 ("FLUSH", _) => {
                     ensure!(session.streams.is_some(), "flush before SETUP");
                     shared.log("FLUSH requested");
-                    shared.flush.fetch_add(1, Ordering::AcqRel);
+                    if session.streams.as_ref().is_some_and(|streams| streams.audio_ports.is_none()) {
+                        // No audio transport exists to flush or fence. Do not let
+                        // a screen-only notification poison a later audio SETUP.
+                        return Ok((Vec::new(), "text/plain", String::new(), false));
+                    }
+                    let cutoff = parse_flush_cutoff(req.headers.get("rtp-info").map(String::as_str));
+                    let cutoff = match cutoff {
+                        Ok(cutoff) => cutoff,
+                        Err(error) => {
+                            shared.failure("Audio flush lacked a valid RTP-Info boundary. Reconnect mirroring to resume sound.");
+                            return Err(error);
+                        }
+                    };
+                    shared.request_flush(id, cutoff)?;
                     Ok((Vec::new(), "text/plain", String::new(), false))
                 }
                 ("TEARDOWN", _) => {
                     shared.log("TEARDOWN");
-                    let types = teardown_types(&req.body)?;
-                    let done = types.as_ref().is_none_or(|types| types.contains(&110));
-                    if types.as_ref().is_some_and(|types| types.contains(&96))
-                        && let Some(media) = session.streams.as_mut()
-                    {
-                        media.stop_audio();
-                        shared.log("audio stream stopped; screen session retained");
+                    let plan = teardown_plan(&req.body)?;
+                    match plan {
+                        TeardownPlan::All => session.teardown_all()?,
+                        TeardownPlan::Audio => {
+                            if let Some(media) = session.streams.as_mut() {
+                                media.stop_audio()?;
+                                shared.log("audio stream stopped; screen session retained");
+                            }
+                        }
                     }
-                    Ok((Vec::new(), "text/plain", String::new(), done))
+                    Ok((Vec::new(), "text/plain", String::new(), plan == TeardownPlan::All))
                 }
                 _ => bail!("unsupported endpoint"),
             }
@@ -504,6 +527,41 @@ fn validate_audio_mode(body: &[u8]) -> Result<()> {
     );
     Ok(())
 }
+fn parse_flush_cutoff(value: Option<&str>) -> Result<AudioCutoff> {
+    let value =
+        value.ok_or_else(|| anyhow::anyhow!("FLUSH requires RTP-Info; reconnect mirroring"))?;
+    ensure!(
+        !value.is_empty() && value.len() <= 96,
+        "FLUSH RTP-Info budget"
+    );
+    let (mut sequence, mut timestamp) = (None, None);
+    for field in value.split(';') {
+        let (name, value) = field
+            .trim()
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("FLUSH RTP-Info field"))?;
+        let value = value.trim();
+        ensure!(
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
+            "FLUSH RTP-Info number"
+        );
+        match name.trim() {
+            "seq" => {
+                ensure!(sequence.is_none(), "duplicate FLUSH sequence");
+                sequence = Some(value.parse::<u16>()?);
+            }
+            "rtptime" => {
+                ensure!(timestamp.is_none(), "duplicate FLUSH timestamp");
+                timestamp = Some(value.parse::<u32>()?);
+            }
+            _ => bail!("unsupported FLUSH RTP-Info field"),
+        }
+    }
+    Ok(AudioCutoff {
+        sequence: sequence.ok_or_else(|| anyhow::anyhow!("FLUSH sequence missing"))?,
+        timestamp: timestamp.ok_or_else(|| anyhow::anyhow!("FLUSH timestamp missing"))?,
+    })
+}
 fn teardown_types(body: &[u8]) -> Result<Option<Vec<u64>>> {
     if body.is_empty() {
         return Ok(None);
@@ -527,9 +585,60 @@ fn teardown_types(body: &[u8]) -> Result<Option<Vec<u64>>> {
     }
     Ok(Some(types))
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TeardownPlan {
+    All,
+    Audio,
+}
+fn teardown_plan(body: &[u8]) -> Result<TeardownPlan> {
+    let types = teardown_types(body)?;
+    Ok(if types.as_ref().is_none_or(|types| types.contains(&110)) {
+        TeardownPlan::All
+    } else {
+        TeardownPlan::Audio
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn flush_requires_two_bounded_unambiguous_rtp_cutoffs() {
+        let maximum = AudioCutoff {
+            sequence: u16::MAX,
+            timestamp: u32::MAX,
+        };
+        assert_eq!(
+            parse_flush_cutoff(Some("seq=65535;rtptime=4294967295")).unwrap(),
+            maximum
+        );
+        assert_eq!(
+            parse_flush_cutoff(Some("rtptime=4294967295; seq=65535")).unwrap(),
+            maximum
+        );
+        assert_eq!(
+            parse_flush_cutoff(Some("seq=0;rtptime=0")).unwrap(),
+            AudioCutoff {
+                sequence: 0,
+                timestamp: 0
+            }
+        );
+        assert!(parse_flush_cutoff(None).is_err());
+        for value in [
+            "",
+            "seq=1",
+            "rtptime=1",
+            "seq=1;rtptime=1;seq=2",
+            "seq=1;rtptime=1;url=x",
+            "seq=-1;rtptime=1",
+            "seq=65536;rtptime=1",
+            "seq=1;rtptime=4294967296",
+            "seq=+1;rtptime=1",
+            "seq=1;rtptime=1;",
+        ] {
+            assert!(parse_flush_cutoff(Some(value)).is_err(), "{value}");
+        }
+        assert!(parse_flush_cutoff(Some(&"0".repeat(97))).is_err());
+    }
     #[test]
     fn high_resolution_advertisement_is_capability_gated() {
         assert!(VideoProfile::new(2160, false).is_err());
@@ -599,5 +708,23 @@ mod tests {
         .unwrap();
         assert_eq!(teardown_types(&body).unwrap(), Some(vec![96]));
         assert_eq!(teardown_types(&[]).unwrap(), None);
+        assert_eq!(teardown_plan(&body).unwrap(), TeardownPlan::Audio);
+    }
+    #[test]
+    fn full_teardown_always_requires_applied_session_release_before_ack() {
+        assert_eq!(teardown_plan(&[]).unwrap(), TeardownPlan::All);
+        for types in [vec![110], vec![96, 110], vec![110, 96]] {
+            let body = plist::encode(&dict([(
+                "streams",
+                Value::Array(
+                    types
+                        .into_iter()
+                        .map(|kind| dict([("type", number(kind))]))
+                        .collect(),
+                ),
+            )]))
+            .unwrap();
+            assert_eq!(teardown_plan(&body).unwrap(), TeardownPlan::All);
+        }
     }
 }

@@ -8,7 +8,7 @@ use std::{
     net::{IpAddr, TcpListener, TcpStream},
     path::Path,
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
         mpsc::{Receiver, SyncSender, sync_channel},
     },
@@ -144,6 +144,63 @@ impl AudioOwnership {
         epoch != 0 && self.0.load(Ordering::Acquire) == epoch
     }
 }
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AudioFlush {
+    pub serial: u64,
+    pub cutoff: Option<protocol::AudioCutoff>,
+    pub anchor_after: Option<f64>,
+}
+#[derive(Default)]
+struct MediaTransitions {
+    revision: u64,
+    applied: u64,
+    flush: AudioFlush,
+}
+impl MediaTransitions {
+    fn apply<T>(&mut self, operation: impl FnOnce(AudioFlush) -> Result<T>) -> Result<T> {
+        let result = operation(self.flush)?;
+        self.applied = self.revision;
+        Ok(result)
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReceiverStatus {
+    Ready,
+    Connecting(&'static str),
+    Streaming,
+    Error(String),
+    Unavailable(String),
+}
+impl ReceiverStatus {
+    fn replace(&mut self, next: Self, same_failed_session: bool) -> bool {
+        if matches!(self, Self::Unavailable(_)) && !matches!(next, Self::Unavailable(_)) {
+            return false;
+        }
+        if matches!(self, Self::Error(_))
+            && (matches!(next, Self::Ready | Self::Connecting(_))
+                || (same_failed_session && matches!(next, Self::Streaming)))
+        {
+            return false;
+        }
+        let changed = *self != next;
+        *self = next;
+        changed
+    }
+    fn dismiss(&mut self) {
+        if matches!(self, Self::Error(_)) {
+            *self = Self::Ready;
+        }
+    }
+    fn native(&self) -> (u32, &str) {
+        match self {
+            Self::Ready => (0, "Ready — select AirMirrorLite on iPhone"),
+            Self::Connecting(text) => (1, text),
+            Self::Streaming => (2, "Mirroring"),
+            Self::Error(text) => (4, text),
+            Self::Unavailable(text) => (5, text),
+        }
+    }
+}
 impl Media {
     fn epoch(&self) -> u64 {
         match self {
@@ -175,6 +232,8 @@ pub struct Shared {
     pub volume_db: AtomicU32,
     pub owner: AtomicU64,
     audio_owner: AudioOwnership,
+    transitions: Mutex<MediaTransitions>,
+    transition_applied: Condvar,
     pub owner_started: AtomicU64,
     // Negotiation hint only; wire presentation timestamps are mapped unchanged.
     pub playout_ms: u32,
@@ -187,24 +246,132 @@ pub struct Shared {
     video: SyncSender<Media>,
     audio: SyncSender<Media>,
     log: Mutex<(File, u64)>,
-    pub status: Mutex<String>,
+    status: Mutex<ReceiverStatus>,
+    status_error_owner: AtomicU64,
     wake: native::Wake,
 }
 impl Shared {
+    pub fn claim(&self, epoch: u64) -> Result<()> {
+        let mut transition = self.transitions.lock().unwrap();
+        ensure!(
+            self.owner
+                .compare_exchange(0, epoch, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok(),
+            "receiver busy"
+        );
+        self.owner_started
+            .store(native::now().to_bits(), Ordering::Release);
+        transition.revision += 1;
+        drop(transition);
+        self.wake.signal();
+        Ok(())
+    }
+    pub fn release(&self, epoch: u64) {
+        let _ = self.release_transition(epoch);
+    }
+    pub fn release_applied(&self, epoch: u64) -> Result<()> {
+        if let Some(revision) = self.release_transition(epoch) {
+            self.wait_applied(revision)?;
+        }
+        Ok(())
+    }
+    fn release_transition(&self, epoch: u64) -> Option<u64> {
+        let mut transition = self.transitions.lock().unwrap();
+        if self
+            .owner
+            .compare_exchange(epoch, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            transition.revision += 1;
+            let revision = transition.revision;
+            drop(transition);
+            self.wake.signal();
+            Some(revision)
+        } else {
+            None
+        }
+    }
+    fn wait_applied(&self, revision: u64) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut transition = self.transitions.lock().unwrap();
+        while transition.applied < revision {
+            ensure!(
+                !self.shutdown.load(Ordering::Acquire),
+                "receiver is shutting down"
+            );
+            ensure!(
+                Instant::now() < deadline,
+                "media transition application timed out"
+            );
+            transition = self
+                .transition_applied
+                .wait_timeout(transition, Duration::from_millis(100))
+                .unwrap()
+                .0;
+        }
+        Ok(())
+    }
+    pub fn flush_snapshot(&self) -> AudioFlush {
+        self.transitions.lock().unwrap().flush
+    }
+    pub fn request_flush(&self, epoch: u64, cutoff: protocol::AudioCutoff) -> Result<()> {
+        let mut transition = self.transitions.lock().unwrap();
+        ensure!(
+            self.owner.load(Ordering::Acquire) == epoch,
+            "flush session ownership changed"
+        );
+        transition.flush = AudioFlush {
+            serial: transition.flush.serial + 1,
+            cutoff: Some(cutoff),
+            anchor_after: Some(native::now()),
+        };
+        self.flush.store(transition.flush.serial, Ordering::Release);
+        transition.revision += 1;
+        let revision = transition.revision;
+        drop(transition);
+        self.wake.signal();
+        self.wait_applied(revision)
+    }
     pub fn audio_started(&self, epoch: u64) -> Result<()> {
+        let mut transition = self.transitions.lock().unwrap();
         ensure!(
             self.owner.load(Ordering::Acquire) == epoch,
             "audio session ownership changed"
         );
         if self.audio_owner.activate(epoch)? {
-            self.wake.signal();
+            // A genuinely new transport has its own wire sequence and anchor.
+            // Advance the PCM generation while removing the prior transport's fence.
+            transition.flush = AudioFlush {
+                serial: transition.flush.serial + 1,
+                ..AudioFlush::default()
+            };
+            self.flush.store(transition.flush.serial, Ordering::Release);
+            transition.revision += 1;
         }
-        Ok(())
+        let revision = transition.revision;
+        drop(transition);
+        self.wake.signal();
+        self.wait_applied(revision)
     }
-    pub fn audio_stopped(&self, epoch: u64) {
-        if self.audio_owner.clear(epoch) {
-            self.wake.signal();
+    pub fn audio_stopped(&self, epoch: u64) -> Result<()> {
+        let mut transition = self.transitions.lock().unwrap();
+        if self.owner.load(Ordering::Acquire) != epoch {
+            return Ok(());
         }
+        transition.flush = AudioFlush {
+            serial: transition.flush.serial + 1,
+            ..AudioFlush::default()
+        };
+        self.flush.store(transition.flush.serial, Ordering::Release);
+        self.audio_owner.clear(epoch);
+        transition.revision += 1;
+        let revision = transition.revision;
+        drop(transition);
+        self.wake.signal();
+        if self.shutdown.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.wait_applied(revision)
     }
     pub fn log(&self, text: &str) {
         let text: String = text
@@ -222,10 +389,39 @@ impl Shared {
             log.1 += line.len() as u64;
         }
     }
-    pub fn status(&self, text: &str) {
-        *self.status.lock().unwrap() = text.to_string();
-        self.log(text);
-        self.wake.signal();
+    pub fn status(&self, status: ReceiverStatus) {
+        let mut current = self.status.lock().unwrap();
+        // Cleanup from a released session must not replace a newer owner's
+        // Connecting/Streaming state while waiting for its applied boundary.
+        if matches!(status, ReceiverStatus::Ready) && self.owner.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        let same_failed_session =
+            self.status_error_owner.load(Ordering::Acquire) == self.owner.load(Ordering::Acquire);
+        if current.replace(status, same_failed_session) {
+            self.log(current.native().1);
+            self.wake.signal();
+        }
+    }
+    pub fn failure(&self, reason: &str) {
+        self.status_error_owner
+            .store(self.owner.load(Ordering::Acquire), Ordering::Release);
+        self.status(ReceiverStatus::Error(
+            reason
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(240)
+                .collect(),
+        ));
+    }
+    fn unavailable(&self, reason: &str) {
+        self.status(ReceiverStatus::Unavailable(
+            reason
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(240)
+                .collect(),
+        ));
     }
     pub fn send_video(&self, m: Media) -> Result<()> {
         let start = Instant::now();
@@ -281,6 +477,13 @@ fn identity(path: &Path) -> Result<[u8; 32]> {
         Ok(key)
     }
 }
+fn discovery_bind_request(bind: IpAddr) -> Result<Option<std::net::Ipv4Addr>> {
+    match bind {
+        IpAddr::V4(address) if !address.is_unspecified() => Ok(Some(address)),
+        IpAddr::V4(_) => Ok(None),
+        IpAddr::V6(_) => anyhow::bail!("discovery requires a local IPv4 address"),
+    }
+}
 pub struct ReceiverApp {
     pub shared: Arc<Shared>,
     video: Receiver<Media>,
@@ -300,7 +503,7 @@ impl ReceiverApp {
     ) -> Result<Self> {
         protocol::clock::Clock::new(playout_ms)?;
         let lan = if advertise {
-            Some(native::lan_ipv4()?)
+            Some(native::lan_ipv4(discovery_bind_request(bind)?)?)
         } else {
             None
         };
@@ -350,6 +553,8 @@ impl ReceiverApp {
             volume_db: AtomicU32::new(0.0f32.to_bits()),
             owner: AtomicU64::new(0),
             audio_owner: AudioOwnership::default(),
+            transitions: Mutex::new(MediaTransitions::default()),
+            transition_applied: Condvar::new(),
             owner_started: AtomicU64::new(0),
             playout_ms,
             next: AtomicU64::new(1),
@@ -361,7 +566,8 @@ impl ReceiverApp {
             video: vtx,
             audio: atx,
             log: Mutex::new((log, size)),
-            status: Mutex::new("Ready — select AirMirrorLite on iPhone".into()),
+            status: Mutex::new(ReceiverStatus::Ready),
+            status_error_owner: AtomicU64::new(0),
             wake,
         });
         shared.log(&format!(
@@ -454,7 +660,7 @@ impl ReceiverApp {
         let (mut got_video, mut got_audio, mut reported) = (false, false, false);
         let mut flush = self.shared.flush.load(Ordering::Acquire);
         let mut last_stats = Instant::now();
-        let mut last_title = String::new();
+        let mut last_status = None;
         let mut discovery_ready = self.discovery.is_empty();
         let (mut pending_audio, mut pending_video) = (None, None);
         let mut presented_base = app.presented();
@@ -501,14 +707,16 @@ impl ReceiverApp {
             // volume and silence never move an audio session to interactive mode.
             app.video_sync(video_synchronized);
             let changed_status = {
-                let status = self.shared.status.lock().unwrap();
-                (status.as_str() != last_title).then(|| status.clone())
+                let mut status = self.shared.status.lock().unwrap();
+                if app.take_status_dismissed() {
+                    status.dismiss();
+                }
+                (Some(&*status) != last_status.as_ref()).then(|| status.clone())
             };
             if let Some(status) = changed_status {
-                app.title(&format!(
-                    "AirMirrorLite — {status} | F11 fullscreen · D disconnect"
-                ));
-                last_title = status;
+                let (kind, detail) = status.native();
+                app.status(kind, detail);
+                last_status = Some(status);
             }
             let mut audio_drain = DrainBudget::new(if owner == 0 { 33 } else { 32 });
             for _ in 0..audio_drain.limit {
@@ -547,7 +755,9 @@ impl ReceiverApp {
                         // was waiting. Synchronize before its first PCM is queued.
                         app.video_sync(true);
                         if let Err(e) = app.audio(&pcm, pts) {
-                            self.shared.log(&e.to_string());
+                            self.shared.failure(&format!(
+                                "Audio playback failed. Reconnect mirroring. {e}"
+                            ));
                             self.shared.disconnect.fetch_add(1, Ordering::AcqRel);
                         } else {
                             got_audio = true;
@@ -588,7 +798,9 @@ impl ReceiverApp {
                         if let Err(e) =
                             app.prepare_video(codec, width, height, self.shared.video_profile.fps)
                         {
-                            self.shared.status(&e.to_string());
+                            self.shared.failure(&format!(
+                                "Video preparation failed. Reconnect mirroring. {e}"
+                            ));
                             self.shared.disconnect.fetch_add(1, Ordering::AcqRel);
                             break;
                         }
@@ -612,7 +824,9 @@ impl ReceiverApp {
                         video_drain.consumed();
                         video_timing.record(payload_received_at, ready_at, pts, native::now());
                         if let Err(e) = app.video(&data, pts, codec, width, height) {
-                            self.shared.status(&e.to_string());
+                            self.shared.failure(&format!(
+                                "Video playback failed. Reconnect mirroring. {e}"
+                            ));
                             self.shared.disconnect.fetch_add(1, Ordering::AcqRel);
                         } else {
                             got_video = true;
@@ -632,8 +846,8 @@ impl ReceiverApp {
                     Err(_) => break,
                 }
             }
-            if got_video && got_audio && !reported {
-                self.shared.status("Mirroring — picture and sound");
+            if got_video && got_audio && first_picture && !reported {
+                self.shared.status(ReceiverStatus::Streaming);
                 reported = true;
             }
             // Event notifications coalesce. A consumed whole drain budget can
@@ -644,23 +858,42 @@ impl ReceiverApp {
                 || pending_audio.is_some()
                 || pending_video.is_some()
                 || self.shared.owner.load(Ordering::Acquire) != owner;
-            // SETUP can prepare audio while queues are draining. Recheck before
-            // presentation so the first audio packets use the shared deadlines.
-            let video_synchronized = self.shared.audio_owner.synchronized(owner);
-            let next_flush = self.shared.flush.load(Ordering::Acquire);
-            if next_flush != flush {
-                app.flush_audio();
-                flush = next_flush;
+            if app.wait(pump_wait_ms(discovery_ready, backlog_possible))? == 0 {
+                break;
             }
-            app.video_sync(video_synchronized);
-            match app.pump(pump_wait_ms(discovery_ready, backlog_possible))? {
+            // Wait never dispatches. Serialize this complete applied boundary
+            // against SETUP/FLUSH/teardown publishers, including native tick.
+            let mut transition = self.shared.transitions.lock().unwrap();
+            let dispatched = transition.apply(|boundary| {
+                let dispatch_owner = self.shared.owner.load(Ordering::Acquire);
+                if dispatch_owner != active {
+                    video_timing = VideoTiming::default();
+                    app.reset()?;
+                    active = dispatch_owner;
+                    presented_base = app.presented();
+                    first_picture = false;
+                    got_video = false;
+                    got_audio = false;
+                    reported = false;
+                }
+                if boundary.serial != flush {
+                    app.flush_audio();
+                    flush = boundary.serial;
+                }
+                app.video_sync(self.shared.audio_owner.synchronized(dispatch_owner));
+                app.dispatch()
+            });
+            self.shared.transition_applied.notify_all();
+            drop(transition);
+            match dispatched? {
                 0 => break,
                 2 => {
                     self.shared.disconnect.fetch_add(1, Ordering::AcqRel);
                 }
                 _ => {}
             }
-            if owner != 0 && !first_picture && app.presented() > presented_base {
+            if active != 0 && !first_picture && app.presented() > presented_base {
+                self.shared.status(ReceiverStatus::Streaming);
                 let claim = f64::from_bits(self.shared.owner_started.load(Ordering::Acquire));
                 self.shared.log(&format!(
                     "first picture presented since_claim_ms={:.1}",
@@ -725,7 +958,9 @@ fn server_loop(listener: TcpListener, shared: Arc<Shared>) {
                 std::thread::sleep(Duration::from_millis(20))
             }
             Err(e) => {
-                shared.status(&format!("listener failed: {e}"));
+                shared.unavailable(&format!(
+                    "Receiver listener stopped. Restart AirMirrorLite. {e}"
+                ));
                 break;
             }
         }
@@ -745,6 +980,96 @@ fn connection(stream: TcpStream, shared: Arc<Shared>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_discovery_bind_is_forwarded_as_selection_filter() {
+        assert_eq!(
+            discovery_bind_request("0.0.0.0".parse().unwrap()).unwrap(),
+            None
+        );
+        for address in ["192.168.1.20", "172.16.2.30"] {
+            assert_eq!(
+                discovery_bind_request(address.parse().unwrap()).unwrap(),
+                Some(address.parse().unwrap())
+            );
+        }
+        assert!(discovery_bind_request("::1".parse().unwrap()).is_err());
+    }
+    #[test]
+    fn error_status_survives_cleanup_until_new_session_or_dismissal() {
+        let mut status = ReceiverStatus::Error("Video failed; reconnect".into());
+        assert!(!status.replace(ReceiverStatus::Ready, false));
+        assert!(!status.replace(ReceiverStatus::Connecting("Connecting"), false));
+        assert!(!status.replace(ReceiverStatus::Streaming, true));
+        assert_eq!(status.native().0, 4);
+        assert!(status.replace(ReceiverStatus::Streaming, false));
+        status = ReceiverStatus::Error("Audio failed".into());
+        status.dismiss();
+        assert_eq!(status, ReceiverStatus::Ready);
+        status = ReceiverStatus::Unavailable("Listener stopped; restart".into());
+        assert!(!status.replace(ReceiverStatus::Ready, false));
+        assert!(!status.replace(ReceiverStatus::Streaming, false));
+        status.dismiss();
+        assert_eq!(status.native().0, 5);
+    }
+    #[test]
+    fn transition_published_during_wait_is_applied_before_dispatch_and_ack() {
+        use std::sync::Barrier;
+        let gate = Arc::new(Mutex::new(MediaTransitions::default()));
+        let wait = Arc::new(Barrier::new(2));
+        let wake = Arc::new(Barrier::new(2));
+        let writer_gate = gate.clone();
+        let writer_wait = wait.clone();
+        let writer_wake = wake.clone();
+        let writer = std::thread::spawn(move || {
+            writer_wait.wait();
+            let mut state = writer_gate.lock().unwrap();
+            state.revision = 1;
+            state.flush = AudioFlush {
+                serial: 1,
+                cutoff: Some(protocol::AudioCutoff {
+                    sequence: 1,
+                    timestamp: 480,
+                }),
+                anchor_after: Some(20.0),
+            };
+            assert_eq!(state.applied, 0);
+            drop(state);
+            writer_wake.wait();
+        });
+        // Simulated wait contains no native dispatch; the real native barrier
+        // regression separately verifies am_wait preserves that boundary.
+        wait.wait();
+        wake.wait();
+        let mut state = gate.lock().unwrap();
+        let mut pending_pcm = vec![0u64];
+        state
+            .apply(|boundary| {
+                pending_pcm.retain(|serial| *serial == boundary.serial);
+                assert!(
+                    pending_pcm.is_empty(),
+                    "old PCM reached dispatch after wake"
+                );
+                assert!(
+                    gate.try_lock().is_err(),
+                    "publisher can race the applied dispatch"
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(state.applied, 1);
+        state.revision = 2;
+        assert!(
+            state
+                .apply::<()>(|_| anyhow::bail!("native apply failed"))
+                .is_err()
+        );
+        assert_eq!(
+            state.applied, 1,
+            "failed application cannot acknowledge revision2"
+        );
+        drop(state);
+        writer.join().unwrap();
+    }
     #[test]
     fn startup_keyframe_survives_stale_owner_snapshot() {
         let mut pending = None;

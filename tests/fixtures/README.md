@@ -6,7 +6,12 @@
   c41c3c7516ea8d0d78a53b96b30bed3a29745cc6. The helper encoder is not linked into
   the receiver. Run from the repository root with CARGO_HOME=work/cargo and
   CARGO_TARGET_DIR=work/fixture-target:
-  `cargo run --manifest-path tests/fixture-generator/Cargo.toml --offline -- tests/fixtures/tone-44100-stereo-eld.frames`.
+  `cargo run --manifest-path tests/fixture-generator/Cargo.toml --locked --offline -- tests/fixtures/tone-44100-stereo-eld.frames`.
+  The pinned decoder produces 120 frames / 115200 interleaved i16 samples;
+  SHA-256 of little-endian PCM is
+  `c5679c95ef23189c71327d0e78e26ffd94c596f40902ccdfb7f5feaf256f8f6f`.
+  The ASan content control checks the specified 440 Hz signal and amplitude in
+  both channels after codec priming.
 - `fairplay-known-answer.bin`: first public known-answer vector in rairplay 1.0.0,
   `src/rtsp/handlers/fairplay.rs` (which credits openairplay/airplay2-receiver).
   Layout: 164-byte message, 72-byte encrypted key, 16-byte expected result.
@@ -14,3 +19,17 @@
 
 The Windows GPU probe generates H.264 bars in memory with the OS encoder.
 None of these tests captures a phone, screen, microphone, or private media.
+
+- `triangle-44100-stereo-lc.frames`: real AAC-LC raw packets, ASC `12 10`,
+  44.1 kHz stereo, 1024 samples/frame, 120 frames. Generated with the same pinned
+  encoder using `cargo run --manifest-path tests/fixture-generator/Cargo.toml
+  --locked --offline -- tests/fixtures/triangle-44100-stereo-lc.frames lc`.
+  The integer source is a 440 Hz left / 660 Hz right triangle, amplitude 1000.
+  Packet-file SHA-256: `0c4fe6ed596c5eaa026c9d367b09530e10e8ee0658ffa4901376cb91fecd8138`.
+  The pinned FDK decoder produces 245760 interleaved i16 samples, SHA-256 over
+  little-endian PCM bytes `ec0e0ecf994a43665ab2ef72c245ca49385d5927353a531e97dbe84707b59ae9`.
+  The ASan harness also checks the independent source frequencies/channels and
+  amplitude after priming; a repeated output hash alone is not that control.
+- `fairplay-known-answers.bin`: all 20 public vectors from the same source as
+  the single-vector fixture; see `FAIRPLAY_NOTICE.txt`. Used by the separate
+  shift-UB instrumentation test, with a deliberately invalid positive control.

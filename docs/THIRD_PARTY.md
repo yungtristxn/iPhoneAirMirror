@@ -1,10 +1,17 @@
 # Imported components
 
 Local development build; no publishing or redistribution has been performed.
-The original project code is not yet assigned a distribution license. In particular,
-the GPL PlayFair component and the FDK AAC license need a compatible distribution
-arrangement before this combined executable is distributed. This checkpoint does
-not claim distribution license compatibility.
+The original project code is not yet assigned a distribution license. The
+executable statically combines GPL PlayFair with FDK AAC. The
+[GNU license list](https://www.gnu.org/licenses/license-list.html#fdk) classifies
+the FDK AAC license as incompatible with every GNU GPL version. Selecting a
+project license or copying notices does not resolve that combination. No compatible
+exception or alternative grant has been established for this build. Distribution
+requires verified compatible permissions or a separately assessed component/build
+arrangement and fulfillment of its obligations; the same executable's worker mode
+does not separate the statically linked components. Local development packaging
+is not a release authorization. FDK also supplies no patent-license grant; this
+document does not determine patent rights or provide legal clearance.
 
 | Component | Exact source | Use / license |
 |---|---|---|
@@ -26,9 +33,11 @@ Native Windows functions are implemented against the installed Windows SDK:
 DnsServiceRegister, Win32 windows, Media Foundation, D3D11 video processing,
 WASAPI, DPAPI and AppContainer process creation. No Bonjour service is installed.
 
-The imported upstream source files are unmodified. The extracted reply table and
-its notice are separate files. Build selection is in the project's build.rs. Component source hashes are
-recorded in vendor/SHA256SUMS. Never store device keys or screen/audio captures here.
+Imported upstream sources retain their pinned origins. The single documented
+local PlayFair byte-assembly correction is recorded in `vendor/PATCHES.md`;
+`vendor/SHA256SUMS` records current source hashes. The extracted reply table and
+its notice are separate files. Build selection is in the project's build.rs.
+Never store device keys or screen/audio captures here.
 
 ## Implementation choices verified locally
 

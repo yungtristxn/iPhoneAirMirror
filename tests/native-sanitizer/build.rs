@@ -77,7 +77,7 @@ fn main() {
         .arg(format!("/Fe:{}", exe.display()))
         .arg(format!("/Fo:{}", out.join("harness.obj").display()))
         .arg(format!("/Fd:{}", out.join("harness.pdb").display()))
-        .args(["/link", "/INCREMENTAL:NO"]);
+        .args(["/link", "/INCREMENTAL:NO", "bcrypt.lib"]);
     assert!(
         command.status().unwrap().success(),
         "native sanitizer link failed"
