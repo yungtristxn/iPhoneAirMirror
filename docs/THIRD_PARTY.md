@@ -1,8 +1,11 @@
 # Imported components
 
-Local development build; no publishing or redistribution has been performed.
-The original project code is not yet assigned a distribution license. The
-executable statically combines GPL PlayFair with FDK AAC. The
+Original project code and artwork are GPL-3.0-only; see LICENSE.md and NOTICE.md.
+The user authorized a local ZIP for a friend on 2026-10-22. That test archive uses
+only the FFmpeg candidate and includes matching application, FFmpeg and Rust
+dependency sources, build instructions and notices. No public upload is involved.
+
+The older/default executable statically combines GPL PlayFair with FDK AAC. The
 [GNU license list](https://www.gnu.org/licenses/license-list.html#fdk) classifies
 the FDK AAC license as incompatible with every GNU GPL version. Selecting a
 project license or copying notices does not resolve that combination. No compatible
@@ -40,12 +43,12 @@ local PlayFair byte-assembly correction is recorded in `vendor/PATCHES.md`;
 its notice are separate files. Build selection is in the project's build.rs.
 Never store device keys or screen/audio captures here.
 
-The FFmpeg feature now supports an explicitly packaged local receiver candidate;
-`decoder-lab` separately enforces decode-only execution. This is not distribution
-approval. The accepted FDK package and its distribution gate remain unchanged.
-The user selected an open-source direction; a qualified FFmpeg-based GPLv3 release
-still needs the timing/acceptance work described in `DECODER_EXPERIMENT.md` and a
-complete source/notice and remaining-rights review. No public release was made.
+The FFmpeg feature supports a receiver candidate; `decoder-lab` separately
+enforces decode-only execution. The dedicated friend-test packaging path includes
+the source and license materials rather than removing the default package guard.
+The accepted FDK package and its distribution gate remain unchanged. The test
+archive is not physical A/V acceptance, a stable release, or a determination of
+patent rights. Remaining device checks are described in DECODER_EXPERIMENT.md.
 
 ## Implementation choices verified locally
 

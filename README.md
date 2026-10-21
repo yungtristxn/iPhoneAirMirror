@@ -14,6 +14,15 @@ delay timestamps and remains separate from the accepted FDK receiver below.
 Physical A/V acceptance of this candidate is still outstanding. Do not run both
 receivers at once. Adding the `decoder-lab` build feature disables reception.
 
+For the separately authorized friend-test archive, use
+`python -B scripts/Package-Share.py --output dist/AirMirrorLite-Windows-x64-test-2026-10-22.zip`.
+This preserves the tested FFmpeg/rotation candidate, verifies its hash against a
+fresh offline build, and includes matching source/dependencies and GPLv3 notices.
+It excludes pairing identities and logs. Extract the ZIP and use
+`Start-AirMirrorLite.cmd`; it prepares that copy's restricted worker before launch.
+The included README lists the Microsoft Visual C++ x64 runtime prerequisite.
+This test package does not qualify the older FDK binary for redistribution.
+
 Build with `./scripts/Build.ps1 -Fetch -Test`, then `./scripts/Package.ps1`.
 Launch `dist/AirMirrorLite/AirMirrorLite.exe`, select **AirMirrorLite** in iPhone
 Control Center → Screen Mirroring, and play a local non-DRM video with sound.

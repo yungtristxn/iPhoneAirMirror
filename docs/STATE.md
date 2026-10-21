@@ -1,6 +1,28 @@
 # Current state
 
-Updated: 2026-10-21
+Updated: 2026-10-22
+
+## Friend-test ZIP
+- User authorized a local ZIP to share with a friend. Original project source
+  and artwork are now GPL-3.0-only (LICENSE.md / NOTICE.md); imported notices stay.
+- `scripts/Package-Share.py` packages only exact FFmpeg/rotation candidate
+  AF3B9439... after an offline freshness build matches its hash. It includes full
+  application, locked Rust and pinned FFmpeg sources plus build instructions.
+  Default/FDK package guards and both working fallback binaries remain intact.
+- The archive contains a newly generated 994:2160 aspect preset, no pairing
+  identity, logs or captures. Launcher prepares the extracted executable's worker
+  permission without elevation, downloads or firewall changes. Microsoft Visual
+  C++ v14 x64 is a prerequisite; higher resolution still depends on native HEVC.
+- Package CRC/SHA verification and offline source resolution with empty Cargo
+  home pass. Launcher checks pass preparation, repeat idempotence, punctuation in
+  extraction paths and failure handling. Exact sources reproduce AF3B9439...
+  Evidence: `local/share-launcher-test/20261021T2317189447791Z/`.
+- Fresh ZIP extraction also passes owner preparation, hidden no-discovery startup
+  on an ephemeral loopback port and clean shutdown, with zero audio submitted.
+  Evidence: `local/share-extraction-check.json`. Final archive location:
+  `dist/AirMirrorLite-Windows-x64-test-2026-10-22.zip` plus verification JSON.
+- No upload/publication, sound test or Computer Use. Other-PC compatibility and
+  latest Photos/FFmpeg physical A/V acceptance remain unverified.
 
 ## Rotation disconnect fixed; Photos landscape follow-up open
 - The manual FFmpeg phone test reached 994x2160 hardware mirroring, then rotation
@@ -120,7 +142,6 @@ Updated: 2026-10-21
 - Physical FFmpeg A/V sync, long-run drift and audible near-clipping behavior
   remain unverified. FFmpeg saturates immediately; it does not reproduce FDK's
   lookahead limiter. See DECODER_EXPERIMENT.md for the contract and limits.
-- Open source is the chosen direction, but no public release is authorized or
-  prepared. The FDK distribution gate remains; candidate source/notices and
-  remaining release-rights review are still required. No audible tests without
-  a new explicit request.
+- The user authorized the source-included friend-test ZIP above, with no public
+  upload. The FDK distribution gate remains. A stable release and physical A/V
+  acceptance remain separate work. No audible tests without a new explicit request.
