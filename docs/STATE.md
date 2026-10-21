@@ -36,7 +36,7 @@ Updated: 2026-10-21
 - That sample exposed two busy CPU cores from inherited nonblocking Winsock
   connections. The current package explicitly restores blocking reads with 100 ms
   cancellation/deadline checks. Regression passes; a real idle control connection
-  measured 0.0% of one core over ten seconds. Post-fix live CPU check awaits reconnect.
+  measured 0.0% of one core over ten seconds. Post-fix live CPU is verified below.
 - Current package also preserves signed/unsigned encodings of all 64 stream-ID
   bits, fixing intermittent negotiation rejection. Numeric lengths/ports stay strict.
 - Live close completed in 177 ms with no receiver/worker, TCP listener, UDP endpoint
@@ -54,3 +54,15 @@ Updated: 2026-10-21
 - Build commands: scripts/Build.ps1 -Test, Test-Media.ps1, Test-Control.ps1.
   Sandbox MSVC archive update failed LNK1114/error 5; offline builds outside that
   sandbox passed. The native ASan command and detailed bounds are in VALIDATION.md.
+
+## Final CPU verification
+- Current package measured during real iPhone playback, 2026-10-21
+  12:11:55–12:12:25 UTC: seven samples over 29.46 seconds. No disconnect or stderr.
+- Mean CPU as percent of one logical core: host 1.871%, codec worker 0.423%,
+  combined about 2.3%. This replaces the two busy idle-read threads observed
+  before the fix; the current clip delivered approximately 30 video frames/s.
+- Host working set 76.15–76.86 MiB and private memory 82.87→83.54 MiB;
+  codec working set 11.32–11.38 MiB and private memory 2.39→2.31 MiB.
+  Host handles 713→714; codec handles 153→153. Working-set sums include shared pages.
+- The raw trace and summary remain under ignored local/; the executable hash above
+  identifies the measured package. Short verification is complete; receiver left open.
