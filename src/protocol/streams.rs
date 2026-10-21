@@ -370,6 +370,7 @@ fn video_loop(
     let mut config = Vec::new();
     let mut codec = None;
     let mut dimensions = (0, 0);
+    let mut hevc_sequence = None;
     while !stop.load(Ordering::Acquire) {
         let mut header = [0; 128];
         let mut record_started = None;
@@ -412,7 +413,13 @@ fn video_loop(
                 let active_codec =
                     codec.ok_or_else(|| anyhow::anyhow!("video before codec configuration"))?;
                 if active_codec == 265 {
-                    super::hevc::annex_b(&mut payload)?;
+                    if let Some(info) = super::hevc::annex_b(&mut payload)? {
+                        if hevc_sequence != Some(info) {
+                            log_hevc_sequence(&shared, info);
+                        }
+                        dimensions = (info.width, info.height);
+                        hevc_sequence = Some(info);
+                    }
                 } else {
                     h264::annex_b(&mut payload)?;
                 }
@@ -460,10 +467,8 @@ fn video_loop(
                     ensure!(shared.video_profile.hevc, "HEVC not advertised");
                     let parsed = super::hevc::config(&payload)?;
                     dimensions = (parsed.width, parsed.height);
-                    shared.log(&format!(
-                        "HEVC SPS max_num_reorder_pics={}",
-                        parsed.max_num_reorder_pics
-                    ));
+                    log_hevc_sequence(&shared, parsed.sequence);
+                    hevc_sequence = Some(parsed.sequence);
                     config = parsed.annex_b;
                 } else {
                     config = h264::avcc_config(&payload)?;
@@ -494,6 +499,20 @@ fn video_loop(
     stop.store(true, Ordering::Release);
     Ok(())
 }
+fn log_hevc_sequence(shared: &Shared, info: super::hevc::SequenceInfo) {
+    // Scalar codec metadata only; never store parameter-set bytes or phone media.
+    shared.log(&format!(
+        "HEVC SPS coded={}x{} display={}x{} level_idc={} dpb_pictures={} max_num_reorder_pics={}",
+        info.coded_width,
+        info.coded_height,
+        info.width,
+        info.height,
+        info.level_idc,
+        info.max_dec_pic_buffering,
+        info.max_num_reorder_pics
+    ));
+}
+
 #[derive(Debug)]
 struct AudioPacket {
     rtp: u32,

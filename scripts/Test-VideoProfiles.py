@@ -12,6 +12,7 @@ root = pathlib.Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--exe", type=pathlib.Path, default=root / "target/release/airmirror-lite.exe")
 parser.add_argument("--latency-ms", type=int, default=80)
+parser.add_argument("--fps", type=int, choices=(30, 60), default=60)
 parser.add_argument("--display-width", type=int)
 parser.add_argument("--display-aspect", type=int, nargs=2, metavar=("WIDTH", "HEIGHT"))
 args = parser.parse_args()
@@ -41,7 +42,8 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-for height, width, fps, high in [(1080, 1920, 60, False), (1440, 2560, 60, True), (2160, 3840, 60, True)]:
+for height, width, high in [(1080, 1920, False), (1440, 2560, True), (2160, 3840, True)]:
+    fps = args.fps
     extra = []
     if args.display_width is not None:
         width = args.display_width
@@ -53,6 +55,7 @@ for height, width, fps, high in [(1080, 1920, 60, False), (1440, 2560, 60, True)
         process = subprocess.Popen([str(exe), "--hidden", "--no-discovery", "--bind", "127.0.0.1",
                                     "--port", "17003", "--seconds", "3", "--resolution", str(height),
                                     "--latency-ms", str(args.latency_ms),
+                                    "--fps", str(fps),
                                     "--data-dir", str(data)] + extra, stdin=subprocess.DEVNULL,
                                    stdout=out, stderr=err, creationflags=subprocess.CREATE_NO_WINDOW)
         try:
@@ -83,6 +86,8 @@ for height, width, fps, high in [(1080, 1920, 60, False), (1440, 2560, 60, True)
                 info = plistlib.loads(stream.read(length))
                 display = info["displays"][0]
                 require((display["width"], display["height"], display["maxFPS"]) == (width, height, fps), "Advertised display profile is incorrect")
+                require((display["widthPixels"], display["heightPixels"]) == (width, height),
+                        "Advertised pixel dimensions disagree with the display hint")
                 require(bool(info["audioLatencies"]) and all(v["outputLatencyMicros"] == args.latency_ms * 1000 for v in info["audioLatencies"]), "Advertised audio playout latency is incorrect")
                 require(bool(info["features"] & (1 << 42)) == high, "HEVC capability flag is incorrect")
             require(process.wait(timeout=10) == 0, "Receiver exit failed")
@@ -94,7 +99,8 @@ for height, width, fps, high in [(1080, 1920, 60, False), (1440, 2560, 60, True)
                 process.wait(timeout=5)
 result.write_text(json.dumps({"executable": str(exe), "sha256": executable_hash,
                              "playout_ms": args.latency_ms,
+                             "fps": args.fps,
                              "display_aspect": args.display_aspect,
                              "profiles": checked,
-                             "evidence": "Silent loopback /info and timed exit. No phone acceptance."}, indent=2))
+                             "evidence": "Silent loopback /info and timed exit. Initial display hints do not constrain rotated stream dimensions; no picture, rotation or phone acceptance is established."}, indent=2))
 aspect_fixture.unlink(missing_ok=True)

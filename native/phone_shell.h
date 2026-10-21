@@ -32,6 +32,9 @@ public:
     void set_title(const std::wstring& title);
     void set_status(int kind,const std::wstring& message);
     std::wstring status_message() const;
+    // The independent software status card exclusively owns failure/recovery
+    // text. Idle chrome underneath must not duplicate it or expose its icon.
+    bool idle_artwork_visible() const {return !has_video.load()&&status.load()<3;}
     float gain() const {return muted.load()?0.0f:volume.load();}
     float dpi_scale() const;
     static int rim_pixels(float scale){return std::max(2,int(3*scale+.5f));}

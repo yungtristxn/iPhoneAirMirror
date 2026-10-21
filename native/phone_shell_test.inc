@@ -18,6 +18,15 @@ HRESULT PhoneShell::test_on_ui_thread(const wchar_t* directory){
         if(info.hbmColor)DeleteObject(info.hbmColor);if(info.hbmMask)DeleteObject(info.hbmMask);DestroyIcon(icon);UI_REQUIRE(ok);
     }
     UI_REQUIRE((GetWindowLongPtrW(window,GWL_STYLE)&WS_CAPTION)==0);
+    for(float scale:{1.0f,1.25f,2.0f}){
+        RECT area{0,0,3840,2160},phone{300,200,300+LONG(166*scale),200+LONG(600*scale)};
+        auto card=status_card_size(phone,area,scale);const int card_left=phone.left+(phone.right-phone.left-card.width)/2;
+        auto rail=palette_placement(phone,area,scale,false,false,false);
+        UI_REQUIRE(card.compact&&card.width<phone.right-phone.left&&card.height==int(244*scale));
+        UI_REQUIRE(card_left>=phone.left&&card_left+card.width<=phone.right&&card_left+card.width<rail.x);
+        phone.right=phone.left+LONG(400*scale);card=status_card_size(phone,area,scale);
+        UI_REQUIRE(!card.compact&&card.width==int(340*scale)&&card.height==int(218*scale));
+    }
     // The rail remains inside each work area even when neither external side
     // fits (the original 1830-wide window at the left edge is included).
     for(float scale:{1.0f,1.25f,2.0f})for(bool collapsed:{false,true})for(bool popup:{false,true}){

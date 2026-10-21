@@ -17,16 +17,49 @@ fn kind(nal: &[u8]) -> Result<u8> {
     );
     Ok((nal[0] >> 1) & 63)
 }
-pub fn dimensions(nal: &[u8]) -> Result<(u32, u32)> {
+#[cfg(test)]
+fn dimensions(nal: &[u8]) -> Result<(u32, u32)> {
     let info = sequence_info(nal)?;
     Ok((info.width, info.height))
 }
-struct SequenceInfo {
-    width: u32,
-    height: u32,
-    max_num_reorder_pics: u32,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SequenceInfo {
+    pub coded_width: u32,
+    pub coded_height: u32,
+    pub width: u32,
+    pub height: u32,
+    pub level_idc: u32,
+    pub max_dec_pic_buffering: u32,
+    pub max_num_reorder_pics: u32,
 }
-fn sequence_info(nal: &[u8]) -> Result<SequenceInfo> {
+fn level_max_luma_samples(level_idc: u32) -> Result<u64> {
+    // H.265 (2013), Annex A.4.1/Table A.1, Main profile through Level 5.1.
+    // Keep native coded-dimension caps independent from this conformance bound.
+    Ok(match level_idc {
+        30 => 36_864,
+        60 => 122_880,
+        63 => 245_760,
+        90 => 552_960,
+        93 => 983_040,
+        120 | 123 => 2_228_224,
+        150 | 153 => 8_912_896,
+        _ => anyhow::bail!("HEVC level budget level_idc={level_idc}"),
+    })
+}
+fn max_dpb_size(pixels: u64, max_luma_samples: u64) -> u32 {
+    // Main-profile maxDpbPicBuf is six. Smaller pictures can legitimately need
+    // up to sixteen DPB entries; the area-dependent limit bounds aggregate data.
+    if pixels * 4 <= max_luma_samples {
+        16
+    } else if pixels * 2 <= max_luma_samples {
+        12
+    } else if pixels * 4 <= max_luma_samples * 3 {
+        8
+    } else {
+        6
+    }
+}
+pub fn sequence_info(nal: &[u8]) -> Result<SequenceInfo> {
     ensure!(nal.len() <= 16384 && kind(nal)? == 33, "HEVC SPS size/type");
     let mut rbsp = Vec::with_capacity(nal.len());
     let mut zeros = 0;
@@ -82,7 +115,8 @@ fn sequence_info(nal: &[u8]) -> Result<SequenceInfo> {
     b.n(32)?;
     b.n(32)?;
     b.n(16)?;
-    ensure!(b.n(8)? <= 153, "HEVC level budget");
+    let level_idc = b.n(8)?;
+    let max_luma_samples = level_max_luma_samples(level_idc)?;
     let mut profile = [false; 7];
     let mut level = [false; 7];
     for i in 0..layers {
@@ -110,8 +144,14 @@ fn sequence_info(nal: &[u8]) -> Result<SequenceInfo> {
     let h = b.ue()?;
     ensure!(
         (48..=MAX_WIDTH).contains(&w) && (48..=MAX_HEIGHT).contains(&h),
-        "HEVC coded dimensions"
+        "HEVC coded dimensions width={w} height={h} level_idc={level_idc} limit={MAX_WIDTH}x{MAX_HEIGHT}"
     );
+    let coded_pixels = u64::from(w) * u64::from(h);
+    ensure!(
+        coded_pixels <= max_luma_samples,
+        "HEVC level picture area width={w} height={h} level_idc={level_idc} pixels={coded_pixels} max_luma_samples={max_luma_samples}"
+    );
+    let dpb_limit = max_dpb_size(coded_pixels, max_luma_samples);
     let (mut left, mut right, mut top, mut bottom) = (0, 0, 0, 0);
     if b.n(1)? != 0 {
         left = b.ue()?;
@@ -129,12 +169,25 @@ fn sequence_info(nal: &[u8]) -> Result<SequenceInfo> {
     ensure!(b.ue()? == 0 && b.ue()? == 0, "only 8-bit HEVC SDR");
     ensure!(b.ue()? <= 12, "HEVC POC budget");
     let all = b.n(1)? != 0;
+    let mut max_dec_pic_buffering = 0;
     let mut max_num_reorder_pics = 0;
-    for _ in (if all { 0 } else { layers })..=layers {
+    for layer in (if all { 0 } else { layers })..=layers {
         let refs = b.ue()?;
-        ensure!(refs <= 7, "HEVC decoded picture budget");
+        let buffering = refs + 1;
+        ensure!(
+            buffering <= dpb_limit,
+            "HEVC decoded picture budget width={w} height={h} layer={layer} level_idc={level_idc} buffering_minus1={refs} pictures={buffering} limit={dpb_limit}"
+        );
         let reorder = b.ue()?;
-        ensure!(reorder <= refs, "HEVC reorder budget");
+        ensure!(
+            reorder <= refs,
+            "HEVC reorder budget width={w} height={h} layer={layer} level_idc={level_idc} pictures={buffering} reorder={reorder}"
+        );
+        ensure!(
+            buffering >= max_dec_pic_buffering && reorder >= max_num_reorder_pics,
+            "HEVC sublayer ordering width={w} height={h} layer={layer} level_idc={level_idc} pictures={buffering} previous_pictures={max_dec_pic_buffering} reorder={reorder} previous_reorder={max_num_reorder_pics}"
+        );
+        max_dec_pic_buffering = buffering;
         max_num_reorder_pics = max_num_reorder_pics.max(reorder);
         b.ue()?;
     }
@@ -145,8 +198,12 @@ fn sequence_info(nal: &[u8]) -> Result<SequenceInfo> {
         "HEVC coding tree budget"
     );
     Ok(SequenceInfo {
+        coded_width: w,
+        coded_height: h,
         width,
         height,
+        level_idc,
+        max_dec_pic_buffering,
         max_num_reorder_pics,
     })
 }
@@ -154,7 +211,8 @@ pub struct Config {
     pub annex_b: Vec<u8>,
     pub width: u32,
     pub height: u32,
-    pub max_num_reorder_pics: u32,
+    /// Shared SPS geometry/level with maximum validated DPB/reorder requirements.
+    pub sequence: SequenceInfo,
 }
 pub fn config(data: &[u8]) -> Result<Config> {
     ensure!(
@@ -202,8 +260,7 @@ pub fn config(data: &[u8]) -> Result<Config> {
     );
     let mut p = 23;
     let mut seen = 0;
-    let mut size = None;
-    let mut max_num_reorder_pics = 0;
+    let mut sequence: Option<SequenceInfo> = None;
     let mut out = Vec::new();
     for _ in 0..r[22] {
         ensure!(r.len() - p >= 3, "truncated HEVC parameter array");
@@ -224,13 +281,33 @@ pub fn config(data: &[u8]) -> Result<Config> {
             ensure!(kind(nal)? == t, "HEVC parameter NAL mismatch");
             if t == 33 {
                 let info = sequence_info(nal)?;
-                let next = (info.width, info.height);
-                ensure!(
-                    size.is_none_or(|old| old == next),
-                    "HEVC parameter dimensions disagree"
-                );
-                size = Some(next);
-                max_num_reorder_pics = max_num_reorder_pics.max(info.max_num_reorder_pics);
+                if let Some(previous) = &mut sequence {
+                    ensure!(
+                        previous.coded_width == info.coded_width
+                            && previous.coded_height == info.coded_height
+                            && previous.width == info.width
+                            && previous.height == info.height
+                            && previous.level_idc == info.level_idc,
+                        "HEVC parameter geometry/level disagree coded={}x{} display={}x{} level_idc={} previous_coded={}x{} previous_display={}x{} previous_level_idc={}",
+                        info.coded_width,
+                        info.coded_height,
+                        info.width,
+                        info.height,
+                        info.level_idc,
+                        previous.coded_width,
+                        previous.coded_height,
+                        previous.width,
+                        previous.height,
+                        previous.level_idc
+                    );
+                    previous.max_dec_pic_buffering = previous
+                        .max_dec_pic_buffering
+                        .max(info.max_dec_pic_buffering);
+                    previous.max_num_reorder_pics =
+                        previous.max_num_reorder_pics.max(info.max_num_reorder_pics);
+                } else {
+                    sequence = Some(info);
+                }
             }
             out.extend_from_slice(&[0, 0, 0, 1]);
             out.extend_from_slice(nal);
@@ -239,21 +316,22 @@ pub fn config(data: &[u8]) -> Result<Config> {
         seen |= 1 << (t - 32);
     }
     ensure!(seen == 7 && p == r.len(), "incomplete HEVC configuration");
-    let (width, height) = size.ok_or_else(|| anyhow::anyhow!("missing HEVC SPS dimensions"))?;
+    let sequence = sequence.ok_or_else(|| anyhow::anyhow!("missing HEVC SPS dimensions"))?;
     Ok(Config {
         annex_b: out,
-        width,
-        height,
-        max_num_reorder_pics,
+        width: sequence.width,
+        height: sequence.height,
+        sequence,
     })
 }
-pub fn annex_b(data: &mut [u8]) -> Result<()> {
+pub fn annex_b(data: &mut [u8]) -> Result<Option<SequenceInfo>> {
     ensure!(
         !data.is_empty() && data.len() <= MAX_FRAME,
         "HEVC frame budget"
     );
     let mut p = 0;
     let mut count = 0;
+    let mut sequence = None;
     while p < data.len() {
         ensure!(data.len() - p >= 4, "truncated HEVC NAL length");
         let n = u32::from_be_bytes(data[p..p + 4].try_into()?) as usize;
@@ -262,14 +340,14 @@ pub fn annex_b(data: &mut [u8]) -> Result<()> {
         let t = kind(nal)?;
         ensure!(t <= 40, "unsupported HEVC NAL type");
         if t == 33 {
-            dimensions(nal)?;
+            sequence = Some(sequence_info(nal)?);
         }
         data[p..p + 4].copy_from_slice(&[0, 0, 0, 1]);
         p += 4 + n;
         count += 1;
         ensure!(count <= 4096, "HEVC NAL count");
     }
-    Ok(())
+    Ok(sequence)
 }
 
 #[cfg(test)]
@@ -311,16 +389,35 @@ mod tests {
         sps_with_reorder(w, h, refs, depth, 0)
     }
     fn sps_with_reorder(w: u32, h: u32, refs: u32, depth: u32, reorder: u32) -> Vec<u8> {
+        sps_layers(w, h, depth, 150, &[(refs, reorder)], false)
+    }
+    fn sps_layers(
+        w: u32,
+        h: u32,
+        depth: u32,
+        level_idc: u32,
+        order: &[(u32, u32)],
+        all: bool,
+    ) -> Vec<u8> {
+        let layers = order.len() - 1;
         let mut b = Bits(vec![]);
         b.n(0, 4);
-        b.n(0, 3);
+        b.n(layers as u64, 3);
         b.n(1, 1);
         b.n(0, 2);
         b.n(0, 1);
         b.n(1, 5);
         b.n(1 << 30, 32);
         b.n(0, 48);
-        b.n(150, 8);
+        b.n(level_idc.into(), 8);
+        for _ in 0..layers {
+            b.n(0, 2);
+        }
+        if layers > 0 {
+            for _ in layers..8 {
+                b.n(0, 2);
+            }
+        }
         b.ue(0);
         b.ue(1);
         b.ue(w);
@@ -329,15 +426,20 @@ mod tests {
         b.ue(depth);
         b.ue(depth);
         b.ue(4);
-        b.n(0, 1);
-        b.ue(refs - 1);
-        b.ue(reorder);
-        b.ue(0);
+        b.n(u64::from(all), 1);
+        for &(refs, reorder) in &order[if all { 0 } else { layers }..] {
+            b.ue(refs - 1);
+            b.ue(reorder);
+            b.ue(0);
+        }
         b.ue(0);
         b.ue(3);
         b.finish()
     }
     fn entry(sps: &[u8]) -> Vec<u8> {
+        entry_multiple(&[sps])
+    }
+    fn entry_multiple(sps: &[&[u8]]) -> Vec<u8> {
         let mut r = vec![0; 23];
         r[0] = 1;
         r[1] = 1;
@@ -347,14 +449,17 @@ mod tests {
         r[18] = 0xf8;
         r[21] = 3;
         r[22] = 3;
-        for (kind, nal) in [
-            (32, &[0x40, 1, 0x0c][..]),
-            (33, sps),
-            (34, &[0x44, 1, 0][..]),
+        for (kind, nals) in [
+            (32, vec![&[0x40, 1, 0x0c][..]]),
+            (33, sps.to_vec()),
+            (34, vec![&[0x44, 1, 0][..]]),
         ] {
-            r.extend_from_slice(&[0x80 | kind, 0, 1]);
-            r.extend_from_slice(&(nal.len() as u16).to_be_bytes());
-            r.extend_from_slice(nal);
+            r.push(0x80 | kind);
+            r.extend_from_slice(&(nals.len() as u16).to_be_bytes());
+            for nal in nals {
+                r.extend_from_slice(&(nal.len() as u16).to_be_bytes());
+                r.extend_from_slice(nal);
+            }
         }
         let mut data = vec![0; 86];
         data[4..8].copy_from_slice(b"hvc1");
@@ -367,14 +472,14 @@ mod tests {
     }
     #[test]
     fn bounded_4k_and_portrait_sps() {
-        assert_eq!(dimensions(&sps(3840, 2160, 8, 0)).unwrap(), (3840, 2160));
+        assert_eq!(dimensions(&sps(3840, 2160, 6, 0)).unwrap(), (3840, 2160));
         assert_eq!(dimensions(&sps(996, 2160, 4, 0)).unwrap(), (996, 2160));
         assert_eq!(dimensions(&sps(2560, 1440, 4, 0)).unwrap(), (2560, 1440));
         for (w, h, refs, depth) in [
             (3841, 2160, 4, 0),
             (3840, 2161, 4, 0),
             (1, 2160, 4, 0),
-            (3840, 2160, 9, 0),
+            (3840, 2160, 7, 0),
             (3840, 2160, 4, 2),
         ] {
             assert!(dimensions(&sps(w, h, refs, depth)).is_err());
@@ -385,9 +490,136 @@ mod tests {
         for reorder in [0, 1, 3] {
             let parsed = config(&entry(&sps_with_reorder(996, 2160, 4, 0, reorder))).unwrap();
             assert_eq!((parsed.width, parsed.height), (996, 2160));
-            assert_eq!(parsed.max_num_reorder_pics, reorder);
+            assert_eq!(parsed.sequence.max_num_reorder_pics, reorder);
         }
         assert!(config(&entry(&sps_with_reorder(996, 2160, 4, 0, 4))).is_err());
+    }
+    #[test]
+    fn main_profile_level_area_thresholds_bound_aggregate_dpb_pixels() {
+        for (level, maximum) in [
+            (30, 36864),
+            (60, 122880),
+            (63, 245760),
+            (90, 552960),
+            (93, 983040),
+            (120, 2228224),
+            (123, 2228224),
+            (150, 8912896),
+            (153, 8912896),
+        ] {
+            assert_eq!(level_max_luma_samples(level).unwrap(), maximum);
+            for (pixels, expected) in [
+                (maximum / 4, 16),
+                (maximum / 4 + 1, 12),
+                (maximum / 2, 12),
+                (maximum / 2 + 1, 8),
+                (maximum * 3 / 4, 8),
+                (maximum * 3 / 4 + 1, 6),
+                (maximum, 6),
+            ] {
+                assert_eq!(max_dpb_size(pixels, maximum), expected);
+                assert!(pixels * u64::from(expected) <= maximum * 6);
+            }
+        }
+        // Logical Main/NV12 DPB bound; driver pitch, output queues and auxiliary
+        // allocations are separate and are not measured by this arithmetic.
+        assert_eq!(6 * level_max_luma_samples(153).unwrap() * 3 / 2, 80_216_064);
+    }
+    #[test]
+    fn small_portrait_and_landscape_accept_sixteen_pictures_but_not_seventeen() {
+        for (width, height) in [(996, 2160), (2160, 996)] {
+            let nal = sps(width, height, 16, 0);
+            let info = sequence_info(&nal).unwrap();
+            assert_eq!((info.coded_width, info.coded_height), (width, height));
+            assert_eq!(info.max_dec_pic_buffering, 16);
+            assert_eq!(info.level_idc, 150);
+            assert_eq!(config(&entry(&nal)).unwrap().sequence, info);
+            let mut packet = (nal.len() as u32).to_be_bytes().to_vec();
+            packet.extend_from_slice(&nal);
+            assert_eq!(annex_b(&mut packet).unwrap(), Some(info));
+            let rejected = sequence_info(&sps(width, height, 17, 0))
+                .unwrap_err()
+                .to_string();
+            for detail in [
+                format!("width={width}"),
+                format!("height={height}"),
+                "layer=0".into(),
+                "level_idc=150".into(),
+                "buffering_minus1=16".into(),
+                "pictures=17".into(),
+                "limit=16".into(),
+            ] {
+                assert!(rejected.contains(&detail), "missing {detail}: {rejected}");
+            }
+        }
+    }
+    #[test]
+    fn level_constraints_and_native_geometry_remain_independent() {
+        assert!(sequence_info(&sps_layers(996, 2160, 0, 123, &[(6, 0)], false)).is_ok());
+        assert!(sequence_info(&sps_layers(996, 2160, 0, 123, &[(7, 0)], false)).is_err());
+        assert!(sequence_info(&sps_layers(2560, 1440, 0, 123, &[(4, 0)], false)).is_err());
+        assert!(sequence_info(&sps(3840, 2160, 16, 0)).is_err());
+        for level in [0, 29, 31, 64, 119, 154, 180, 255] {
+            assert!(sequence_info(&sps_layers(192, 192, 0, level, &[(4, 0)], false)).is_err());
+        }
+        assert!(sequence_info(&sps_layers(192, 192, 0, 30, &[(6, 0)], false)).is_ok());
+        assert!(sequence_info(&sps_layers(193, 192, 0, 30, &[(4, 0)], false)).is_err());
+        let too_wide = sequence_info(&sps(4694, 2160, 4, 0))
+            .unwrap_err()
+            .to_string();
+        assert!(too_wide.contains("width=4694") && too_wide.contains("height=2160"));
+    }
+    #[test]
+    fn explicit_sublayer_ordering_must_not_decrease() {
+        let info = sequence_info(&sps_layers(
+            996,
+            2160,
+            0,
+            150,
+            &[(4, 0), (8, 1), (16, 2)],
+            true,
+        ))
+        .unwrap();
+        assert_eq!(
+            (info.max_dec_pic_buffering, info.max_num_reorder_pics),
+            (16, 2)
+        );
+        for order in [&[(8, 0), (4, 0)][..], &[(8, 2), (8, 1)][..]] {
+            assert!(sequence_info(&sps_layers(996, 2160, 0, 150, order, true)).is_err());
+        }
+        let inferred = sequence_info(&sps_layers(
+            996,
+            2160,
+            0,
+            150,
+            &[(0, 0), (0, 0), (16, 2)],
+            false,
+        ))
+        .unwrap();
+        assert_eq!(
+            (
+                inferred.max_dec_pic_buffering,
+                inferred.max_num_reorder_pics
+            ),
+            (16, 2)
+        );
+    }
+    #[test]
+    fn configuration_combines_dpb_requirements_only_for_matching_geometry_and_level() {
+        let low = sps_with_reorder(996, 2160, 4, 0, 0);
+        let high = sps_with_reorder(996, 2160, 16, 0, 3);
+        let config = config(&entry_multiple(&[&low, &high])).unwrap();
+        assert_eq!(config.sequence.max_dec_pic_buffering, 16);
+        assert_eq!(config.sequence.max_num_reorder_pics, 3);
+        let landscape = sps(2160, 996, 4, 0);
+        assert!(super::config(&entry_multiple(&[&low, &landscape])).is_err());
+        let other_level = sps_layers(996, 2160, 0, 153, &[(4, 0)], false);
+        assert!(super::config(&entry_multiple(&[&low, &other_level])).is_err());
+    }
+    #[test]
+    fn access_unit_without_sps_has_no_fabricated_sequence_metadata() {
+        let mut packet = [0, 0, 0, 2, 0x26, 1];
+        assert_eq!(annex_b(&mut packet).unwrap(), None);
     }
     #[test]
     fn bounded_boxes_arrays_and_truncations() {

@@ -1,5 +1,62 @@
 // Diagnostic only: OS H.264 encoder makes synthetic bars in memory.
 // No capture, recording or network traffic. Exercise the actual decoder/render path.
+using ProbeValidator=int(*)(const uint8_t*,unsigned,unsigned);
+struct VideoProbeContext {ProbeValidator validate;unsigned validated=0,dpb16_sps=0;};
+// Test-only RBSP edits raise declared capacity, not actual reference usage. The
+// encoded picture data is untouched and is checked by Rust before MF sees it.
+struct ProbeBitEdit {size_t first,last;std::vector<bool> replacement;};
+struct ProbeBits {
+    std::vector<bool> bits;size_t pos=0;bool valid=true;std::vector<ProbeBitEdit> edits;
+    uint32_t read(unsigned count){if(count>32||pos+count>bits.size()){valid=false;return 0;}uint32_t value=0;while(count--)value=(value<<1)|unsigned(bits[pos++]);return value;}
+    void skip(unsigned count){if(pos+count>bits.size())valid=false;else pos+=count;}
+    uint32_t ue(){unsigned zeros=0;while(valid&&read(1)==0){if(++zeros>24){valid=false;return 0;}}return valid?((1u<<zeros)-1+read(zeros)):0;}
+    void replace(size_t first,size_t last,uint32_t value,unsigned count){std::vector<bool> replacement;for(unsigned i=count;i>0;--i)replacement.push_back(((value>>(i-1))&1)!=0);edits.push_back({first,last,std::move(replacement)});}
+    void level(){size_t first=pos;read(8);replace(first,pos,153,8);}
+    void ptl(unsigned sublayers){
+        skip(88);level();std::array<bool,7> profile{},level_present{};
+        for(unsigned i=0;i<sublayers;++i){profile[i]=read(1)!=0;level_present[i]=read(1)!=0;}
+        if(sublayers)for(unsigned i=sublayers;i<8;++i)if(read(2))valid=false;
+        for(unsigned i=0;i<sublayers;++i){if(profile[i])skip(88);if(level_present[i])level();}
+    }
+    void dpb16(){size_t first=pos;uint32_t original=ue();if(original>15)valid=false;replace(first,pos,16,9);/* ue(15) = 000010000 */}
+};
+static bool probe_dpb16_parameter(const uint8_t* nal,size_t length,std::vector<uint8_t>& result){
+    if(length<3||length>16384)return false;const unsigned type=(nal[0]>>1)&63;if(type!=32&&type!=33)return false;
+    ProbeBits b;unsigned zeros=0;
+    for(size_t i=2;i<length;++i){uint8_t value=nal[i];if(zeros>=2&&value==3){if(i+1>=length||nal[i+1]>3)return false;zeros=0;continue;}
+        for(int bit=7;bit>=0;--bit)b.bits.push_back(((value>>bit)&1)!=0);zeros=value==0?zeros+1:0;}
+    while(!b.bits.empty()&&!b.bits.back())b.bits.pop_back();if(b.bits.empty())return false;
+    unsigned layers=0;
+    if(type==32){b.skip(6);if(b.read(6)!=0)return false;layers=b.read(3);b.skip(1);if(b.read(16)!=65535)return false;}
+    else {b.skip(4);layers=b.read(3);b.skip(1);}
+    if(layers>6)return false;b.ptl(layers);
+    if(type==33){b.ue();if(b.ue()!=1)return false;b.ue();b.ue();if(b.read(1))for(int i=0;i<4;++i)b.ue();if(b.ue()!=0||b.ue()!=0)return false;b.ue();}
+    const bool all=b.read(1)!=0;for(unsigned i=all?0:layers;i<=layers;++i){b.dpb16();if(b.ue()>15)b.valid=false;b.ue();}
+    if(!b.valid||b.pos>=b.bits.size())return false;
+    for(auto edit=b.edits.rbegin();edit!=b.edits.rend();++edit){b.bits.erase(b.bits.begin()+edit->first,b.bits.begin()+edit->last);b.bits.insert(b.bits.begin()+edit->first,edit->replacement.begin(),edit->replacement.end());}
+    result={nal[0],nal[1]};zeros=0;
+    for(size_t i=0;i<b.bits.size();i+=8){uint8_t value=0;for(unsigned bit=0;bit<8;++bit){value=uint8_t(value<<1);if(i+bit<b.bits.size()&&b.bits[i+bit])value|=1;}
+        if(zeros>=2&&value<=3){result.push_back(3);zeros=0;}result.push_back(value);zeros=value==0?zeros+1:0;}
+    if(type==33){
+        // Independent byte-level readback of general_level_idc after escaping.
+        std::vector<uint8_t> check;unsigned z=0;
+        for(size_t i=2;i<result.size();++i){uint8_t v=result[i];if(z>=2&&v==3){z=0;continue;}check.push_back(v);z=v==0?z+1:0;}
+        if(check.size()<13||check[12]!=eAVEncH265VLevel5_1)return false;
+    }
+    return result.size()<=16384;
+}
+static bool probe_dpb16_packet(std::vector<uint8_t>& packet,unsigned& sps_count){
+    auto start=[&](size_t from,size_t& prefix){for(size_t i=from;i+2<packet.size();++i)if(packet[i]==0&&packet[i+1]==0){if(packet[i+2]==1){prefix=3;return i;}if(i+3<packet.size()&&packet[i+2]==0&&packet[i+3]==1){prefix=4;return i;}}prefix=0;return packet.size();};
+    size_t prefix=0,pos=start(0,prefix);if(pos!=0||!prefix)return false;std::vector<uint8_t> rewritten;unsigned count=0;
+    while(pos<packet.size()){
+        const size_t first=pos+prefix;size_t next_prefix=0,next=start(first,next_prefix);if(next-first<2||++count>4096)return false;
+        const unsigned type=(packet[first]>>1)&63;rewritten.insert(rewritten.end(),{0,0,0,1});
+        if(type==32||type==33){std::vector<uint8_t> parameter;if(!probe_dpb16_parameter(packet.data()+first,next-first,parameter))return false;rewritten.insert(rewritten.end(),parameter.begin(),parameter.end());if(type==33)++sps_count;}
+        else rewritten.insert(rewritten.end(),packet.begin()+first,packet.begin()+next);
+        if(rewritten.size()>4u*1024*1024)return false;pos=next;prefix=next_prefix;
+    }
+    packet=std::move(rewritten);return true;
+}
 static HRESULT probe_media_wait(App* app) {
     Handle wake,audio,slot;wake.h=CreateEventW(nullptr,FALSE,FALSE,nullptr);audio.h=CreateEventW(nullptr,FALSE,FALSE,nullptr);slot.h=CreateEventW(nullptr,FALSE,TRUE,nullptr);
     if(!wake.h||!audio.h||!slot.h)return HRESULT_FROM_WIN32(GetLastError());
@@ -24,15 +81,19 @@ static HRESULT probe_media_wait(App* app) {
     SetEvent(wake.h);CHECK(app->wait_for_media(1000));if(WaitForSingleObject(wake.h,0)!=WAIT_TIMEOUT)return E_FAIL;
     return S_OK;
 }
-static HRESULT probe_video(App* app, UINT width, UINT height,UINT codec=264) {
+static HRESULT probe_video(App* app,VideoProbeContext& probe, UINT width, UINT height,UINT codec=264,bool continue_stream=false,bool dpb16=false) {
     // These independent encoder fixtures represent separate phones/sessions.
-    app->shell.reset_video();
-    CHECK(app->init_decoder(codec,width,height));
+    if(!continue_stream){app->shell.reset_video();CHECK(app->init_decoder(codec,width,height));}
+    else if(!app->decoder_ready||app->codec!=codec)return E_UNEXPECTED;
     if(app->low_latency_attribute!=1||(SUCCEEDED(app->low_latency_get)&&app->low_latency_value!=1)){error_hr("decoder low-latency readback",E_FAIL);return E_FAIL;}
     ComPtr<IMFTransform> enc;if(codec==265){CHECK(create_hevc_transform(true,&enc));}else{CHECK(CoCreateInstance(CLSID_CMSH264EncoderMFT,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&enc)));}
     ComPtr<IMFMediaType> output; CHECK(MFCreateMediaType(&output));
     CHECK(output->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video)); CHECK(output->SetGUID(MF_MT_SUBTYPE, codec==265?MFVideoFormat_HEVC:MFVideoFormat_H264));
-    CHECK(output->SetUINT32(MF_MT_AVG_BITRATE, codec==265?16000000:4000000));if(codec==265){CHECK(output->SetUINT32(MF_MT_MPEG2_PROFILE,1));} CHECK(output->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive));
+    CHECK(output->SetUINT32(MF_MT_AVG_BITRATE, codec==265?16000000:4000000));
+    // This OS encoder otherwise emits level_idc=15 on the test host. Specify a
+    // conforming level so the generated fixtures satisfy the real parser too.
+    if(codec==265){CHECK(output->SetUINT32(MF_MT_MPEG2_PROFILE,1));CHECK(output->SetUINT32(MF_MT_MPEG2_LEVEL,eAVEncH265VLevel5_1));}
+    CHECK(output->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive));
     CHECK(MFSetAttributeSize(output.Get(), MF_MT_FRAME_SIZE, width, height)); CHECK(MFSetAttributeRatio(output.Get(), MF_MT_FRAME_RATE, 30, 1));
     CHECK(MFSetAttributeRatio(output.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1)); CHECK(enc->SetOutputType(0, output.Get(), 0));
     ComPtr<IMFMediaType> input; CHECK(MFCreateMediaType(&input)); CHECK(output->CopyAllItems(input.Get()));
@@ -45,7 +106,10 @@ static HRESULT probe_video(App* app, UINT width, UINT height,UINT codec=264) {
             MFT_OUTPUT_DATA_BUFFER b{};b.pSample=sample.Get();DWORD status=0;HRESULT hr=enc->ProcessOutput(0,1,&b,&status);
             if(b.pEvents)b.pEvents->Release();if(hr==MF_E_TRANSFORM_NEED_MORE_INPUT)return S_OK;CHECK(hr);
             ComPtr<IMFMediaBuffer> compressed;CHECK(sample->ConvertToContiguousBuffer(&compressed));BYTE* bytes;DWORD len;CHECK(compressed->Lock(&bytes,nullptr,&len));
-            LONGLONG pts;hr=sample->GetSampleTime(&pts);if(SUCCEEDED(hr))hr=app->submit(bytes,len,pts/1e7);compressed->Unlock();CHECK(hr);
+            std::vector<uint8_t> packet(bytes,bytes+len);LONGLONG pts;hr=sample->GetSampleTime(&pts);
+            if(SUCCEEDED(hr)&&dpb16&&!probe_dpb16_packet(packet,probe.dpb16_sps)){error_hr("synthetic DPB16 parameter rewrite",E_FAIL);hr=E_FAIL;}
+            if(SUCCEEDED(hr)){if(!probe.validate||probe.validate(packet.data(),unsigned(packet.size()),codec)!=1){error_hr("production parser rejected synthetic access unit",E_FAIL);hr=E_FAIL;}else ++probe.validated;}
+            if(SUCCEEDED(hr))hr=app->submit(packet.data(),unsigned(packet.size()),pts/1e7);compressed->Unlock();CHECK(hr);
         }return S_OK;
     };
     double start=now_seconds();
@@ -86,19 +150,19 @@ static HRESULT probe_video(App* app, UINT width, UINT height,UINT codec=264) {
     if(!SetWindowPos(app->window,nullptr,original.left,original.top,original.right-original.left,original.bottom-original.top,SWP_NOZORDER|SWP_NOACTIVATE))return HRESULT_FROM_WIN32(GetLastError());
     CHECK(redraw_paused());
     // A queued future picture cannot be shown early, and wait0 still services already-due work.
-    app->shell.redraw=false;const auto before=app->presented;const double due=now_seconds()+.06;
+    app->shell.redraw=false;const auto before=app->presentation_late.count;const double due=now_seconds()+.06;
     app->video.push_back({app->last_frame.sample,due,app->last_frame.width,app->last_frame.height});
     if(am_pump(app,0)<0)return E_FAIL;
-    if(app->presented>before&&now_seconds()<due){char detail[180];sprintf_s(detail,"future picture early presentation queued=%zu shown_delta=%llu due_in_ms=%.3f",app->video.size(),static_cast<unsigned long long>(app->presented-before),(due-now_seconds())*1000);error_hr(detail,E_FAIL);return E_FAIL;}
+    if(app->presentation_late.count>before&&now_seconds()<due){error_hr("future picture early presentation",E_FAIL);return E_FAIL;}
     ULONGLONG deadline=GetTickCount64()+1000;
-    while(app->presented==before&&GetTickCount64()<deadline)if(am_pump(app,100)<0)return E_FAIL;
-    if(app->presented!=before+1||!app->video.empty()){error_hr("future picture did not drain exactly once",E_FAIL);return HRESULT_FROM_WIN32(ERROR_TIMEOUT);}
-    const auto late=app->late_frames,shown=app->presented;const double now=now_seconds();
+    while(!app->video.empty()&&GetTickCount64()<deadline)if(am_pump(app,100)<0)return E_FAIL;
+    if(app->presentation_late.count!=before+1||!app->video.empty()){error_hr("future picture did not drain exactly once",E_FAIL);return HRESULT_FROM_WIN32(ERROR_TIMEOUT);}
+    const auto late=app->late_frames,shown=app->presentation_late.count;const double now=now_seconds();
     for(int i=0;i<3;++i)app->video.push_back({app->last_frame.sample,now-.03+i*.01,app->last_frame.width,app->last_frame.height});
     if(am_pump(app,0)<0)return E_FAIL;
     deadline=GetTickCount64()+1000;
-    while(app->presented==shown&&GetTickCount64()<deadline)if(am_pump(app,100)<0)return E_FAIL;
-    if(app->presented!=shown+1||!app->video.empty()||app->late_frames!=late+2){error_hr("latest-due backlog did not coalesce",E_FAIL);return E_FAIL;}
+    while(!app->video.empty()&&GetTickCount64()<deadline)if(am_pump(app,100)<0)return E_FAIL;
+    if(app->presentation_late.count!=shown+1||!app->video.empty()||app->late_frames!=late+2){error_hr("latest-due backlog did not coalesce",E_FAIL);return E_FAIL;}
     return S_OK;
 }
 static HRESULT probe_letterbox_pixels(App* app,bool offset=false,VideoColor color={}) {
@@ -278,18 +342,28 @@ static HRESULT probe_minimized_output(App* app){
     ULONGLONG deadline=GetTickCount64()+1000;while(!app->video.empty()&&GetTickCount64()<deadline)if(am_pump(app,20)<0)return E_FAIL;
     if(app->presented<=presented||!app->video.empty()||app->presentation_late.count!=lateness+1){char detail[180];sprintf_s(detail,"minimized restore queued=%zu presented_delta=%llu iconic=%d",app->video.size(),static_cast<unsigned long long>(app->presented-presented),int(IsIconic(app->window)));error_hr(detail,E_FAIL);return E_FAIL;}return S_OK;
 }
-extern "C" int am_video_probe(void* p) {
-    auto app=static_cast<App*>(p);uint64_t before=app->decoder_surfaces;
-    const char* stage="H264 landscape";HRESULT hr=probe_video(app,1920,1080);
-    if(SUCCEEDED(hr)){stage="H264 portrait";hr=probe_video(app,1080,1920);}
+extern "C" int am_video_probe(void* p,ProbeValidator validate) {
+    if(!p||!validate)return 0;
+    auto app=static_cast<App*>(p);uint64_t before=app->decoder_surfaces;VideoProbeContext probe{validate};
+    const char* stage="H264 landscape";HRESULT hr=probe_video(app,probe,1920,1080);
+    if(SUCCEEDED(hr)){stage="H264 portrait";hr=probe_video(app,probe,1080,1920);}
     if(SUCCEEDED(hr)&&app->hevc_available){
         // A partial codec-initialization failure must be recoverable, not a null dereference.
         app->decoder.Reset();app->decoder_ready=false;const uint8_t dummy=0;
         if(app->submit(&dummy,1,now_seconds())!=MF_E_TRANSFORM_TYPE_NOT_SET)return 0;
-        stage="HEVC landscape";uint64_t hevc_before=app->decoder_surfaces;hr=probe_video(app,3840,2160,265);
+        stage="HEVC landscape";uint64_t hevc_before=app->decoder_surfaces;hr=probe_video(app,probe,3840,2160,265);
         if(SUCCEEDED(hr)&&(app->decoder_surfaces-hevc_before<8||app->width!=3840||app->height!=2160))hr=E_FAIL;
-        if(SUCCEEDED(hr)){stage="HEVC portrait";hr=probe_video(app,992,2160,265);}
+        if(SUCCEEDED(hr)){stage="HEVC portrait";hr=probe_video(app,probe,992,2160,265);}
         if(SUCCEEDED(hr)&&(app->width!=992||app->height!=2160))hr=E_FAIL;
+        // Retain one decoder and one learned phone aspect while real encoded
+        // sequence headers change orientation/resolution. DPB16 is signaled
+        // capacity; the OS encoder is not claimed to reference sixteen pictures.
+        if(SUCCEEDED(hr))stage="HEVC DPB16 production-parser rotation matrix";
+        for(auto shape:{std::pair<UINT,UINT>{496,1080},{1080,496},{2160,992},{992,2160}}){
+            if(FAILED(hr))break;const auto surfaces=app->decoder_surfaces;const auto headers=probe.dpb16_sps;
+            hr=probe_video(app,probe,shape.first,shape.second,265,true,true);
+            if(SUCCEEDED(hr)&&(probe.dpb16_sps<=headers||app->decoder_surfaces<=surfaces||app->width!=shape.first||app->height!=shape.second))hr=E_FAIL;
+        }
     }
     if(SUCCEEDED(hr)){stage="shape scheduling/aperture/color pixels";hr=probe_shape_schedule(app);}
     if(SUCCEEDED(hr)){stage="interactive/synchronized transition";hr=probe_interactive_video(app);}
@@ -297,6 +371,8 @@ extern "C" int am_video_probe(void* p) {
     if(SUCCEEDED(hr)){stage="minimized output/restore";hr=probe_minimized_output(app);}
     if(FAILED(hr)){error_hr(stage,hr);return 0;}
     if(app->decoder_surfaces-before<60){error_hr("insufficient hardware decoder surfaces",E_FAIL);return 0;}
+    if(probe.validated<60){error_hr("insufficient production-validated synthetic access units",E_FAIL);return 0;}
+    fprintf(stderr,"synthetic parser/GPU coverage: access_units=%u dpb16_sps=%u surfaces=%llu\n",probe.validated,probe.dpb16_sps,static_cast<unsigned long long>(app->decoder_surfaces-before));
     if(!app->input_prepare.count||!std::isfinite(app->input_prepare.average())||app->input_prepare.minimum<0||app->input_prepare.maximum<app->input_prepare.minimum)return 0;
     return 1;
 }
@@ -352,6 +428,28 @@ static HRESULT probe_wait_transition(App* app){
     if(am_dispatch(app)!=1||app->presented!=presented||!app->sound.empty()||app->audio_frames)return E_FAIL;
     return S_OK;
 }
+static HRESULT probe_idle_status_pixels(App* app){
+    if(app->shell.has_video)return E_UNEXPECTED;
+    RECT client{};if(!GetClientRect(app->window,&client))return E_FAIL;
+    D3D11_TEXTURE2D_DESC desc{};desc.Width=UINT(client.right);desc.Height=UINT(client.bottom);desc.MipLevels=1;desc.ArraySize=1;
+    desc.Format=DXGI_FORMAT_B8G8R8A8_UNORM;desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> readback;CHECK(app->device->CreateTexture2D(&desc,nullptr,&readback));
+    // Read only the generated idle base, never video or desktop pixels. The GDI
+    // card is independently checked by the UI test; no hidden label may survive
+    // in this base, including outside that card's rectangle.
+    for(int status:{3,4,5}){
+        app->shell.set_status(status,std::wstring(240,L'W'));
+        CHECK(app->chrome.layout(app->shell,nullptr,readback.Get()));
+        D3D11_MAPPED_SUBRESOURCE mapped{};CHECK(app->context->Map(readback.Get(),0,D3D11_MAP_READ,0,&mapped));
+        bool plain=true;
+        for(UINT y=desc.Height/8;y<desc.Height*7/8&&plain;++y)for(UINT x=desc.Width/4;x<desc.Width*3/4;++x){
+            const auto pixel=static_cast<const uint8_t*>(mapped.pData)+size_t(y)*mapped.RowPitch+size_t(x)*4;
+            if(pixel[0]!=24||pixel[1]!=19||pixel[2]!=17||pixel[3]!=255){plain=false;break;}
+        }
+        app->context->Unmap(readback.Get(),0);if(!plain){error_hr("status idle base contains duplicate artwork",E_FAIL);return E_FAIL;}
+    }
+    app->shell.set_status(6,L"");return S_OK;
+}
 extern "C" int am_ui_probe(void* p,const char* directory) {
     // Readiness polling must not consume an asynchronous completion signal.
     {Discovery d;if(!d.done.h)return 0;Discovery::callback(ERROR_SUCCESS,&d,nullptr);
@@ -403,6 +501,7 @@ extern "C" int am_ui_probe(void* p,const char* directory) {
     app->shell.set_status(1,L"Waiting for picture and sound");
     if(app->shell.status!=1){error_hr("negotiated session waiting state",E_FAIL);return 0;}
     app->shell.set_status(0,L"");
+    hr=probe_idle_status_pixels(app);if(FAILED(hr)){error_hr("idle status pixel regression",hr);return 0;}
     auto file=path+L"/idle.png";hr=app->chrome.layout(app->shell,path.empty()?nullptr:file.c_str());
     if(FAILED(hr)){error_hr("idle artwork diagnostic",hr);return 0;}
     if(!path.empty()){

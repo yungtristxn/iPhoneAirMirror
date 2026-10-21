@@ -51,15 +51,16 @@ struct PhoneCompositor {
         HRESULT hr=bitmap->WritePixels(desc.Height,mapped.RowPitch,mapped.RowPitch*desc.Height,static_cast<BYTE*>(mapped.pData));context->Unmap(staging.Get(),0);CHECK(hr);
         CHECK(bitmap->Commit());return encoder->Commit();
     }
-    HRESULT layout(PhoneShell& shell,const wchar_t* diagnostic_path=nullptr) {
-        if(pending&&now_seconds()<retry_at&&!diagnostic_path)return S_OK;
-        if(diagnostic_path && shell.has_video)return E_INVALIDARG;
+    HRESULT layout(PhoneShell& shell,const wchar_t* diagnostic_path=nullptr,ID3D11Texture2D* idle_readback=nullptr) {
+        const bool diagnostic=diagnostic_path||idle_readback;
+        if(pending&&now_seconds()<retry_at&&!diagnostic)return S_OK;
+        if(diagnostic && shell.has_video)return E_INVALIDARG;
         RECT r{};GetClientRect(shell.window,&r);UINT w=UINT(r.right),h=UINT(r.bottom);
         if(!w||!h||IsIconic(shell.window))return S_OK;
         // Bound composition allocations even for programmatically oversized windows.
         if(w>8192||h>8192||uint64_t(w)*h>16777216)return E_INVALIDARG;
         bool changed=w!=width||h!=height;
-        if(!shell.chrome_dirty.exchange(false)&&!changed&&!diagnostic_path)return S_OK;
+        if(!shell.chrome_dirty.exchange(false)&&!changed&&!diagnostic)return S_OK;
         float s=shell.dpi_scale(),rim=shell.fullscreen?0:float(PhoneShell::rim_pixels(s));
         float radius=shell.fullscreen?0:PhoneShell::corner_radius(w,h,s);
         video_width=UINT(std::max(1.0f,float(w)-2*rim));video_height=UINT(std::max(1.0f,float(h)-2*rim));
@@ -93,6 +94,9 @@ struct PhoneCompositor {
             float scale=std::min(s,float(w)/300.0f),cx=w*.5f,cy=h*.5f;
             brush->SetColor(D2D1::ColorF(0x111318));
             auto screen=D2D1::RoundedRect(D2D1::RectF(rim,rim,float(w)-rim,float(h)-rim),cr,cr);canvas->FillRoundedRectangle(screen,brush.Get());
+            // Error/recovery text belongs solely to the graphics-independent
+            // status card. Idle labels must not bleed out from underneath it.
+            if(shell.idle_artwork_visible()){
             brush->SetColor(D2D1::ColorF(0x8f9baa));
             const bool compact=h<340*s;
             if(!compact){auto phone=D2D1::RoundedRect(D2D1::RectF(cx-17*scale,cy-111*scale,cx+17*scale,cy-53*scale),7*scale,7*scale);
@@ -105,12 +109,21 @@ struct PhoneCompositor {
                 brush->SetColor(D2D1::ColorF(color));canvas->DrawText(text,UINT32(wcslen(text)),format.Get(),D2D1::RectF(18*scale,y,float(w)-18*scale,y+box_h*scale),brush.Get());
             };
             label(L"AirMirrorLite",11,cy-(compact?63:33)*scale,24,0x9299a6,DWRITE_FONT_WEIGHT_MEDIUM);
-            const int state=shell.status;const auto reason=shell.status_message();
-            label(state==3?L"Restoring playback…":state==4?L"Connection failed":state==5?L"Receiver unavailable":state==1?L"Connecting…":L"Ready to mirror",23,cy-(compact?35:2)*scale,35,0xf1f2f6,DWRITE_FONT_WEIGHT_SEMI_BOLD);
-            label(state>=3?reason.c_str():state==1?L"Your screen will appear here":L"Open Screen Mirroring\non your iPhone",12,cy+(compact?8:44)*scale,42,0x939aa7,DWRITE_FONT_WEIGHT_NORMAL);
+            const int state=shell.status;
+            label(state==1?L"Connecting…":L"Ready to mirror",23,cy-(compact?35:2)*scale,35,0xf1f2f6,DWRITE_FONT_WEIGHT_SEMI_BOLD);
+            label(state==1?L"Your screen will appear here":L"Open Screen Mirroring\non your iPhone",12,cy+(compact?8:44)*scale,42,0x939aa7,DWRITE_FONT_WEIGHT_NORMAL);
             if(!compact)label(L"Drag to move  ·  Resize from the corner",10,float(h)-66*scale,24,0x666e7b,DWRITE_FONT_WEIGHT_NORMAL);
+            }
         }
         CHECK(canvas->EndDraw());if(diagnostic_path){CHECK(save_idle_artwork(surface.Get(),diagnostic_path));}
+        if(idle_readback){
+            // Private intrinsic-test target, restricted above to idle artwork.
+            // Copy before flip; holding buffer0 across Present is not a snapshot.
+            D3D11_TEXTURE2D_DESC desc{};idle_readback->GetDesc(&desc);
+            if(desc.Width!=w||desc.Height!=h||desc.Format!=DXGI_FORMAT_B8G8R8A8_UNORM||desc.Usage!=D3D11_USAGE_STAGING)return E_INVALIDARG;
+            ComPtr<ID3D11Texture2D> texture;CHECK(surface.As(&texture));ComPtr<ID3D11Device> device;texture->GetDevice(&device);
+            ComPtr<ID3D11DeviceContext> context;device->GetImmediateContext(&context);context->CopyResource(idle_readback,texture.Get());
+        }
         const double began=now_seconds();HRESULT present=frame->Present(0,DXGI_PRESENT_DO_NOT_WAIT);const double elapsed=now_seconds()-began;
         present_seconds+=elapsed;present_max_seconds=std::max(present_max_seconds,elapsed);
         if(present==DXGI_ERROR_WAS_STILL_DRAWING){pending=true;retry_at=now_seconds()+.005;++present_busy;shell.chrome_dirty=true;return S_OK;}

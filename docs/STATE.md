@@ -2,6 +2,28 @@
 
 Updated: 2026-10-21
 
+## Rotation disconnect fixed; Photos landscape follow-up open
+- The manual FFmpeg phone test reached 994x2160 hardware mirroring, then rotation
+  hit the Rust HEVC eight-picture DPB guard. The rejected count was not logged.
+- Replaced the fixed guard with HEVC level/area bounds (16/12/8/6 pictures) while
+  preserving resolution/packet/depth limits; added scalar inline SPS diagnostics.
+  Fixed duplicated artwork behind error cards and bounded narrow card sizing.
+- 82 Rust tests pass on both backends; Clippy/formatting pass. Silent native tests
+  pass 162 production-parser access units, four DPB16 declarations, 160 GPU surfaces,
+  controls/status/recovery/rotation, 480 AAC frames and sandbox checks; zero audio.
+  Lifecycle tests pass three ownership/teardown cycles and pending-read shutdown;
+  profile/aspect tests pass 1080/1440/2160 at both 30 and 60 fps.
+- Corrected candidate SHA-256:
+  `0F6B9E3EF7A41DA65E7557C5E86C4F935DE473068894D7D043E89BD2AACA14BF`.
+  The user confirmed rotation remains connected and correctly sized, then clarified
+  that Photos landscape still shows a small upright photo in a portrait PC frame.
+  Live metadata proves Settings changes from 994x2160/DPB6 to 994x458/DPB12; Photos
+  instead continues sending 994x2160. The user closed this candidate after testing.
+  Both FDK fallback hashes remain unchanged. Rotation-capability advertisement
+  and scalar decoder-orientation metadata are the next controlled investigation.
+- Full bounded interaction matrix, commands, evidence and physical limitations:
+  ROTATION_REGRESSION.md. Launch: `local/rotation-phone-test/launch.json`.
+
 ## Working receiver preserved
 - Accepted source remains `feat/airplay-mvp` at `e06321c`.
 - `dist/AirMirrorLite/AirMirrorLite.exe` and the extra
@@ -30,9 +52,10 @@ Updated: 2026-10-21
   opened for manual phone testing. Its log confirms listener/discovery readiness;
   phone connection and physical A/V acceptance remain pending. Both fallback
   hashes were verified unchanged. Launch evidence: `local/ffmpeg-phone-test/launch.json`.
-  Candidate build/source remains `70dff1d`; no sound tests or Computer Use were run.
+  That initial candidate was built from `70dff1d`; the rotation correction above
+  supersedes it. No sound tests or Computer Use were run.
 
-## Silent verification
+## Earlier decoder-delay verification (70dff1d)
 - 75 Rust tests pass on both backends; strict Clippy and formatting pass.
 - 17 analyzer tests include wrong-sign/missing trim, shifted PCM, stale generation
   and delay, resource/report bounds and controls that must fail.

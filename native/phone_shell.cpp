@@ -17,6 +17,13 @@ constexpr int PALETTE_WIDTH=96, BODY_HEIGHT=196, BUTTON_STEP=44, FLYOUT_WIDTH=21
 constexpr UINT_PTR HIDE_VOLUME=1;
 constexpr int RAIL_GAP=4,WORK_MARGIN=12;
 int rail_clearance(float s){return int(std::ceil((PALETTE_WIDTH+RAIL_GAP+WORK_MARGIN)*s));}
+struct StatusCardSize {int width,height;bool compact;};
+StatusCardSize status_card_size(RECT phone,RECT work,float scale){
+    // Keep a narrow phone's status card clear of its external control rail.
+    const int width=std::min({int(340*scale),std::max(1,int(phone.right-phone.left)-int(12*scale)),int(work.right-work.left)});
+    const bool compact=width<240*scale;
+    return {width,std::min(int((compact?244:218)*scale),int(work.bottom-work.top)),compact};
+}
 struct PalettePlacement {int x,y,width,height,rail,arrow,flyout;bool right,popup;};
 PalettePlacement palette_placement(RECT phone,RECT work,float s,bool collapsed,bool popup,bool fullscreen){
     const int base=collapsed?36:PALETTE_WIDTH,base_px=int(base*s),gap=int(std::ceil(RAIL_GAP*s));
@@ -245,7 +252,7 @@ void PhoneShell::paint_status_panel(){
     const int kind=status;const auto reason=status_message();
     if(kind<3){ShowWindow(status_panel_,SW_HIDE);accessibility_changed();return;}
     const float s=dpi_scale();RECT phone,area=work_area(window);GetWindowRect(window,&phone);
-    const int width=std::min(int(340*s),int(area.right-area.left)),height=std::min(int(218*s),int(area.bottom-area.top));
+    const auto card=status_card_size(phone,area,s);const int width=card.width,height=card.height;
     const int x=std::clamp<LONG>((phone.left+phone.right-width)/2,area.left,std::max(area.left,area.right-width));
     const int y=std::clamp<LONG>((phone.top+phone.bottom-height)/2,area.top,std::max(area.top,area.bottom-height));
     auto& surface=*status_surface_;const bool changed=surface.width!=width||surface.height!=height||painted_status_!=reason||painted_status_kind_!=kind;
@@ -257,9 +264,9 @@ void PhoneShell::paint_status_panel(){
             auto old=SelectObject(surface.memory,font);SetTextColor(surface.memory,color);RECT text{int(18*s),int(top*s),width-int(18*s),int(bottom*s)};
             DrawTextW(surface.memory,value.c_str(),int(value.size()),&text,DT_WORDBREAK|DT_NOPREFIX|DT_END_ELLIPSIS);SelectObject(surface.memory,old);DeleteObject(font);
         };
-        label(kind==3?L"Restoring playback":kind==5?L"Receiver unavailable":L"Connection needs attention",18,48,17,FW_SEMIBOLD,RGB(244,245,248));
-        label(reason.empty()?L"Playback could not continue.":reason,54,158,12,FW_NORMAL,RGB(219,223,232));
-        label(kind==3?L"Please wait. Your connection will recover if possible.":kind==5?L"Close and reopen AirMirrorLite to retry.":L"Press Escape to dismiss, then reconnect your iPhone.",168,208,11,FW_NORMAL,RGB(161,179,207));
+        label(kind==3?L"Restoring playback":kind==5?L"Receiver unavailable":L"Connection needs attention",18,card.compact?66:48,card.compact?15:17,FW_SEMIBOLD,RGB(244,245,248));
+        label(reason.empty()?L"Playback could not continue.":reason,card.compact?76:54,card.compact?176:158,12,FW_NORMAL,RGB(219,223,232));
+        label(kind==3?L"Please wait. Your connection will recover if possible.":kind==5?L"Close and reopen AirMirrorLite to retry.":L"Press Escape to dismiss, then reconnect your iPhone.",card.compact?186:168,card.compact?234:208,11,FW_NORMAL,RGB(161,179,207));
         auto pixels=static_cast<uint32_t*>(surface.pixels);for(int i=0;i<width*height;++i)pixels[i]|=0xff000000;
         SIZE size{width,height};POINT zero{};BLENDFUNCTION blend{AC_SRC_OVER,0,255,AC_SRC_ALPHA};
         if(UpdateLayeredWindow(status_panel_,nullptr,nullptr,&size,surface.memory,&zero,0,&blend,ULW_ALPHA)){painted_status_=reason;painted_status_kind_=kind;}

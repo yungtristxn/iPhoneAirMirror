@@ -15,7 +15,8 @@ unsafe extern "C" {
     fn am_show_error(message: *const c_char);
     fn am_now() -> f64;
     fn am_open(hidden: i32) -> *mut c_void;
-    fn am_video_probe(app: *mut c_void) -> i32;
+    fn am_video_probe(app: *mut c_void, validate: extern "C" fn(*const u8, u32, u32) -> i32)
+    -> i32;
     fn am_ui_probe(app: *mut c_void, directory: *const c_char) -> i32;
     fn am_close(app: *mut c_void);
     fn am_wake_handle(app: *mut c_void) -> *mut c_void;
@@ -101,6 +102,77 @@ pub fn show_error(message: &str) {
 pub fn now() -> f64 {
     unsafe { am_now() }
 }
+
+// Test-only route: native encoders produce synthetic Annex-B pictures in memory.
+// Validate those same NALs through the receiver's length-prefixed input parser
+// before the native probe submits them to Media Foundation. No phone data enters
+// this callback, and normal receiver submission does not pay for this conversion.
+fn validate_probe_packet(bytes: &[u8], codec: u32) -> Result<()> {
+    let budget = match codec {
+        264 => crate::protocol::h264::MAX_FRAME,
+        265 => crate::protocol::hevc::MAX_FRAME,
+        _ => bail!("unsupported synthetic video codec"),
+    };
+    ensure!(
+        !bytes.is_empty() && bytes.len() <= budget,
+        "synthetic packet budget"
+    );
+    let marker = |at: usize| -> usize {
+        if bytes.get(at..at + 4) == Some(&[0, 0, 0, 1]) {
+            4
+        } else if bytes.get(at..at + 3) == Some(&[0, 0, 1]) {
+            3
+        } else {
+            0
+        }
+    };
+    let mut framed = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    let mut count = 0;
+    while at < bytes.len() {
+        let prefix = marker(at);
+        ensure!(prefix != 0, "synthetic Annex-B framing");
+        let start = at + prefix;
+        let mut end = start;
+        while end < bytes.len() && marker(end) == 0 {
+            end += 1;
+        }
+        ensure!(
+            end > start && count < 4096 && framed.len() + 4 + end - start <= budget,
+            "synthetic NAL budget"
+        );
+        framed.extend_from_slice(&((end - start) as u32).to_be_bytes());
+        framed.extend_from_slice(&bytes[start..end]);
+        at = end;
+        count += 1;
+    }
+    if codec == 265 {
+        crate::protocol::hevc::annex_b(&mut framed)?;
+    } else {
+        crate::protocol::h264::annex_b(&mut framed)?;
+    }
+    Ok(())
+}
+
+extern "C" fn validate_probe_video(data: *const u8, len: u32, codec: u32) -> i32 {
+    if data.is_null() || len == 0 || len as usize > crate::protocol::hevc::MAX_FRAME {
+        return 0;
+    }
+    // The native probe owns a locked IMFMediaBuffer for this synchronous call.
+    let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+    match std::panic::catch_unwind(|| validate_probe_packet(bytes, codec)) {
+        Ok(Ok(())) => 1,
+        Ok(Err(error)) => {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "Synthetic video parser: {error:#}"
+            );
+            0
+        }
+        Err(_) => 0,
+    }
+}
 pub fn lan_ipv4(requested: Option<std::net::Ipv4Addr>) -> Result<(std::net::Ipv4Addr, u32, u32)> {
     let mut address = [0; 4];
     let (mut index, mut prefix) = (0, 0);
@@ -176,7 +248,7 @@ impl App {
         unsafe { am_video_ready(self.0.as_ptr()) != 0 }
     }
     pub fn video_probe(&self) -> Result<()> {
-        if unsafe { am_video_probe(self.0.as_ptr()) } == 0 {
+        if unsafe { am_video_probe(self.0.as_ptr(), validate_probe_video) } == 0 {
             return Err(error());
         }
         Ok(())
@@ -802,7 +874,29 @@ pub fn codec_probe(app: &App) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::decoded_reply;
+    use super::{decoded_reply, validate_probe_packet};
+
+    #[test]
+    fn synthetic_decoder_probe_uses_production_video_admission() {
+        assert!(validate_probe_packet(&[0, 0, 0, 1, 0x26, 1, 0x80], 265).is_ok());
+        assert!(
+            validate_probe_packet(&[0, 0, 1, 0x26, 1, 0x80, 0, 0, 0, 1, 0x26, 1, 0x80], 265)
+                .is_ok()
+        );
+        for bad in [
+            &[][..],
+            &[0x26, 1, 0x80],
+            &[0, 0, 1],
+            &[0, 0, 1, 0xa6, 1],
+            &[0, 0, 1, 0x27, 1],
+            &[0, 0, 1, 0x42, 1],
+        ] {
+            assert!(validate_probe_packet(bad, 265).is_err());
+        }
+        assert!(validate_probe_packet(&[0, 0, 1, 0x65, 0x80], 264).is_ok());
+        assert!(validate_probe_packet(&[0, 0, 1, 0xe5, 0x80], 264).is_err());
+        assert!(validate_probe_packet(&[0, 0, 1, 0x26, 1, 0x80], 0).is_err());
+    }
 
     #[test]
     fn pcm_metadata_is_atomic_and_bounded() {
