@@ -3,6 +3,9 @@
 Updated: 2026-10-21
 
 - Branch: `feat/airplay-mvp`, from clean bootstrap `9f21302`; local only.
+- Implementation checkpoint committed as `e82528a`. Current running package:
+  1,913,344 bytes, SHA-256
+  `044982D48211D3926762455993A3466CD44D156F726D8CFCE0548F36B2B7FA8C`.
 - Runnable package: `dist/AirMirrorLite/AirMirrorLite.exe`. Full Rust negotiation
   and H.264/AAC transport feed native MF/D3D11/WASAPI. Separate UI message thread;
   bounded queues/backpressure; DPAPI identity; zero-capability AppContainer codec
@@ -26,6 +29,9 @@ Updated: 2026-10-21
   regression tests pass. A later automated resize exposed missing render-target
   bind flags on the cached NV12 texture; fixed and reproduced by the expanded
   synthetic regression. Its new build is awaiting live retry.
+- Post-fix idle-window test also passed three resizes and fullscreen/restore;
+  error dialogs are now excluded from that test by checking the window class.
+  All 263 pinned vendor file hashes verified. Runtime DLL requirements are in README.
 - An older stalled media process required force-stop after normal close timed out.
   Current synthetic/loopback shutdown checks pass; live close remains to be checked.
 - Idle snapshot of an earlier release: 0.31% of one CPU core, 51.78 MiB working set

@@ -26,7 +26,8 @@ no administrator rights, Bonjour service, account or cloud connection.
   tone, checks hardware decoder surfaces, FairPlay known-answer data, AAC-ELD,
   AppContainer file denial and network isolation. It does not access a phone.
 
-Runtime requirements: Windows 10/11 x64 with Media Foundation, a D3D11 H.264
+Runtime requirements: Windows 10/11 x64 with the Microsoft Visual C++ x64 runtime
+(`MSVCP140.dll`, `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`), Media Foundation, a D3D11 H.264
 decoder/video processor, and a working default audio endpoint. Initialization
 fails explicitly if these or the AppContainer worker are unavailable.
 No silent software-video or video-only fallback is enabled.
