@@ -187,6 +187,15 @@ with zero endpoint audio samples. All three advertisement profiles pass with
 rotation capability enabled. These checks do not establish Photos convergence
 on an actual iPhone; that focused quiet test remains pending.
 
+The exact candidate also passes three silent control ownership/teardown cycles
+with baseline `/info` checked after partial and full teardown. Separately, real
+loopback event tests pass withheld-ACK cancellation and coalesced command/CSeq
+handling. Evidence: `local/control-lifecycle/20261021T201559541218Z/`.
+These are separate boundary tests, not an authenticated presented-frame plus
+pending-event-ACK to new-owner integration. A restricted-token run could not
+initialize AppContainer/socket access; the same checks passed with ordinary
+desktop process permissions, without changing any protection policy.
+
 Reproduce with CARGO_HOME=work/cargo:
 ```
 cargo test --locked --offline --features ffmpeg-aac,display-update-experiment --target-dir work/ffmpeg-receiver-target

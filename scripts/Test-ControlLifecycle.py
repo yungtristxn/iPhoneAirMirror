@@ -189,13 +189,16 @@ def run_checks(port, cycles):
                 competitor.closed()
             expect(owner.request("TEARDOWN", "rtsp://localhost/1", 303, audio_teardown), 200)
             expect(owner.request("OPTIONS", "*", 304), 200)
+            check_info(expect(owner.request("GET", "/info", 307), 200)[2])
             with Wire(port) as competitor:
                 expect(competitor.request("POST", "/pair-setup", 305, bytes(32)), 453)
                 competitor.closed()
             expect(owner.request("TEARDOWN", "rtsp://localhost/1", 306), 200)
             owner.closed()
+        with Wire(port) as observer:
+            check_info(expect(observer.request("GET", "/info", 308), 200)[2])
         # Next cycle immediately reclaims after the acknowledged full teardown.
-        checks.append(f"owner cycle {cycle + 1}: split writes, second-owner denial, audio-only teardown retains owner, full teardown closes")
+        checks.append(f"owner cycle {cycle + 1}: split writes, second-owner denial, audio-only teardown retains owner, full teardown closes, baseline display info preserved")
 
     for header in [b"Content-Length: 65537", b"Content-Length: -1",
                    b"Content-Length: 2\r\nContent-Length: 2", b"Transfer-Encoding: chunked"]:

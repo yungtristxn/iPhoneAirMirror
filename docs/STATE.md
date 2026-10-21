@@ -49,6 +49,10 @@ Updated: 2026-10-21
   convergence remains pending; normal packaging still disables both experiments.
   This exact build is open at the candidate path; discovery readiness is verified.
   Manifest, launch and copied test evidence: `local/transport-rotation-phone-test/`.
+  Exact-candidate lifecycle checks also pass three ownership/teardown cycles and
+  baseline /info checks; separate event tests pass pending-ACK cancellation and
+  coalescing. Evidence: `local/control-lifecycle/20261021T201559541218Z/`.
+  Implementation checkpoint: `780c10c`; physical Photos result remains pending.
 - Full bounded interaction matrix, commands, evidence and physical limitations:
   ROTATION_REGRESSION.md. Launch: `local/rotation-phone-test/launch.json`.
 
