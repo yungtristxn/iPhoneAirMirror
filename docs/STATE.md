@@ -44,8 +44,8 @@ Updated: 2026-10-21
   was unavailable from the reopened process handle. The receiver was restarted.
 
 ## Remaining evidence / limits
-- Brief live CPU measurement of the newest package is pending; the five-minute
-  media run used the preceding package before the socket/stream-ID corrections.
+- The five-minute media run used the preceding package; the current package also
+  passed the post-fix live playback/CPU measurement below.
 - Physical lock/unlock and Wi-Fi-loss recovery, 30-minute drift, and measured
   glass-to-glass latency remain unverified. The 120 ms playout setting is not an
   end-to-end latency measurement.
