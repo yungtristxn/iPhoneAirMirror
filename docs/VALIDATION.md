@@ -115,3 +115,24 @@ A separate live close took 177 ms with clean shutdown log and no remaining
 receiver/worker, TCP listener, UDP endpoint or mDNS service response; the reopened
 process handle did not provide an exit code. None of these measurements is a
 physical acceptance result for the later frameless UI build.
+
+## Clarity, deliberate hover and collapsible controls
+
+The final refinement uses `--ui-test` (also the default in Test-Media.ps1). This
+runs native UI plus synthetic GPU video checks without calling the AAC/WASAPI
+playback probe; `audio_samples=0` must remain in the output. The user stopped
+audible testing: do not run `--self-test` or `Test-Media.ps1 -Audio` without a new
+explicit request. Full earlier audio evidence remains historical evidence.
+
+Focused native tests cover no immediate popup on pass-through, cancellation of
+stale hover, slider drag/endpoints, labels not changing volume, Escape dismissal,
+source-pixel default fit without enlargement, hide/show with mouse and keyboard,
+collapse while volume is open, and stationary speaker / stable dock side at
+monitor edges. Render diagnostics include 100%, 125% and 200% control artwork,
+plus collapsed idle and hover states. These are offscreen artwork and in-process
+handler tests, not physical mixed-DPI monitor or pointer-feel acceptance.
+
+A development renderer initially hung on thread-local destruction after tests
+completed. It now has an explicit UI-thread lifetime and is released before
+thread teardown. Successful native-test exit and loopback timed shutdown verify
+the fix. No sound test was rerun after the user's stop instruction.

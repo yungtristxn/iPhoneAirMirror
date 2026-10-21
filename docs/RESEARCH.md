@@ -113,8 +113,19 @@ No receiver implementation, installation, service creation or firewall modificat
 ## Native phone shell (2026-10-21)
 
 The UI uses DirectComposition with a GPU video child and a separately invalidated
-Direct2D/DirectWrite frame. The owned GDI+ layered palette draws controls only.
+Direct2D/DirectWrite frame. The owned layered palette draws controls only, using Direct2D/DirectWrite.
+GDI+ is retained only for development PNG serialization.
 Microsoft API references:
 - [Composition swap chain](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/nf-dxgi1_2-idxgifactory2-createswapchainforcomposition)
 - [HWND composition target](https://learn.microsoft.com/en-us/windows/win32/api/dcomp/nf-dcomp-idcompositiondevice-createtargetforhwnd)
 - [Rounded composition clip](https://learn.microsoft.com/en-us/windows/win32/api/dcomp/nn-dcomp-idcompositionrectangleclip)
+
+### Clarity and interaction refinement
+- [Microsoft icon guidance](https://learn.microsoft.com/en-us/windows/apps/design/iconography/segoe-fluent-icons-font): use system Segoe Fluent Icons at standard 20-DIP control / 16-DIP chevron sizes; fall back to installed Segoe MDL2 Assets on Windows 10. No font is copied or redistributed.
+- [Direct2D high-DPI guidance](https://learn.microsoft.com/en-us/windows/win32/direct2d/direct2d-and-high-dpi): separate physical video pixels from logical UI coordinates. Default video fit is capped at 1:1; native vector/text controls are rendered at monitor DPI, with panel strokes aligned to physical pixels.
+- [Hover timing and placement guidance](https://learn.microsoft.com/en-us/windows/win32/uxguide/ctrl-tooltips-and-infotips): use system hover timing to avoid accidental opening and keep the initiating control unobstructed. The requested interactive volume flyout uses a stable adjacent card, a traversable hover region, leave grace, Escape dismissal and keyboard alternatives; it is not an informational tooltip.
+- [Slider guidance](https://learn.microsoft.com/en-us/windows/apps/develop/ui/controls/slider): provide enough travel and immediate feedback. The horizontal slider has a 32-DIP vertical hit area, a separate percentage label and 1% keyboard steps.
+
+The observed iPhone portrait stream was 498x1080. Display fitting can avoid loss
+from unnecessary scaling but cannot reconstruct detail absent from the stream.
+Negotiated capture capabilities and decoder resource bounds remain unchanged.

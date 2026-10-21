@@ -13,12 +13,19 @@ Both devices must be on the same trusted private LAN. Normal operation requires
 no administrator rights, Bonjour service, account or cloud connection.
 
 - Frameless, rounded phone view that follows the mirrored video’s aspect ratio.
-  Drag the picture to move; drag the curved bottom-right grip to resize.
-- Side controls: speaker, default size, fullscreen and close. Hover the speaker
-  for a volume slider; click to mute/unmute. Volume changes only PC playback.
+  Drag the picture to move; drag the curved bottom-right grip to resize. Default
+  size preserves source pixels when they fit the monitor, avoiding unnecessary
+  shrinking or enlargement. It does not increase the iPhone’s transmitted resolution.
+- Side controls: speaker, default size, fullscreen and close. Pause over the
+  speaker for a horizontal volume slider; click to mute/unmute. Buttons stay
+  fixed as the flyout opens. Volume changes only PC playback.
+- Click the small chevron beside the controls to hide them. Hover at that edge
+  of the phone to reveal the expand chevron. `C` also hides/shows the controls.
 - Keyboard: `0` default size; `M` mute; Up/Down volume; `F11` fullscreen;
   `D` disconnect; Escape leaves fullscreen or disconnects. Double-click the
-  picture to toggle fullscreen. Tab then Enter/Space operates the side controls.
+  picture to toggle fullscreen. Tab then Enter/Space operates the side controls;
+  Left/Right adjusts volume in 1% steps when the speaker has keyboard focus.
+  Escape dismisses the volume flyout before leaving fullscreen or disconnecting.
 - Close the receiver window to stop discovery, sockets and codec workers.
 - Identity is random and protected by Windows DPAPI in `local/identity.dpapi`
   next to the executable. `local/receiver.log` is bounded to 1 MiB and contains
@@ -28,14 +35,13 @@ no administrator rights, Bonjour service, account or cloud connection.
   it is not an allowlist of trusted people.
 - Firewall access should be limited to this exact executable, **Private** profile
   and **LocalSubnet**. Do not allow public-network access or disable protection.
-- `--self-test` generates synthetic landscape/portrait bars and a brief quiet
-  tone, checks hardware decoder surfaces, FairPlay known-answer data, AAC-ELD,
-  AppContainer file denial and network isolation. It also checks the frameless
-  geometry, resize/rotation, hover slider, mute restoration and close event.
-  It does not access a phone.
-- `--self-test --ui-test-dir local/ui-renders` additionally renders idle/control
-  artwork for inspection. It cannot export a mirrored phone frame.
+- `--ui-test` runs **silent** native controls and synthetic hardware-video checks.
+  `scripts/Test-Media.ps1` uses this mode by default; it submits no audio samples.
+- `--ui-test --ui-test-dir local/ui-renders` also renders idle/control artwork at
+  100%, 125% and 200% for inspection. It cannot export a mirrored phone frame.
   `--ui-preview` shows synthetic video without discovery or network listeners.
+- The full `--self-test` / `scripts/Test-Media.ps1 -Audio` probe includes an audible
+  AAC test tone. Do not run it unless the user explicitly requests audible testing.
 
 Runtime requirements: Windows 10/11 x64 with the Microsoft Visual C++ x64 runtime
 (`MSVCP140.dll`, `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`), Media Foundation, a D3D11 H.264

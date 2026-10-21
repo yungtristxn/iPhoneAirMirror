@@ -9,10 +9,14 @@ Confirmed 2026-10-21: the user wants their own minimal, efficient Windows AirPla
 - One active sender; a second sender must not silently replace the current one.
 - One frameless, rounded phone view, fitted to the actual mirrored video aspect.
   Drag the picture to move; bottom-right grip resizes proportionally. Default-size
-  action restores a monitor-aware fit; rotation/fullscreen retain sensible sizing.
-- Compact owned control rail next to the phone: hover volume slider, click mute,
+  action fits native source pixels to the monitor without default upscaling;
+  rotation/fullscreen retain sensible sizing. UI assets use monitor DPI separately.
+- Compact owned control rail next to the phone: deliberate-hover horizontal volume
+  flyout with stationary buttons, click mute,
   default size, fullscreen and close. PC-local playback volume, keyboard access,
   disconnect and a minimal ready/connecting state; no title bar or fake notch.
+  A side chevron hides the controls; hovering the collapsed edge reveals the
+  expand chevron. Keyboard access remains available when collapsed.
 - Ordinary-user runtime; close fully exits, deregisters discovery and closes sockets.
 - No timer, watermark, subscription, account or cloud relay.
 

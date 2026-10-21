@@ -7,9 +7,12 @@ use std::{net::IpAddr, path::PathBuf};
 fn main() {
     if let Err(e) = run() {
         eprintln!("AirMirrorLite: {e:#}");
-        if !std::env::args()
-            .any(|a| matches!(a.as_str(), "--hidden" | "--self-test" | "--codec-worker"))
-        {
+        if !std::env::args().any(|a| {
+            matches!(
+                a.as_str(),
+                "--hidden" | "--self-test" | "--ui-test" | "--codec-worker"
+            )
+        }) {
             native::show_error(&format!("{e:#}"));
         }
         std::process::exit(1);
@@ -22,7 +25,7 @@ fn run() -> Result<()> {
     }
     if args.iter().any(|s| s == "--help") {
         println!(
-            "AirMirrorLite\n  --self-test         test Windows media initialization and isolated codec worker\n  --ui-test-dir PATH  with --self-test, render idle/control artwork diagnostics\n  --ui-preview        synthetic video preview; no discovery or network\n  --no-discovery      run without DNS-SD (local integration tests)\n  --bind IP           bind a specific local IPv4 address (default: 0.0.0.0)\n  --port PORT         control port (default: 7000)\n  --seconds N         stop after N seconds (validation)\n  --data-dir PATH     receiver identity and bounded log (default: EXE/local)\n  --hidden            hide window during automated validation\n\nWindow: drag to move; bottom-right resize; 0 default size; M mute; Up/Down volume; F11 fullscreen; D disconnect; Escape leaves fullscreen/disconnects; close exits."
+            "AirMirrorLite\n  --ui-test           silent native UI and GPU tests\n  --self-test         full media tests, including an audible test tone\n  --ui-test-dir PATH  with --ui-test or --self-test, render idle/control artwork diagnostics\n  --ui-preview        synthetic video preview; no discovery or network\n  --no-discovery      run without DNS-SD (local integration tests)\n  --bind IP           bind a specific local IPv4 address (default: 0.0.0.0)\n  --port PORT         control port (default: 7000)\n  --seconds N         stop after N seconds (validation)\n  --data-dir PATH     receiver identity and bounded log (default: EXE/local)\n  --hidden            hide window during automated validation\n\nWindow: drag to move; bottom-right resize; 0 default size; C hide/show controls; M mute; Up/Down volume; F11 fullscreen; D disconnect; Escape leaves fullscreen/disconnects; close exits."
         );
         return Ok(());
     }
@@ -32,6 +35,7 @@ fn run() -> Result<()> {
     let mut advertise = true;
     let mut hidden = false;
     let mut probe = false;
+    let mut silent_probe = false;
     let mut preview = false;
     let mut ui_test_dir = None;
     let mut data = std::env::current_exe()?
@@ -64,6 +68,10 @@ fn run() -> Result<()> {
             "--no-discovery" => advertise = false,
             "--hidden" => hidden = true,
             "--self-test" => probe = true,
+            "--ui-test" => {
+                probe = true;
+                silent_probe = true;
+            }
             "--ui-preview" => preview = true,
             "--ui-test-dir" => {
                 i += 1;
@@ -77,7 +85,7 @@ fn run() -> Result<()> {
     }
     anyhow::ensure!(
         ui_test_dir.is_none() || probe,
-        "--ui-test-dir requires --self-test"
+        "--ui-test-dir requires --ui-test or --self-test"
     );
     anyhow::ensure!(!(preview && probe), "choose --self-test or --ui-preview");
     let app = native::App::open(hidden || probe).context("native video/audio startup")?;
@@ -95,7 +103,7 @@ fn run() -> Result<()> {
         println!("Synthetic UI preview complete: {}", app.stats());
         return Ok(());
     }
-    {
+    if !silent_probe {
         let mut worker = native::Worker::start().context("isolated native codec startup")?;
         anyhow::ensure!(worker.call(4, &[])? == [1], "worker probe");
         worker.configure(8)?;
@@ -112,11 +120,18 @@ fn run() -> Result<()> {
                 .unwrap_or_default(),
         )?;
         app.video_probe()?;
-        native::codec_probe(&app)?;
-        println!(
-            "PASS: native frameless UI geometry, hover volume/mute/reset/fullscreen/close controls; synthetic landscape/portrait H.264 decoded into D3D11 decoder surfaces and presented; known-answer FairPlay; AAC-ELD decoded in zero-capability AppContainer and sent to WASAPI.\n{}\nSynthetic media evidence only; iPhone and sustained A/V acceptance remain separate.",
-            app.stats()
-        );
+        if silent_probe {
+            println!(
+                "PASS: silent native UI and synthetic hardware video regression. No audio samples submitted.\n{}\nNo physical iPhone, sound or desktop-composition acceptance claimed.",
+                app.stats()
+            );
+        } else {
+            native::codec_probe(&app)?;
+            println!(
+                "PASS: native frameless UI geometry, hover volume/mute/reset/fullscreen/close controls; synthetic landscape/portrait H.264 decoded into D3D11 decoder surfaces and presented; known-answer FairPlay; AAC-ELD decoded in zero-capability AppContainer and sent to WASAPI.\n{}\nSynthetic media evidence only; iPhone and sustained A/V acceptance remain separate.",
+                app.stats()
+            );
+        }
         return Ok(());
     }
     let mut receiver = runtime::ReceiverApp::new(&data, bind, port, advertise, app.waker()?)?;

@@ -58,8 +58,8 @@ struct PhoneCompositor {
         if(w>8192||h>8192||uint64_t(w)*h>16777216)return E_INVALIDARG;
         bool changed=w!=width||h!=height;
         if(!shell.chrome_dirty.exchange(false)&&!changed&&!diagnostic_path)return S_OK;
-        float s=shell.dpi_scale(),rim=shell.fullscreen?0:std::round(4*s);
-        float radius=shell.fullscreen?0:std::clamp(float(std::min(w,h))*.115f,22*s,42*s);
+        float s=shell.dpi_scale(),rim=shell.fullscreen?0:float(PhoneShell::rim_pixels(s));
+        float radius=shell.fullscreen?0:PhoneShell::corner_radius(w,h,s);
         video_width=UINT(std::max(1.0f,float(w)-2*rim));video_height=UINT(std::max(1.0f,float(h)-2*rim));
         CHECK(picture->SetOffsetX(rim));CHECK(picture->SetOffsetY(rim));
         CHECK(clip->SetLeft(0.0f));CHECK(clip->SetTop(0.0f));CHECK(clip->SetRight(float(video_width)));CHECK(clip->SetBottom(float(video_height)));
@@ -74,16 +74,16 @@ struct PhoneCompositor {
         auto properties=D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED),96,96);
         ComPtr<ID2D1RenderTarget> canvas;CHECK(drawing->CreateDxgiSurfaceRenderTarget(surface.Get(),&properties,&canvas));
-        ComPtr<ID2D1SolidColorBrush> brush;CHECK(canvas->CreateSolidColorBrush(D2D1::ColorF(0x17191e),&brush));
+        ComPtr<ID2D1SolidColorBrush> brush;CHECK(canvas->CreateSolidColorBrush(D2D1::ColorF(0x22242a),&brush));
         canvas->BeginDraw();canvas->Clear(D2D1::ColorF(0,0));
         auto outer=D2D1::RoundedRect(D2D1::RectF(.5f,.5f,float(w)-.5f,float(h)-.5f),radius,radius);
-        canvas->FillRoundedRectangle(outer,brush.Get());brush->SetColor(D2D1::ColorF(0x5b5e66,.75f));canvas->DrawRoundedRectangle(outer,brush.Get(),s);
+        canvas->FillRoundedRectangle(outer,brush.Get());brush->SetColor(D2D1::ColorF(0x888d98,.28f));canvas->DrawRoundedRectangle(outer,brush.Get(),1.0f);
         if(!shell.fullscreen){
             // A subtle curved grip sits in the rim, outside the video content.
-            brush->SetColor(D2D1::ColorF(0xb9c0cb,.85f));float grip=radius-1.8f*s;
-            for(int degrees=20;degrees<70;degrees+=5){
+            brush->SetColor(D2D1::ColorF(0xabb3c0,.55f));float grip=radius-1.5f*s;
+            for(int degrees=35;degrees<60;degrees+=5){
                 float a=degrees*3.14159265f/180,b=(degrees+5)*3.14159265f/180;
-                canvas->DrawLine(D2D1::Point2F(w-radius+grip*std::cos(a),h-radius+grip*std::sin(a)),D2D1::Point2F(w-radius+grip*std::cos(b),h-radius+grip*std::sin(b)),brush.Get(),1.5f*s);
+                canvas->DrawLine(D2D1::Point2F(w-radius+grip*std::cos(a),h-radius+grip*std::sin(a)),D2D1::Point2F(w-radius+grip*std::cos(b),h-radius+grip*std::sin(b)),brush.Get(),std::max(1.0f,s));
             }
         }
         if(!shell.has_video){
