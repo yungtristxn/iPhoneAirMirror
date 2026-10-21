@@ -76,12 +76,13 @@ unsafe extern "C" {
     fn am_aac_last_error(decoder: *mut c_void) -> *const c_char;
     fn am_aac_delay(decoder: *mut c_void) -> i32;
     fn am_aac_close(decoder: *mut c_void);
-    fn am_aac_decode(
+    fn am_aac_decode_timed(
         decoder: *mut c_void,
         data: *const u8,
         len: u32,
         out: *mut i16,
         cap: u32,
+        additional_delay: *mut u32,
     ) -> i32;
     fn playfair_decrypt(message: *const u8, key: *const u8, out: *mut u8);
 }
@@ -327,6 +328,38 @@ pub fn protect(input: &[u8], decrypt: bool) -> Result<Vec<u8>> {
 pub struct Worker {
     handle: NonNull<c_void>,
     reply: Box<[u8; 16384]>,
+    generation: u64,
+    samples_per_frame: usize,
+}
+pub struct DecodedAudio {
+    pub pcm: Vec<i16>,
+    pub additional_delay_samples: u32,
+    pub generation: u64,
+}
+
+fn decoded_reply(out: &[u8], generation: u64, samples_per_frame: usize) -> Result<DecodedAudio> {
+    ensure!(
+        generation != 0 && matches!(samples_per_frame, 480 | 1024),
+        "AAC decoder not configured"
+    );
+    ensure!(
+        out.len() == 12 + samples_per_frame * 4,
+        "AAC decode failed or invalid PCM count"
+    );
+    ensure!(
+        u64::from_le_bytes(out[..8].try_into()?) == generation,
+        "AAC stale decoder generation"
+    );
+    let delay = u32::from_le_bytes(out[8..12].try_into()?);
+    ensure!(delay <= 4096, "AAC additional delay budget");
+    Ok(DecodedAudio {
+        pcm: out[12..]
+            .chunks_exact(2)
+            .map(|x| i16::from_le_bytes([x[0], x[1]]))
+            .collect(),
+        additional_delay_samples: delay,
+        generation,
+    })
 }
 pub fn provision_worker() -> Result<()> {
     if unsafe { am_worker_provision() } == 0 {
@@ -345,6 +378,8 @@ impl Worker {
             .map(|handle| Self {
                 handle,
                 reply: Box::new([0; 16384]),
+                generation: 0,
+                samples_per_frame: 0,
             })
             .ok_or_else(error)
     }
@@ -375,11 +410,23 @@ impl Worker {
             .map_err(|_| anyhow::anyhow!("invalid worker key reply"))
     }
     pub fn configure(&mut self, codec: u8) -> Result<()> {
-        ensure!(
-            self.call(2, &[codec])? == [1],
-            "AAC decoder initialization failed"
+        self.generation = 0;
+        self.samples_per_frame = 0;
+        let generation = u64::from_le_bytes(
+            self.call(2, &[codec])?
+                .try_into()
+                .context("AAC decoder initialization failed")?,
         );
+        ensure!(
+            generation != 0 && matches!(codec, 4 | 8),
+            "AAC configuration reply"
+        );
+        self.generation = generation;
+        self.samples_per_frame = if codec == 8 { 480 } else { 1024 };
         Ok(())
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
     fn metrics(&self) -> Result<(u64, f64)> {
         let (mut bytes, mut cpu) = (0, 0.0);
@@ -413,15 +460,17 @@ impl Worker {
         Ok((delay >= 0).then_some(delay as u32))
     }
     pub fn decode(&mut self, packet: &[u8]) -> Result<Vec<i16>> {
-        let out = self.call(3, packet)?;
+        Ok(self.decode_block(packet)?.pcm)
+    }
+    pub fn decode_block(&mut self, packet: &[u8]) -> Result<DecodedAudio> {
+        let generation = self.generation;
+        let samples_per_frame = self.samples_per_frame;
         ensure!(
-            !out.is_empty() && out.len().is_multiple_of(4) && out.len() <= 8192,
-            "AAC decode failed"
+            generation != 0 && matches!(samples_per_frame, 480 | 1024),
+            "AAC decoder not configured"
         );
-        Ok(out
-            .chunks_exact(2)
-            .map(|x| i16::from_le_bytes([x[0], x[1]]))
-            .collect())
+        let out = self.call(3, packet)?;
+        decoded_reply(out, generation, samples_per_frame)
     }
 }
 impl Drop for Worker {
@@ -450,10 +499,11 @@ pub fn worker_main() -> Result<()> {
         }
     }
     let mut decoder = Decoder(std::ptr::null_mut());
+    let mut generation = 0u64;
     // The IPC contract has fixed maxima. Reuse storage instead of allocating and
     // clearing request/PCM response vectors for every 480-sample audio frame.
     let mut data = [0; 8192];
-    let mut reply = [0; 8192];
+    let mut reply = [0; 8204];
     let mut pcm = [0i16; 4096];
     loop {
         let mut h = [0; 8];
@@ -486,28 +536,45 @@ pub fn worker_main() -> Result<()> {
                     "worker codec contract"
                 );
                 decoder = Decoder(unsafe { am_aac_open(data[0] as u32) });
-                reply[0] = u8::from(!decoder.0.is_null());
-                1
+                generation = generation
+                    .checked_add(1)
+                    .context("AAC generation exhausted")?;
+                if decoder.0.is_null() {
+                    0
+                } else {
+                    reply[..8].copy_from_slice(&generation.to_le_bytes());
+                    8
+                }
             }
             3 => {
                 ensure!(!decoder.0.is_null() && len > 0, "worker decoder state");
+                let mut delay = u32::MAX;
                 let n = unsafe {
-                    am_aac_decode(
+                    am_aac_decode_timed(
                         decoder.0,
                         data.as_ptr(),
                         len as u32,
                         pcm.as_mut_ptr(),
                         pcm.len() as u32,
+                        &mut delay,
                     )
                 };
                 if n < 0 {
                     0
                 } else {
-                    ensure!(n as usize <= pcm.len(), "worker PCM length");
-                    for (value, bytes) in pcm[..n as usize].iter().zip(reply.chunks_exact_mut(2)) {
+                    ensure!(
+                        n > 0 && n as usize <= pcm.len() && delay <= 4096,
+                        "worker PCM contract"
+                    );
+                    reply[..8].copy_from_slice(&generation.to_le_bytes());
+                    reply[8..12].copy_from_slice(&delay.to_le_bytes());
+                    for (value, bytes) in pcm[..n as usize]
+                        .iter()
+                        .zip(reply[12..].chunks_exact_mut(2))
+                    {
                         bytes.copy_from_slice(&value.to_le_bytes());
                     }
-                    n as usize * 2
+                    12 + n as usize * 2
                 }
             }
             4 => {
@@ -659,14 +726,22 @@ pub fn codec_probe_silent() -> Result<()> {
             ensure!(frames == 120 && samples == 245760, "AAC-LC fixture count");
             ensure!(
                 format!("{digest:x}")
-                    == "ec0e0ecf994a43665ab2ef72c245ca49385d5927353a531e97dbe84707b59ae9",
+                    == if cfg!(feature = "ffmpeg-aac") {
+                        "514b421e11ea7b9896e4b2d83a24d13bfd0c1cc93aaa3465b85ee16373055aa3"
+                    } else {
+                        "ec0e0ecf994a43665ab2ef72c245ca49385d5927353a531e97dbe84707b59ae9"
+                    },
                 "AAC-LC pinned PCM golden hash mismatch"
             );
         } else {
             ensure!(frames == 120 && samples == 115200, "AAC-ELD fixture count");
             ensure!(
                 format!("{digest:x}")
-                    == "c5679c95ef23189c71327d0e78e26ffd94c596f40902ccdfb7f5feaf256f8f6f",
+                    == if cfg!(feature = "ffmpeg-aac") {
+                        "d2291893f6096a492b657211cd02c3ddd8f1ecf6c4440a6338cb11c94d1ffece"
+                    } else {
+                        "c5679c95ef23189c71327d0e78e26ffd94c596f40902ccdfb7f5feaf256f8f6f"
+                    },
                 "AAC-ELD pinned PCM golden hash mismatch"
             );
         }
@@ -723,4 +798,27 @@ pub fn codec_probe(app: &App) -> Result<()> {
     );
     app.flush_audio();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decoded_reply;
+
+    #[test]
+    fn pcm_metadata_is_atomic_and_bounded() {
+        let mut reply = vec![0u8; 12 + 1024 * 4];
+        reply[..8].copy_from_slice(&17u64.to_le_bytes());
+        reply[8..12].copy_from_slice(&1685u32.to_le_bytes());
+        let block = decoded_reply(&reply, 17, 1024).unwrap();
+        assert_eq!(block.generation, 17);
+        assert_eq!(block.additional_delay_samples, 1685);
+        assert_eq!(block.pcm.len(), 2048);
+        assert!(decoded_reply(&reply, 18, 1024).is_err());
+        assert!(decoded_reply(&reply, 0, 1024).is_err());
+        assert!(decoded_reply(&reply, 17, 480).is_err());
+        assert!(decoded_reply(&reply[..reply.len() - 4], 17, 1024).is_err());
+        assert!(decoded_reply(&[], 17, 1024).is_err());
+        reply[8..12].copy_from_slice(&4097u32.to_le_bytes());
+        assert!(decoded_reply(&reply, 17, 1024).is_err());
+    }
 }

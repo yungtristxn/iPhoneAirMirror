@@ -2,7 +2,93 @@
 
 Date: 2026-10-21. Branch: `codex/ffmpeg-aac-experiment`, based on `e06321c`.
 
-## Decision
+## Current timing contract and candidate
+
+The original raw comparison below remains evidence of a 1,685-sample difference.
+The follow-up implements a backend-neutral **additional decoder DSP delay**
+contract, rather than padding FFmpeg to copy FDK's old scheduling behavior:
+
+- Every successful native decode returns PCM and its additional delay atomically.
+  The worker reply includes the configuration generation. The host checks the
+  generation, exact negotiated frame size and bounded delay before using PCM.
+- FDK reports and validates `CStreamInfo.outputDelay`: zero for ELD, 1,685 for
+  the pinned LC concealment/limiter policy. FFmpeg's wrapper adds no such DSP
+  stages and explicitly reports zero. `AVCodecContext::delay` stays diagnostic;
+  it is not substituted for the FDK field.
+- The returned block starts at `packet_rtp - additional_delay` in sample units.
+  Trim only the part before this generation's first packet. The first LC FDK
+  block is entirely priming; the next loses its first 661 sample frames.
+  Thereafter blocks remain contiguous without a new FIFO or accumulated floating
+  point clock. The existing shared RTP/NTP clock maps the corrected timestamp.
+- FLUSH, reconfiguration, packet loss/discontinuous RTP and decode errors restart
+  decoder state and the mapper together. Native failures latch until explicit
+  configure; there is no hidden reopen that could silently restart priming.
+  Old-generation replies and changing delay/frame size are rejected. Session and
+  FLUSH fences still reject queued stale output before native playback.
+  A separate transport RTP fence survives decoder errors and sequence-loss
+  recovery, rejecting unflushed rewinds that could overlap already queued PCM.
+- This removes **additional decoder** delay only. AAC transform/encoder priming
+  and the sender's timestamp convention are not guessed from silence or fixture
+  content. RTP wrap is handled with integer arithmetic. No tail drain is invented
+  at FLUSH/teardown; old-generation delayed content is discarded.
+
+The synthetic fixture clock starts at sample 441,000 and advances by each packet's
+480 or 1,024 frames. Reports preserve raw PCM/lag and separately store normalized
+PCM produced by the actual receiver mapper. The analyzer independently checks
+that normalized bytes equal raw PCM after the declared priming, verifies exact
+source intervals and reset metadata, then compares the common interval without
+shifting it to improve the waveform score. Wrong-sign, omitted trim, stale
+generation/delay and shifted-output controls must fail. This establishes decoder
+relative scheduling, not the phone's capture clock or physical speaker timing.
+
+FFmpeg conversion saturates finite float samples into i16 without adding a
+lookahead limiter. FDK retains its existing limiter. Low-level fixture agreement
+does not prove identical near-clipping dynamics; this is an explicit candidate
+behavior difference, not an unreported limiter replacement.
+
+`ffmpeg-aac` is now independent of `decoder-lab`. The latter still rejects normal
+startup. `scripts/Package.ps1 -FfmpegCandidate` creates a runnable local receiver
+in `dist/AirMirrorLite-ffmpeg-candidate` with FFmpeg provenance/notices and no FDK
+linked. Default packaging still selects FDK; the accepted package and additional
+fallback are preserved. Candidate physical A/V acceptance remains outstanding;
+no audible testing, public distribution or default-package replacement is implied.
+
+Reference semantics: [RFC 3640 section 2.6](https://www.rfc-editor.org/rfc/rfc3640#section-2.6)
+describes compressed-unit presentation timestamps; the pinned FDK header documents
+its additional `outputDelay`. [FFmpeg's context delay documentation](https://ffmpeg.org/doxygen/trunk/structAVCodecContext.html)
+uses a distinct codec warm-up definition. Neither substitutes for measurement of
+this AirPlay sender's end-to-end A/V synchronization.
+
+## Follow-up verification
+
+The schema-2 comparison passes normalized source-clock qualification for all four
+fixtures. The raw LC gate remains failed at -1,685 samples; normalized nonperiodic
+LC and ELD have zero residual sample offset and at most one i16-unit sample
+difference. Both lab backends run ten sessions (10,080 measured packets each,
+plus guards). A separate two-session comparison uses the exact receiver-candidate
+binary. Evidence is under `local/decoder-experiment/delay-qualified-final` and
+`local/decoder-experiment/receiver-candidate-delay-final`; each report records
+the binaries' hashes. No post-hoc waveform alignment is applied to normalized
+quality measurements. The LC common source interval is samples 441,000..562,195
+(exclusive end); FFmpeg's unmatched 1,685-frame tail is explicitly excluded.
+
+75 Rust tests pass on both backends, including generation/reset/wrap/model and
+transport rewind controls. Strict Clippy and formatting pass. Seventeen analyzer
+tests pass. The direct FFmpeg C ABI harness validates eight argument guards,
+three latched decoder failures and three explicit reconfigurations per codec,
+with unchanged PCM/metadata canaries on failure. The FDK/PlayFair ASan harness
+passes and now reopens for each of 1,024 malformed AAC inputs so a previous error
+latch cannot turn later cases into no-op parser checks. This is not whole-FFmpeg
+sanitizer coverage.
+
+The separately packaged receiver passes silent native UI/GPU tests on the local
+RTX 4070 SUPER: 100 hardware decoder surfaces and 480 ELD/LC worker fixture frames,
+with zero audio submitted. Silent loopback checks cover ownership, malformed
+requests, state rejection and shutdown. These do not establish phone acceptance,
+audible quality or physical A/V sync. Final candidate identity and clean source
+provenance are in its `BUILD.json`; the accepted fallback hashes below are unchanged.
+
+## Original experiment decision (before delay handling)
 
 The native FFmpeg decoder is a viable candidate, but **not a drop-in replacement
 under the current audio timing contract**. Both AAC-ELD and AAC-LC decode the
@@ -25,7 +111,8 @@ The opt-in `ffmpeg-aac` feature replaces only `native/codec.cpp` with
 `native/codec_ffmpeg.cpp`. It does not compile/link FDK. The default build remains
 FDK. Both measured executables enable `decoder-lab`, which rejects normal receiver
 startup before device/discovery initialization. FFmpeg enables that guard
-automatically. The standalone CLI uses only embedded synthetic fixtures and the
+automatically in that original experiment. Current comparison commands explicitly
+select both features. The standalone CLI uses only embedded synthetic fixtures and the
 existing zero-capability AppContainer/job/IPC path; no audio endpoint, window,
 phone input, capture or public advertisement is used.
 
@@ -108,13 +195,13 @@ reject normal receiver startup. All tests are silent; no Computer Use was used.
 $env:CARGO_HOME = Join-Path $PWD 'work/cargo'
 ./scripts/Build-FFmpeg.ps1 -Fetch
 cargo build --release --locked --offline --features decoder-lab --target-dir work/decoder-fdk-target
-cargo build --release --locked --offline --features ffmpeg-aac --target-dir work/decoder-ffmpeg-target
+cargo build --release --locked --offline --features ffmpeg-aac,decoder-lab --target-dir work/decoder-ffmpeg-target
 ./scripts/Test-FFmpegBoundary.ps1
 python -B -m unittest discover -s tests/decoder-experiment -p "test_*.py"
 python -B -O scripts/Test-DecoderExperiment.py --reference work/decoder-fdk-target/release/airmirror-lite.exe --candidate work/decoder-ffmpeg-target/release/airmirror-lite.exe
 ```
 
-The final comparison currently exits **1** for the known LC timing mismatch;
+The original schema-1 comparison exits **1** for the known LC timing mismatch;
 individual decoder runs exit 0. Do not turn this into a passing adoption result.
 Development prerequisites: Rust, x64 MSVC/Windows SDK, PowerShell 7, Git Bash,
 7-Zip and Python/NumPy. The recipe verifies/downloads optional local tools under
@@ -127,11 +214,9 @@ Measured FFmpeg lab EXE SHA-256:
 Other evidence: `work/ffmpeg-*.log`, `local/decoder-boundary/result.json`,
 `work/ffmpeg-aac-msvc/airmirror-ffmpeg.json`. These are local development artifacts.
 
-## Next gate
+## Remaining physical/release gate
 
-Define the backend-neutral PCM/source-timestamp and limiting policy, associate any
-decoder delay with configure/flush/reset generations, and validate with known
-source-clock fixtures. Physical A/V calibration would require a separate explicit
-authorization for sound. Keep the working receiver until those gates pass.
+Physical A/V calibration would require a separate explicit authorization for
+sound. Keep the accepted working receiver as a fallback until that gate passes.
 The native FFmpeg target avoids the known FDK/PlayFair link combination, but this
 experiment is not a public release or a complete licensing/patent clearance.

@@ -26,6 +26,10 @@ FDK_HASHES = {
     "lc": "ec0e0ecf994a43665ab2ef72c245ca49385d5927353a531e97dbe84707b59ae9",
 }
 RATE, CHANNELS, FRAMES = 44100, 2, 120
+FIXTURE_CLOCK = {"sample_rate": RATE, "start_sample": 441000,
+                 "semantics": "compressed-packet-source-samples"}
+ADDITIONAL_DSP_DELAY = {"fdk": {"eld": 0, "lc": 1685},
+                        "ffmpeg": {"eld": 0, "lc": 0}}
 MEMORY_LIMIT = 256 * 1024 * 1024
 TOLERANCES = {
     "correlation_min": 0.995, "normalized_rmse_max": 0.10,
@@ -65,7 +69,10 @@ def load_report(path: Path) -> dict:
         data = source.read(2 * 1024 * 1024 + 1)
     require(len(data) <= 2 * 1024 * 1024, "report exceeds two MiB")
     report = json.loads(data, parse_constant=lambda token: (_ for _ in ()).throw(ValueError(token)))
-    require(report.get("schema_version") == 1, "unknown experiment report schema")
+    require(report.get("schema_version") in (1, 2), "unknown experiment report schema")
+    if report["schema_version"] == 2:
+        require(report.get("fixture_clock") == FIXTURE_CLOCK,
+                "timestamped report must use the fixed fixture source clock")
     require(report.get("audio_samples_submitted") == 0 and report.get("synthetic_fixtures_only") is True,
             "report must identify synthetic-only decoding without endpoint submission")
     require(1 <= report.get("sessions_requested", 0) <= 50, "invalid session count")
@@ -109,6 +116,64 @@ def load_pcm(report_path: Path, entry: dict, baseline: bool = False) -> np.ndarr
     require(isinstance(hashes, list) and 1 <= len(hashes) <= 101
             and all(value == digest for value in hashes), "codec reset/session output changed")
     return np.frombuffer(data, dtype="<i2").astype(np.float64).reshape(-1, CHANNELS)
+
+
+def expected_dsp_delay(backend: str, name: str) -> int:
+    require(isinstance(backend, str) and len(backend) <= 256, "invalid backend identity")
+    matches = [kind for kind in ADDITIONAL_DSP_DELAY if kind in backend.lower()]
+    require(len(matches) == 1, "unknown or ambiguous decoder delay contract")
+    return ADDITIONAL_DSP_DELAY[matches[0]][name.split("-", 1)[0]]
+
+
+def load_normalized_pcm(report_path: Path, report: dict, entry: dict,
+                        raw: np.ndarray) -> tuple[np.ndarray, dict]:
+    require(report.get("schema_version") == 2 and report.get("fixture_clock") == FIXTURE_CLOCK,
+            "normalized qualification requires the fixed source-clock report")
+    normalized = entry.get("normalized")
+    require(isinstance(normalized, dict), "missing timestamp-normalized output")
+    name = entry["codec"]
+    delay = expected_dsp_delay(report["backend"], name)
+    expected_count = len(raw) - delay
+    require(expected_count > 0, "decoder delay exceeds the fixture")
+    for field, expected in {
+        "additional_delay_samples": delay,
+        "trimmed_leading_samples": delay,
+        "samples_i16": expected_count * CHANNELS,
+        "start_sample": FIXTURE_CLOCK["start_sample"],
+        "end_sample_exclusive": FIXTURE_CLOCK["start_sample"] + expected_count,
+    }.items():
+        require(type(normalized.get(field)) is int and normalized[field] == expected,
+                f"normalized {field} violates the declared source-clock/delay contract")
+    count = 1 + 2 * report["sessions_requested"]
+    generations = normalized.get("pass_generations")
+    require(isinstance(generations, list) and len(generations) == count and
+            all(type(value) is int and 0 < value < 2 ** 64 for value in generations),
+            "missing or invalid per-configure generations")
+    require(type(normalized.get("configure_generation")) is int and
+            normalized["configure_generation"] == generations[0],
+            "normalized generation does not match its configure pass")
+    # A worker starts a fresh generation counter. Equality across different
+    # sessions is allowed; the runner enforces block ownership within each pass.
+    delays = normalized.get("pass_delay_samples")
+    require(isinstance(delays, list) and len(delays) == count and
+            all(type(value) is int and value == delay for value in delays),
+            "stale or changed additional delay across configure/reset passes")
+    require(normalized.get("pcm_file") == f"{name}.normalized.pcm", "unexpected normalized PCM output name")
+    path = report_path.parent / normalized["pcm_file"]
+    require(path.resolve().parent == report_path.parent.resolve(), "normalized PCM escaped report directory")
+    with path.open("rb") as source:
+        data = source.read(expected_count * CHANNELS * 2 + 1)
+    require(len(data) == expected_count * CHANNELS * 2, "normalized PCM length mismatch")
+    digest = hashlib.sha256(data).hexdigest()
+    require(digest == normalized.get("pcm_sha256"), "normalized PCM hash mismatch")
+    hashes = normalized.get("pass_hashes")
+    require(isinstance(hashes, list) and len(hashes) == count and all(value == digest for value in hashes),
+            "normalized reset/session output changed or passes are missing")
+    pcm = np.frombuffer(data, dtype="<i2").astype(np.float64).reshape(-1, CHANNELS)
+    # Independently verify the runner used the declared metadata, not a fitted
+    # cross-correlation offset, padding or a silently altered waveform.
+    require(np.array_equal(pcm, raw[delay:]), "normalized PCM does not equal the declared leading trim of raw output")
+    return pcm, normalized
 
 
 def overlap(reference: np.ndarray, candidate: np.ndarray, lag: int):
@@ -169,11 +234,12 @@ def peak_frequency(samples: np.ndarray) -> float:
     return (index + adjustment) * RATE / len(samples)
 
 
-def compare_waveforms(reference: np.ndarray, candidate: np.ndarray, name: str) -> dict:
+def compare_waveforms(reference: np.ndarray, candidate: np.ndarray, name: str,
+                      *, align_quality: bool = True) -> dict:
     samples_per_frame, signal = FIXTURES[name]
     alignment = estimate_lag(reference, candidate, 4 * samples_per_frame)
     lag = alignment["lag_samples"]
-    x, y = overlap(reference, candidate, lag)
+    x, y = overlap(reference, candidate, lag if align_quality else 0)
     trim = min(6 * samples_per_frame, len(x) // 10)
     x, y = x[trim:-trim], y[trim:-trim]
     channels = []
@@ -223,8 +289,36 @@ def compare_waveforms(reference: np.ndarray, candidate: np.ndarray, name: str) -
         alignment["pass"] = None
         alignment["limitation"] = "Periodic correlation is phase-ambiguous; this fixture does not establish decoder delay."
     return {"signal": signal, "alignment": alignment, "channels": channels,
+            "quality_alignment_applied_samples": lag if align_quality else 0,
             "aligned_waveform_pass": all(channel["pass"] for channel in channels),
             "pass": all(channel["pass"] for channel in channels) and alignment["pass"] is not False}
+
+
+def compare_source_intervals(reference: np.ndarray, reference_metadata: dict,
+                             candidate: np.ndarray, candidate_metadata: dict, name: str) -> dict:
+    require(reference_metadata["start_sample"] == candidate_metadata["start_sample"] == FIXTURE_CLOCK["start_sample"],
+            "normalized outputs do not start at the fixed source clock")
+    start = max(reference_metadata["start_sample"], candidate_metadata["start_sample"])
+    end = min(reference_metadata["end_sample_exclusive"], candidate_metadata["end_sample_exclusive"])
+    count = end - start
+    require(count > 0, "normalized source intervals do not overlap")
+    require(len(reference) == reference_metadata["end_sample_exclusive"] - reference_metadata["start_sample"] and
+            len(candidate) == candidate_metadata["end_sample_exclusive"] - candidate_metadata["start_sample"],
+            "normalized interval length does not match PCM")
+    ref_start, cand_start = start - reference_metadata["start_sample"], start - candidate_metadata["start_sample"]
+    # Crop using declared SOURCE timestamps only. The independent lag estimate
+    # below is diagnostic/gating evidence and is never applied to these samples.
+    item = compare_waveforms(reference[ref_start:ref_start + count], candidate[cand_start:cand_start + count],
+                             name, align_quality=False)
+    item["common_source_interval"] = {"start_sample": start, "end_sample_exclusive": end,
+                                       "samples_per_channel": count,
+                                       "reference_uncompared_tail_samples": len(reference) - ref_start - count,
+                                       "candidate_uncompared_tail_samples": len(candidate) - cand_start - count}
+    item["source_clock"] = FIXTURE_CLOCK
+    item["reference_additional_delay_samples"] = reference_metadata["additional_delay_samples"]
+    item["candidate_additional_delay_samples"] = candidate_metadata["additional_delay_samples"]
+    item["normalization_scope"] = "Declared additional DSP delay was subtracted from packet source timestamps; samples before the source epoch were discarded. No silence padding or correlation-derived correction is applied. Shared codec priming and physical output latency are not calibrated."
+    return item
 
 
 def resource_summary(report: dict) -> dict:
@@ -271,12 +365,13 @@ def guards_pass(report: dict) -> bool:
 def compare_reports(reference_path: Path, candidate_path: Path) -> dict:
     reference, candidate = load_report(reference_path), load_report(candidate_path)
     require("fdk" in reference["backend"].lower(), "reference backend must be FDK")
-    result = {"schema_version": 1, "reference_backend": reference["backend"],
+    result = {"schema_version": 2, "reference_backend": reference["backend"],
               "candidate_backend": candidate["backend"], "tolerances": TOLERANCES,
               "audio_played": False, "fixtures": {}, "limitations": [
                   "Synthetic decoder/IPC evidence only; not physical audio quality, AirPlay interoperability, A/V sync or glass-to-glass latency.",
                   "Cross-decoder equality is not required; within-backend reset/session determinism is required.",
-                  "Timing alignment uses seeded nonperiodic fixtures; periodic phase correlation alone is ambiguous."]}
+                  "Timing alignment uses seeded nonperiodic fixtures; periodic phase correlation alone is ambiguous.",
+                  "Raw timing/adoption results remain separate; normalization qualifies a defined source-clock mapping, not drop-in raw sample equivalence or physical A/V sync."]}
     by_ref = {entry["codec"]: entry for entry in reference["codecs"]}
     by_cand = {entry["codec"]: entry for entry in candidate["codecs"]}
     for name in FIXTURES:
@@ -291,7 +386,7 @@ def compare_reports(reference_path: Path, candidate_path: Path) -> dict:
             item["candidate_reported_delay_samples"] = cand_entry.get("reported_delay_samples")
             if isinstance(ref_entry.get("reported_delay_samples"), int) and isinstance(cand_entry.get("reported_delay_samples"), int):
                 item["reported_delay_difference_samples"] = cand_entry["reported_delay_samples"] - ref_entry["reported_delay_samples"]
-            item["delay_metadata_scope"] = "Decoder-reported metadata only; no sample or timestamp compensation is applied and the measured alignment gate remains unchanged."
+            item["delay_metadata_scope"] = "Raw output and its gate are unchanged. The separate normalized gate validates the runner's atomic per-configure delay mapping against a fixed source clock and these raw samples."
             item["bit_exact"] = ref_entry["pcm_sha256"] == cand_entry["pcm_sha256"]
             item["reference_decode_ms"] = distribution(finite_values(ref_entry["decode_ms"], "FDK decode timing"))
             ref_timing = finite_values(ref_entry["decode_ms"], "FDK decode timing")
@@ -309,19 +404,33 @@ def compare_reports(reference_path: Path, candidate_path: Path) -> dict:
             item["frame_budget_ms"] = FIXTURES[name][0] * 1000 / RATE
             item["throughput_pass"] = bool(len(timing) and np.percentile(timing, 95) < item["frame_budget_ms"])
             item["pass"] = item["pass"] and item["throughput_pass"]
+            item["raw_pass"] = item["pass"]
+            try:
+                normalized_ref, reference_metadata = load_normalized_pcm(reference_path, reference, ref_entry, ref)
+                normalized_cand, candidate_metadata = load_normalized_pcm(candidate_path, candidate, cand_entry, cand)
+                item["normalized"] = compare_source_intervals(normalized_ref, reference_metadata,
+                                                               normalized_cand, candidate_metadata, name)
+                item["normalized_pass"] = item["normalized"]["pass"] and item["throughput_pass"]
+            except (ValueError, KeyError, OSError) as error:
+                item["normalized"] = {"pass": False, "error": str(error)}
+                item["normalized_pass"] = False
             result["fixtures"][name] = item
         except (ValueError, KeyError, OSError) as error:
-            result["fixtures"][name] = {"pass": False, "error": str(error)}
+            result["fixtures"][name] = {"pass": False, "raw_pass": False,
+                                         "normalized_pass": False, "error": str(error)}
     result["reference_resources"] = resource_summary(reference)
     result["candidate_resources"] = resource_summary(candidate)
     result["candidate_guard_pass"] = guards_pass(candidate)
     result["reference_guard_pass"] = guards_pass(reference)
     result["reference_run_pass"] = reference.get("success") is True
     result["candidate_run_pass"] = candidate.get("success") is True
-    result["pass"] = bool(result["reference_run_pass"] and result["candidate_run_pass"] and
+    common_gates = bool(result["reference_run_pass"] and result["candidate_run_pass"] and
         result["candidate_guard_pass"] and result["reference_guard_pass"] and
-        result["candidate_resources"]["memory_pass"] and result["reference_resources"]["memory_pass"] and
-        all(item["pass"] for item in result["fixtures"].values()))
+        result["candidate_resources"]["memory_pass"] and result["reference_resources"]["memory_pass"])
+    result["raw_adoption_gate"] = common_gates and all(item["raw_pass"] for item in result["fixtures"].values())
+    result["normalized_adoption_gate"] = common_gates and all(item["normalized_pass"] for item in result["fixtures"].values())
+    result["qualification_basis"] = "timestamp_normalized_source_interval"
+    result["pass"] = result["normalized_adoption_gate"]
     return result
 
 
@@ -379,7 +488,8 @@ def main() -> int:
     result["candidate_report"] = str(candidate)
     destination = output / "comparison.json"
     destination.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-    print(f"{'PASS' if result['pass'] else 'FAIL'}: {destination}")
+    print(f"{'PASS' if result['pass'] else 'FAIL'} normalized source-clock qualification; "
+          f"raw adoption gate={'PASS' if result['raw_adoption_gate'] else 'FAIL'}: {destination}")
     return 0 if result["pass"] else 1
 
 

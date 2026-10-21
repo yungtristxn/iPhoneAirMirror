@@ -8,9 +8,10 @@ build = "build.rs"
 
 [features]
 default = []
-# Opt-in experiment. The accepted receiver and default build continue using FDK.
+# The accepted receiver and default build continue using FDK. The explicit
+# FFmpeg candidate is separate; add decoder-lab to forbid receiver startup.
 decoder-lab = []
-ffmpeg-aac = ["decoder-lab"]
+ffmpeg-aac = []
 
 [dependencies]
 aes = "=0.8.4"

@@ -1,6 +1,6 @@
 // Experimental replacement for codec.cpp, selected only by the FFmpeg build feature.
 // No demuxer, parser, resampler, file or network API is used here. This runs in the
-// existing capability-free, 256-MiB codec worker; the default FDK backend is unchanged.
+// existing capability-free, 256-MiB codec worker. Backend selection is build-time.
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/channel_layout.h>
@@ -43,6 +43,7 @@ bool stereo(const AVChannelLayout& layout) {
 bool float_to_i16(float value, int16_t& output) {
     if (!std::isfinite(value)) return false;
     // Saturate before integer conversion, including finite values outside [-1, 1].
+    // This is instantaneous PCM saturation, not FDK's lookahead peak limiter.
     const double scaled = std::clamp(static_cast<double>(value), -1.0, 1.0) * 32768.0;
     output = static_cast<int16_t>(std::clamp(std::lround(scaled), -32768L, 32767L));
     return true;
@@ -56,7 +57,6 @@ struct Decoder {
     int expected_frames = 0;
     int64_t next_pts = 0;
     bool contract_failed = false;
-    bool reopen_after_error = false;
     bool allocation_rejected = false;
     char error[256] = "no FFmpeg decoder error";
     std::array<int16_t, max_output> converted{};
@@ -111,7 +111,6 @@ struct Decoder {
         const int result = avcodec_open2(context, codec, nullptr);
         if (result < 0) { describe(error, "open native AAC with negotiated ASC", result); return false; }
         next_pts = 0;
-        reopen_after_error = false;
         allocation_rejected = false;
         return true;
     }
@@ -127,10 +126,9 @@ struct Decoder {
     int malformed(const char* stage, int code) {
         describe(error, stage, code);
         av_frame_unref(frame);
-        avcodec_flush_buffers(context);
-        // The next packet starts a fresh context with the fixed negotiated ASC.
-        // Flush alone does not promise to undo every in-band configuration change.
-        reopen_after_error = true;
+        // A hidden flush/reopen would restart priming without informing the
+        // host's timestamp generation. Fail until explicit reconfiguration.
+        contract_failed = true;
         return -3;
     }
 
@@ -185,14 +183,14 @@ void* am_aac_open(unsigned codec) {
 
 void am_aac_close(void* handle) { delete static_cast<Decoder*>(handle); }
 
-int am_aac_decode(void* handle, const uint8_t* data, unsigned length, int16_t* output, unsigned capacity) {
+int am_aac_decode_timed(void* handle, const uint8_t* data, unsigned length, int16_t* output,
+                        unsigned capacity, uint32_t* additional_delay) {
     if (!handle) return -1;
     auto& decoder = *static_cast<Decoder*>(handle);
-    if (!data || !output || !length || length > max_packet || capacity < max_output) {
+    if (!data || !output || !additional_delay || !length || length > max_packet || capacity < max_output) {
         describe(decoder.error, "invalid bounded AAC input/output buffer");return -1;
     }
     if (decoder.contract_failed) return -8;
-    if (decoder.reopen_after_error && !decoder.initialize_context()) return -2;
     // Keep the reusable buffer's capacity fixed even if FFmpeg retained a reference.
     decoder.packet->size = static_cast<int>(max_packet);
     int result = av_packet_make_writable(decoder.packet);
@@ -233,7 +231,14 @@ int am_aac_decode(void* handle, const uint8_t* data, unsigned length, int16_t* o
         return decoder.malformed("AAC trailing packet data rejected", result);
     }
     std::memcpy(output, decoder.converted.data(), static_cast<size_t>(samples) * sizeof(int16_t));
+    // This wrapper has no additional lookahead/concealment/limiter DSP stages.
+    // AVCodecContext::delay is a separate warm-up diagnostic, not this value.
+    *additional_delay = 0;
     describe(decoder.error, "no FFmpeg decoder error");
     return samples;
+}
+int am_aac_decode(void* handle, const uint8_t* data, unsigned length, int16_t* output, unsigned capacity) {
+    uint32_t ignored = 0;
+    return am_aac_decode_timed(handle, data, length, output, capacity, &ignored);
 }
 }

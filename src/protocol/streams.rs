@@ -593,6 +593,15 @@ impl AudioQueue {
         }
     }
 }
+fn advance_audio_rtp(next: &mut Option<u32>, rtp: u32, samples: u32) -> Result<()> {
+    ensure!(
+        next.is_none_or(|expected| (rtp.wrapping_sub(expected) as i32) >= 0),
+        "audio RTP rewind requires FLUSH or reconnect"
+    );
+    *next = Some(rtp.wrapping_add(samples));
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn audio_loop(
     data: UdpSocket,
@@ -610,9 +619,14 @@ fn audio_loop(
 ) -> Result<()> {
     let mut worker = native::Worker::start()?;
     worker.configure(codec)?;
+    let mut audio_timing = crate::audio_timing::AudioTiming::new(worker.generation())?;
+    // Transport ordering survives decoder errors/repriming. Only an explicit
+    // FLUSH/new transport may rewind into audio already submitted to playback.
+    let mut next_audio_rtp = None;
     shared.log(&format!(
-        "audio codec={} sample_rate=44100 channels=2 AppContainer=yes",
-        if codec == 8 { "AAC-ELD" } else { "AAC-LC" }
+        "audio codec={} backend={} sample_rate=44100 channels=2 AppContainer=yes",
+        if codec == 8 { "AAC-ELD" } else { "AAC-LC" },
+        native::aac_backend()
     ));
     let initial_flush = shared.flush_snapshot();
     let mut queue = AudioQueue::default();
@@ -632,6 +646,8 @@ fn audio_loop(
             clock.lock().unwrap().clear_audio();
             anchor_after = flush.anchor_after;
             worker.configure(codec)?;
+            audio_timing = crate::audio_timing::AudioTiming::new(worker.generation())?;
+            next_audio_rtp = None;
             serial = flush.serial;
         }
         match data.recv_from(&mut packet) {
@@ -644,6 +660,7 @@ fn audio_loop(
                     }
                     if admitted == AudioAdmission::Resynchronized {
                         worker.configure(codec)?;
+                        audio_timing = crate::audio_timing::AudioTiming::new(worker.generation())?;
                         errors = 0;
                         shared.log("audio sequence resynchronized after packet loss");
                     }
@@ -693,20 +710,50 @@ fn audio_loop(
                     break;
                 }
                 let mut p = queue.packets.remove(&seq).unwrap();
+                advance_audio_rtp(
+                    &mut next_audio_rtp,
+                    p.rtp,
+                    if codec == 8 { 480 } else { 1024 },
+                )?;
                 queue.consumed(seq, p.rtp, if codec == 8 { 480 } else { 1024 });
-                let Some(pts) = pts else { continue };
+                if pts.is_none() {
+                    continue;
+                }
+                // A missing packet or sender timestamp discontinuity invalidates
+                // overlap/concealment history. Reprime before decoding the next
+                // packet, including a short loss skipped by the resend deadline.
+                if audio_timing.needs_reset(p.rtp) {
+                    worker.configure(codec)?;
+                    audio_timing = crate::audio_timing::AudioTiming::new(worker.generation())?;
+                }
                 let encrypted = p.payload.len() / 16 * 16;
                 cbc::Decryptor::<aes::Aes128>::new(&key.into(), &iv.into())
                     .decrypt_padded_mut::<NoPadding>(&mut p.payload[..encrypted])
                     .map_err(|_| anyhow::anyhow!("audio ciphertext length"))?;
-                match worker.decode(&p.payload) {
-                    Ok(pcm) => {
+                match worker.decode_block(&p.payload) {
+                    Ok(mut block) => {
                         errors = 0;
-                        if pts >= native::now() - 0.1 {
+                        let mapped = audio_timing.map_block(
+                            block.generation,
+                            p.rtp,
+                            block.pcm.len() / 2,
+                            block.additional_delay_samples,
+                        )?;
+                        if mapped.output_frames == 0 {
+                            continue;
+                        }
+                        // Remove only decoder-added priming before this generation.
+                        // Encoder/transform priming is sender-owned; never infer it
+                        // from silence or add a backend-specific playout buffer.
+                        block.pcm.drain(..mapped.skip_frames * 2);
+                        let pts = clock.lock().unwrap().audio(mapped.output_rtp);
+                        if let Some(pts) = pts
+                            && pts >= native::now() - 0.1
+                        {
                             shared.send_audio(Media::Audio {
                                 epoch,
                                 serial,
-                                pcm,
+                                pcm: block.pcm,
                                 pts,
                             })?;
                         }
@@ -714,6 +761,8 @@ fn audio_loop(
                     Err(_) => {
                         errors += 1;
                         ensure!(errors < 20, "repeated AAC decoding failures");
+                        worker.configure(codec)?;
+                        audio_timing = crate::audio_timing::AudioTiming::new(worker.generation())?;
                     }
                 }
             } else if !queue.packets.is_empty() {
@@ -751,6 +800,20 @@ fn audio_loop(
 mod tests {
     use super::*;
     use std::io::Write;
+    #[test]
+    fn audio_transport_rewind_fence_survives_decoder_reprime() {
+        let mut next = None;
+        advance_audio_rtp(&mut next, u32::MAX - 479, 480).unwrap();
+        advance_audio_rtp(&mut next, 0, 480).unwrap();
+        advance_audio_rtp(&mut next, 960, 480).unwrap(); // Forward packet loss.
+        // A fresh decoder alone must not permit old queued audio to overlap.
+        let _fresh_decoder_timing = crate::audio_timing::AudioTiming::new(2).unwrap();
+        assert!(advance_audio_rtp(&mut next, 960, 480).is_err());
+        assert!(advance_audio_rtp(&mut next, 0, 480).is_err());
+        assert_eq!(next, Some(1440));
+        next = None; // Explicit FLUSH clears the transport fence too.
+        advance_audio_rtp(&mut next, 0, 480).unwrap();
+    }
     fn tcp_pair() -> (TcpStream, TcpStream) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();

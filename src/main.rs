@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod audio_timing;
 mod decoder_experiment;
 mod native;
 mod protocol;
@@ -56,8 +57,8 @@ fn run() -> Result<()> {
         );
         return Ok(());
     }
-    // The experiment is not a receiver replacement until its codec timing and
-    // real-device acceptance gates pass. Never advertise an unqualified backend.
+    // Decode-only builds remain incapable of opening a receiver. A separately
+    // packaged FFmpeg candidate requires its own physical acceptance evidence.
     ensure_experimental_launch_allowed()?;
     let mut bind: IpAddr = "0.0.0.0".parse()?;
     let mut port = 7000;

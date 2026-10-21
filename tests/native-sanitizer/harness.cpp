@@ -51,11 +51,13 @@ int main(int argc,char** argv){
     }
     am_aac_close(decoder);
     for(unsigned iteration=0;iteration<1024;++iteration){
-        if(iteration%16==0){decoder=am_aac_open(8);if(!decoder)return 8;}
+        // Each mutation must reach the codec, not the explicit-error latch left
+        // by the preceding input. Latch/reconfigure behavior has separate tests.
+        decoder=am_aac_open(8);if(!decoder)return 8;
         std::vector<uint8_t> input(1+next()%8192);for(auto& b:input)b=uint8_t(next()>>24);
         pcm.front()=12345;pcm.back()=12345;am_aac_decode(decoder,input.data(),unsigned(input.size()),pcm.data()+1,4096);
+        am_aac_close(decoder);decoder=nullptr;
         if(pcm.front()!=12345||pcm.back()!=12345)return 9;
-        if(iteration%16==15)am_aac_close(decoder);
     }
     auto lc=read(argv[3]);if(lc.empty())return 10;
     decoder=am_aac_open(4);if(!decoder)return 11;

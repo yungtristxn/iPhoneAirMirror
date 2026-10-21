@@ -3,68 +3,66 @@
 Updated: 2026-10-21
 
 ## Working receiver preserved
-- Accepted source: `feat/airplay-mvp` at `e06321c`. Continue to run
-  `dist/AirMirrorLite/AirMirrorLite.exe`; it has not been replaced.
-- Additional fallback: `dist/AirMirrorLite-fallback-e06321c/AirMirrorLite.exe`.
-  Both SHA-256 values remain
-  `CCD1192625E6193A2CD2564621294CDEE810C8B2198B1639D40DA52E3755ED43`.
-  The original identity/logs remain in place; they were not copied to the backup.
-  Saved phone aspect `994 2160` and explicit worker execute permission are preserved.
-- The user accepted the previous quiet Settings/Photos/rotation/reconnect check.
-  Earlier H.264 picture/audio passed five minutes with user-confirmed sync.
-  Current physical HEVC A/V drift and adverse-device recovery remain unverified.
-  See REVIEW_FOLLOWUP.md and VALIDATION.md for those separate build histories.
+- Accepted source remains `feat/airplay-mvp` at `e06321c`.
+- `dist/AirMirrorLite/AirMirrorLite.exe` and the extra
+  `dist/AirMirrorLite-fallback-e06321c/AirMirrorLite.exe` remain byte-identical:
+  SHA-256 `CCD1192625E6193A2CD2564621294CDEE810C8B2198B1639D40DA52E3755ED43`.
+  Original identity/logs stay in place and are not copied into the candidate.
+- Earlier quiet Settings/Photos/rotation/reconnect acceptance and five-minute
+  H.264 picture/audio acceptance belong to that build. They are not FFmpeg evidence.
 
-## FFmpeg experiment completed; not promoted
-- Active branch: `codex/ffmpeg-aac-experiment`. The `ffmpeg-aac` feature builds
-  only pinned FFmpeg 9.0.2 native AAC plus avcodec/avutil, with no FDK linked.
-  Source signature, SHA-256, config and library hashes are checked. Its isolated
-  source-build recipe replayed successfully; byte-identical builds are not claimed.
-- Both comparison builds enable `decoder-lab`: normal receiver startup is rejected
-  before native device/discovery initialization. They only run synthetic decoding
-  in the existing capability-free AppContainer/job/IPC path. No live receiver,
-  video rendering, clock or audio-output policy was changed for this experiment.
-- All four fixtures decode correctly. Repeated sessions/resets, sample counts,
-  output bounds, malformed recovery and sandbox checks pass. Aligned waveform
-  differences are at most one i16 value in the tested signals.
-- ELD has zero relative sample offset. LC produces content **1,685 samples
-  (38.2086 ms) earlier** than FDK, so the unchanged timing/adoption gate FAILS.
-  Runtime metadata and source confirm FDK's 1024-sample concealment buffer plus
-  661-sample limiter lookahead. No magic padding or tolerance relaxation was added.
-- FFmpeg showed lower median decoder/IPC call time in this workload. Observed
-  worker-private peaks: FDK 2.43 MiB, FFmpeg 4.08 MiB. These are synthetic local
-  measurements, not physical A/V sync, unsampled peak memory or sustained phone
-  performance. Full results and limitations: DECODER_EXPERIMENT.md.
+## Decoder delay implemented; separate FFmpeg receiver candidate
+- Branch: `codex/ffmpeg-aac-experiment`. Native PCM replies now atomically include
+  validated additional DSP delay and configuration generation. Integer RTP mapping
+  subtracts that delay, trims pre-generation priming and adds no FIFO/padding.
+- FDK LC delay is 1,685 samples (38.2086 ms); ELD and FFmpeg additional delay are
+  zero. FFmpeg's raw context delay stays diagnostic, not a clock substitute.
+- Flush/loss/errors reconfigure decoder and mapper together. Native failures latch
+  until configure. A transport rewind fence survives decoder resets; explicit
+  FLUSH/new transport is required to rewind. Existing session/flush queue fencing
+  remains. Encoder/filterbank priming is not guessed or recalibrated.
+- `scripts/Package.ps1 -FfmpegCandidate` creates
+  `dist/AirMirrorLite-ffmpeg-candidate/AirMirrorLite.exe`, linking pinned minimal
+  FFmpeg AAC/avcodec/avutil with no FDK. Default packaging still selects FDK.
+  The optional `decoder-lab` feature separately blocks receiver startup.
+- The local candidate retains the known `994 2160` display-aspect preference.
+  It has not been launched for phone mirroring or substituted for the accepted app.
+  Close the accepted receiver before manually launching the candidate.
 
-## Verification
-- 66 Rust tests, strict Clippy, Rust formatting and isolated release builds pass.
-- Ten Python analyzer tests pass, including a delayed signal that must fail even
-  when its aligned waveform matches. Nonperiodic signals remove tone ambiguity.
-- Direct C-ABI boundary/canary tests pass for both codecs, including malformed
-  input, reconfigure/recovery and latched contract failures. This is not full
-  FFmpeg sanitizer coverage. Lab normal-start rejection and fallback hashes pass.
-- Final comparison: `local/decoder-experiment/qualified-comparison/comparison.json`.
-  Both per-backend runs pass; cross-backend adoption remains false for LC timing.
-  FDK lab SHA: `A4C04DFD3EF2694BD42628B4C462873DE826C0B651D028010DDC2251C0ACFE51`.
-  FFmpeg lab SHA: `9BAF829FF90535DC39298BEC77B049583CE4FE955AD271E7EE22FF385509B7FA`.
-- Commands: scripts/Build-FFmpeg.ps1 -Fetch; cargo build --release --locked
-  --offline --features decoder-lab --target-dir work/decoder-fdk-target;
-  cargo build --release --locked --offline --features ffmpeg-aac --target-dir
-  work/decoder-ffmpeg-target; scripts/Test-FFmpegBoundary.ps1;
-  python -B -m unittest discover -s tests/decoder-experiment -p test_*.py;
-  python -B -O scripts/Test-DecoderExperiment.py --reference
-  work/decoder-fdk-target/release/airmirror-lite.exe --candidate
-  work/decoder-ffmpeg-target/release/airmirror-lite.exe.
-  The comparison correctly exits 1 for the documented timing mismatch.
-- All tests were silent; no Computer Use, phone interaction, recording, global
-  tool installation, publication, firewall change or Defender weakening occurred.
+## Silent verification
+- 75 Rust tests pass on both backends; strict Clippy and formatting pass.
+- 17 analyzer tests include wrong-sign/missing trim, shifted PCM, stale generation
+  and delay, resource/report bounds and controls that must fail.
+- Ten-session lab comparison: `local/decoder-experiment/delay-qualified-final/`.
+  Four fixtures, 10,080 measured packets per backend plus guards. Raw LC offset
+  remains -1,685; normalized nonperiodic ELD/LC both have zero sample offset and
+  at most one i16-unit waveform difference. Raw adoption still fails; the explicit
+  normalized source-clock qualification passes without relaxed tolerances.
+- Actual candidate binary also passes its separate synthetic timing comparison:
+  `local/decoder-experiment/receiver-candidate-delay-final/` (two sessions).
+- Direct FFmpeg C-ABI bounds/PCM+metadata canaries and explicit reset checks pass.
+  FDK/PlayFair ASan passes, including 1,024 freshly initialized malformed AAC cases.
+  This is not whole-FFmpeg sanitizer coverage or exhaustive fuzzing.
+- Candidate silent native/GPU and restricted-worker checks pass: 100 hardware
+  decoder surfaces, AAC-ELD/LC golden hashes across resets, zero audio submitted.
+  Loopback ownership/framing/state/shutdown checks pass. Evidence:
+  `local/media-test/result.json`, `local/control-test/result.json`.
+- No audible tests, Computer Use, phone capture, firewall/Defender changes or
+  publication. Final executable/source identity is in the candidate's BUILD.json.
 
-## Next step / release boundary
-- Define backend-neutral PCM timestamp/delay and limiting behavior, validate it
-  through configure/flush/reset, then obtain separately authorized physical A/V
-  evidence before switching the receiver. The experiment does not establish that
-  the old LC physical offset was correct or justify simply copying its delay.
-- Open-source release is the chosen direction. The normal FDK build's known
-  PlayFair/FDK distribution gate remains; the FFmpeg target avoids that link mix
-  but still requires complete release/source/notices and remaining-rights review.
-  Do not run audible probes without a new explicit request.
+## Commands and remaining boundary
+- `cargo test --locked --offline [--features ffmpeg-aac]`; strict Clippy; cargo fmt.
+- `scripts/Test-FFmpegBoundary.ps1`; `cargo run --manifest-path
+  tests/native-sanitizer/Cargo.toml --locked --offline` (CARGO_TARGET_DIR=work/san-target).
+- `python -B -m unittest discover -s tests/decoder-experiment -p test_*.py`;
+  `python -B -O scripts/Test-DecoderExperiment.py --reference <FDK-lab-exe>
+  --candidate <FFmpeg-exe> --sessions 10 --output <new local directory>`.
+- `scripts/Package.ps1 -FfmpegCandidate`; `scripts/Test-Media.ps1 -Executable
+  <candidate>` and `scripts/Test-Control.ps1 -Executable <candidate>`; no -Audio.
+- Physical FFmpeg A/V sync, long-run drift and audible near-clipping behavior
+  remain unverified. FFmpeg saturates immediately; it does not reproduce FDK's
+  lookahead limiter. See DECODER_EXPERIMENT.md for the contract and limits.
+- Open source is the chosen direction, but no public release is authorized or
+  prepared. The FDK distribution gate remains; candidate source/notices and
+  remaining release-rights review are still required. No audible tests without
+  a new explicit request.

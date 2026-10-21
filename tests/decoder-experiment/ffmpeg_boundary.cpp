@@ -1,9 +1,11 @@
-// Standalone, silent C-ABI regression. Links only the experimental wrapper and
-// pinned avcodec/avutil libraries; it creates no audio endpoint, window or socket.
+// Standalone, silent C-ABI regression. The standard script links the experimental
+// wrapper and pinned avcodec/avutil; the same checks also support the FDK wrapper.
+// It creates no audio endpoint, window or socket.
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <stdexcept>
@@ -14,6 +16,7 @@ extern "C" {
 void* am_aac_open(unsigned);
 void am_aac_close(void*);
 int am_aac_decode(void*, const uint8_t*, unsigned, int16_t*, unsigned);
+int am_aac_decode_timed(void*, const uint8_t*, unsigned, int16_t*, unsigned, uint32_t*);
 const char* am_aac_backend();
 const char* am_aac_last_error(void*);
 int am_aac_delay(void*);
@@ -22,6 +25,13 @@ int am_aac_delay(void*);
 namespace {
 constexpr uint32_t canary = 0xa17ba17bu;
 constexpr int16_t untouched = 0x5a5a;
+constexpr uint32_t untouched_delay = 0xdeadbeefu;
+struct Delay {
+    uint32_t before = canary, value = untouched_delay, after = canary;
+    bool intact() const { return before == canary && after == canary; }
+    bool unchanged() const { return intact() && value == untouched_delay; }
+};
+bool fdk_backend() { return std::strncmp(am_aac_backend(), "fdk-aac-", 8) == 0; }
 struct Output {
     std::array<uint32_t, 8> before;
     std::array<int16_t, 4096> pcm;
@@ -37,8 +47,13 @@ struct Output {
 };
 struct Decoder {
     void* handle;
-    explicit Decoder(unsigned mode) : handle(am_aac_open(mode)) {
+    unsigned mode;
+    explicit Decoder(unsigned requested_mode) : handle(am_aac_open(requested_mode)), mode(requested_mode) {
         if (!handle) throw std::runtime_error(am_aac_last_error(nullptr));
+        if (fdk_backend() && am_aac_delay(handle) != -1) {
+            am_aac_close(handle);handle = nullptr;
+            throw std::runtime_error("FDK delay valid before successful decode");
+        }
     }
     ~Decoder() { am_aac_close(handle); }
     Decoder(const Decoder&) = delete;
@@ -59,9 +74,12 @@ std::vector<uint8_t> first_packet(const char* path) {
 }
 void valid_packet(Decoder& decoder, const std::vector<uint8_t>& packet, int expected) {
     Output output;
-    const int samples = am_aac_decode(decoder.handle, packet.data(), static_cast<unsigned>(packet.size()), output.pcm.data(), 4096);
+    Delay delay;
+    const int samples = am_aac_decode_timed(decoder.handle, packet.data(), static_cast<unsigned>(packet.size()), output.pcm.data(), 4096, &delay.value);
     if (samples != expected) throw std::runtime_error(am_aac_last_error(decoder.handle));
     require(output.intact(), "valid decode damaged guard");
+    const uint32_t expected_delay = fdk_backend() && decoder.mode == 4 ? 1024u + (15u * 44100u) / 1000u : 0u;
+    require(delay.intact() && delay.value == expected_delay && delay.value <= 4096, "PCM block additional-delay metadata mismatch");
     require(std::all_of(output.pcm.begin() + samples, output.pcm.end(), [](int16_t v) { return v == untouched; }), "write beyond returned PCM");
 }
 void run(unsigned mode, const char* path) {
@@ -69,40 +87,41 @@ void run(unsigned mode, const char* path) {
     const int expected = mode == 8 ? 960 : 2048;
     Decoder decoder(mode);
     Output output;
+    Delay delay;
     const auto length = static_cast<unsigned>(packet.size());
-    require(am_aac_decode(nullptr, packet.data(), length, output.pcm.data(), 4096) == -1, "null handle");
-    require(am_aac_decode(decoder.handle, nullptr, length, output.pcm.data(), 4096) == -1, "null input");
-    require(am_aac_decode(decoder.handle, packet.data(), length, nullptr, 4096) == -1, "null output");
-    require(am_aac_decode(decoder.handle, packet.data(), 0, output.pcm.data(), 4096) == -1, "zero input");
-    require(am_aac_decode(decoder.handle, packet.data(), 8193, output.pcm.data(), 4096) == -1, "oversize input");
-    require(am_aac_decode(decoder.handle, packet.data(), length, output.pcm.data(), 4095) == -1, "undersize capacity");
-    require(am_aac_decode(decoder.handle, packet.data(), length, output.pcm.data(), 0) == -1, "zero capacity");
-    require(output.unchanged(), "invalid request changed output");
-    valid_packet(decoder, packet, expected); // Boundary rejects must not poison state.
+    require(am_aac_decode_timed(nullptr, packet.data(), length, output.pcm.data(), 4096, &delay.value) == -1, "null handle");
+    require(am_aac_decode_timed(decoder.handle, nullptr, length, output.pcm.data(), 4096, &delay.value) == -1, "null input");
+    require(am_aac_decode_timed(decoder.handle, packet.data(), length, nullptr, 4096, &delay.value) == -1, "null output");
+    require(am_aac_decode_timed(decoder.handle, packet.data(), length, output.pcm.data(), 4096, nullptr) == -1, "null delay output");
+    require(am_aac_decode_timed(decoder.handle, packet.data(), 0, output.pcm.data(), 4096, &delay.value) == -1, "zero input");
+    require(am_aac_decode_timed(decoder.handle, packet.data(), 8193, output.pcm.data(), 4096, &delay.value) == -1, "oversize input");
+    require(am_aac_decode_timed(decoder.handle, packet.data(), length, output.pcm.data(), 4095, &delay.value) == -1, "undersize capacity");
+    require(am_aac_decode_timed(decoder.handle, packet.data(), length, output.pcm.data(), 0, &delay.value) == -1, "zero capacity");
+    require(output.unchanged() && delay.unchanged(), "invalid request changed PCM or metadata");
+    for (int i = 0; i < 3; ++i) valid_packet(decoder, packet, expected); // Delay remains stable; pre-call rejects do not poison state.
     require(am_aac_delay(decoder.handle) >= 0, "missing decoder delay diagnostic");
+    Output legacy;
+    require(am_aac_decode(decoder.handle, packet.data(), length, legacy.pcm.data(), 4096) == expected && legacy.intact(), "compatibility decode wrapper");
 
-    unsigned ordinary = 0, latched = 0;
+    unsigned latched = 0;
     for (unsigned size : {1u, 4u, 8192u}) {
         Decoder malformed(mode);
         std::vector<uint8_t> bytes(size, 0xff);
         Output failed;
-        int result = am_aac_decode(malformed.handle, bytes.data(), size, failed.pcm.data(), 4096);
+        Delay failed_delay;
+        int result = am_aac_decode_timed(malformed.handle, bytes.data(), size, failed.pcm.data(), 4096, &failed_delay.value);
         require(result < 0, "malformed fixture unexpectedly accepted");
-        require(failed.unchanged(), "failed packet changed PCM or guard");
-        if (result == -3) {
-            valid_packet(malformed, packet, expected); // Reopens fixed ASC before reuse.
-            ++ordinary;
-        } else {
-            require(result == -4 || result == -5 || result == -6 || result == -7, "unexpected malformed error category");
-            require(am_aac_decode(malformed.handle, packet.data(), length, failed.pcm.data(), 4096) == -8, "contract failure did not latch");
-            require(failed.unchanged(), "latched failure changed PCM");
-            ++latched;
-        }
+        require(failed.unchanged() && failed_delay.unchanged(), "failed packet changed PCM, metadata or guard");
+        require(result <= -2 && result >= -7, "unexpected malformed error category");
+        require(am_aac_decode_timed(malformed.handle, packet.data(), length, failed.pcm.data(), 4096, &failed_delay.value) == -8, "decoder failure did not require configure");
+        require(failed.unchanged() && failed_delay.unchanged(), "latched failure changed PCM or metadata");
+        if (fdk_backend()) require(am_aac_delay(malformed.handle) == -1, "FDK delay remained valid after decoder failure");
+        ++latched;
         Decoder reset(mode);
         valid_packet(reset, packet, expected);
     }
-    std::printf("PASS mode=%u boundary_rejects=7 malformed_recovered=%u contract_latched=%u delay_diagnostic=%d\n",
-                mode, ordinary, latched, am_aac_delay(decoder.handle));
+    std::printf("PASS mode=%u boundary_rejects=8 malformed_latched=%u explicit_reconfigures=%u delay_diagnostic=%d\n",
+                mode, latched, latched, am_aac_delay(decoder.handle));
 }
 }
 

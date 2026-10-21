@@ -14,6 +14,7 @@ const RATE: usize = 44100;
 const CHANNELS: usize = 2;
 const PACKETS: usize = 120;
 const WORKER_LIMIT: u64 = 256 * 1024 * 1024;
+const SOURCE_START: u32 = 441000;
 
 struct Fixture {
     name: &'static str,
@@ -64,6 +65,11 @@ struct CodecReport {
     decode_ms: Vec<f64>,
     configure_ms: Vec<f64>,
     reported_delay_samples: Option<u32>,
+    additional_delay_samples: Option<u32>,
+    normalized_hashes: Vec<String>,
+    pass_generations: Vec<u64>,
+    pass_delay_samples: Vec<u32>,
+    normalized_pcm: Vec<i16>,
     error: String,
 }
 struct SessionReport {
@@ -141,6 +147,11 @@ fn decode_fixture(
     timing.configure_ms.push(milliseconds(began));
     private.push(worker.private_bytes()?);
     let mut hash = Sha256::new();
+    let mut normalized_hash = Sha256::new();
+    let mut mapping = crate::audio_timing::AudioTiming::new(worker.generation())?;
+    let mut source_next = SOURCE_START;
+    let mut trimmed = 0usize;
+    let mut pass_delay = None;
     let mut pcm_all = if keep_pcm {
         Vec::with_capacity(PACKETS * fixture.samples_per_frame * CHANNELS)
     } else {
@@ -148,25 +159,47 @@ fn decode_fixture(
     };
     for (index, packet) in packets(fixture.bytes)?.into_iter().enumerate() {
         let began = Instant::now();
-        let decoded = worker.decode(packet);
+        let decoded = worker.decode_block(packet);
         timing.decode_ms.push(milliseconds(began));
         let decoded = decoded.map_err(|e| decoder_failure(worker, e))?;
+        let block_timing = mapping.map_block(
+            decoded.generation,
+            SOURCE_START.wrapping_add((index * fixture.samples_per_frame) as u32),
+            decoded.pcm.len() / CHANNELS,
+            decoded.additional_delay_samples,
+        )?;
+        pass_delay = Some(decoded.additional_delay_samples);
+        trimmed += block_timing.skip_frames;
+        if block_timing.output_frames != 0 {
+            ensure!(
+                block_timing.output_rtp == source_next,
+                "normalized source-clock discontinuity"
+            );
+            source_next = source_next.wrapping_add(block_timing.output_frames as u32);
+        }
+        let normalized = &decoded.pcm[block_timing.skip_frames * CHANNELS..];
+        for sample in normalized {
+            normalized_hash.update(sample.to_le_bytes());
+        }
+        if keep_pcm {
+            timing.normalized_pcm.extend_from_slice(normalized);
+        }
         if index == 0 && timing.reported_delay_samples.is_none() {
             timing.reported_delay_samples = worker.decoder_delay()?;
         }
         ensure!(
-            decoded.len() == fixture.samples_per_frame * CHANNELS,
+            decoded.pcm.len() == fixture.samples_per_frame * CHANNELS,
             "{} packet{}: expected{} interleaved samples, received{}",
             fixture.name,
             index,
             fixture.samples_per_frame * CHANNELS,
-            decoded.len()
+            decoded.pcm.len()
         );
-        for sample in &decoded {
+        for sample in &decoded.pcm {
             hash.update(sample.to_le_bytes());
         }
         if keep_pcm {
-            pcm_all.extend(decoded);
+            pcm_all.extend(decoded.pcm);
         }
         if index % 32 == 31 {
             private.push(worker.private_bytes()?);
@@ -177,6 +210,30 @@ fn decode_fixture(
         private.iter().all(|value| *value <= WORKER_LIMIT),
         "observed worker private bytes exceed job limit"
     );
+    let delay = pass_delay.context("missing additional decoder delay")?;
+    ensure!(
+        trimmed == delay as usize
+            && source_next == SOURCE_START + (PACKETS * fixture.samples_per_frame) as u32 - delay,
+        "normalized source interval"
+    );
+    ensure!(
+        timing
+            .additional_delay_samples
+            .is_none_or(|old| old == delay),
+        "reset changed additional decoder delay"
+    );
+    timing.additional_delay_samples = Some(delay);
+    let normalized_hash = format!("{:x}", normalized_hash.finalize());
+    ensure!(
+        timing
+            .normalized_hashes
+            .first()
+            .is_none_or(|old| old == &normalized_hash),
+        "reset changed normalized PCM"
+    );
+    timing.normalized_hashes.push(normalized_hash);
+    timing.pass_generations.push(worker.generation());
+    timing.pass_delay_samples.push(delay);
     Ok((format!("{:x}", hash.finalize()), pcm_all))
 }
 fn new_file(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -291,6 +348,16 @@ fn experiment(directory: &Path, report: &mut Report) -> Result<()> {
                     );
                 }
                 save_pcm(directory, fixture, &pcm)?;
+                let normalized_bytes: Vec<u8> = report.codecs[index]
+                    .normalized_pcm
+                    .iter()
+                    .flat_map(|sample| sample.to_le_bytes())
+                    .collect();
+                new_file(
+                    &directory.join(format!("{}.normalized.pcm", fixture.name)),
+                    &normalized_bytes,
+                )?;
+                report.codecs[index].normalized_pcm.clear();
                 report.codecs[index].hash = hash.clone();
                 report.codecs[index].hashes.push(hash);
                 usable[index] = true;
@@ -390,7 +457,15 @@ fn numbers<T: ToString>(values: &[T]) -> String {
 }
 fn report_json(report: &Report) -> String {
     let codecs = FIXTURES.iter().zip(&report.codecs).map(|(fixture, result)| {
-        format!("{{\"codec\":{},\"signal\":{},\"sample_rate\":{RATE},\"channels\":{CHANNELS},\"frames\":{PACKETS},\"samples_per_frame\":{},\"pcm_file\":{},\"pcm_sha256\":{},\"samples_i16\":{},\"pass_hashes\":[{}],\"decode_ms\":{},\"configure_ms\":{},\"reported_delay_samples\":{},\"error\":{}}}",
+        let delay = result.additional_delay_samples.unwrap_or(0);
+        let normalized = format!("{{\"pcm_file\":{},\"pcm_sha256\":{},\"samples_i16\":{},\"start_sample\":{SOURCE_START},\"end_sample_exclusive\":{},\"trimmed_leading_samples\":{delay},\"additional_delay_samples\":{delay},\"configure_generation\":{},\"pass_hashes\":[{}],\"pass_generations\":{},\"pass_delay_samples\":{}}}",
+            quoted(&format!("{}.normalized.pcm", fixture.name)), quoted(result.normalized_hashes.first().map_or("", String::as_str)),
+            (PACKETS * fixture.samples_per_frame - delay as usize) * CHANNELS,
+            SOURCE_START + (PACKETS * fixture.samples_per_frame) as u32 - delay,
+            result.pass_generations.first().unwrap_or(&0),
+            result.normalized_hashes.iter().map(|value| quoted(value)).collect::<Vec<_>>().join(","),
+            numbers(&result.pass_generations), numbers(&result.pass_delay_samples));
+        format!("{{\"codec\":{},\"signal\":{},\"sample_rate\":{RATE},\"channels\":{CHANNELS},\"frames\":{PACKETS},\"samples_per_frame\":{},\"pcm_file\":{},\"pcm_sha256\":{},\"samples_i16\":{},\"pass_hashes\":[{}],\"decode_ms\":{},\"configure_ms\":{},\"reported_delay_samples\":{},\"normalized\":{normalized},\"error\":{}}}",
             quoted(fixture.name), quoted(fixture.signal), fixture.samples_per_frame, quoted(&format!("{}.pcm", fixture.name)), quoted(&result.hash), PACKETS * fixture.samples_per_frame * CHANNELS,
             result.hashes.iter().map(|value| quoted(value)).collect::<Vec<_>>().join(","), numbers(&result.decode_ms), numbers(&result.configure_ms), result.reported_delay_samples.map_or_else(|| "null".into(), |value| value.to_string()), quoted(&result.error))
     }).collect::<Vec<_>>().join(",");
@@ -399,7 +474,7 @@ fn report_json(report: &Report) -> String {
     let guards = report.guards.iter().map(|guard| format!("{{\"codec\":{},\"name\":{},\"rejected\":{},\"bounded\":{},\"recovered\":{},\"elapsed_ms\":{},\"diagnostic\":{}}}",
         quoted(guard.codec), quoted(guard.name), guard.rejected, guard.bounded, guard.recovered, guard.elapsed_ms, quoted(&guard.diagnostic))).collect::<Vec<_>>().join(",");
     format!(
-        "{{\"schema_version\":1,\"backend\":{},\"sessions_requested\":{},\"audio_samples_submitted\":0,\"synthetic_fixtures_only\":true,\"worker_memory_limit_bytes\":{WORKER_LIMIT},\"success\":{},\"failure\":{},\"codecs\":[{codecs}],\"sessions\":[{sessions}],\"guards\":[{guards}]}}\n",
+        "{{\"schema_version\":2,\"fixture_clock\":{{\"sample_rate\":{RATE},\"start_sample\":{SOURCE_START},\"semantics\":\"compressed-packet-source-samples\"}},\"backend\":{},\"sessions_requested\":{},\"audio_samples_submitted\":0,\"synthetic_fixtures_only\":true,\"worker_memory_limit_bytes\":{WORKER_LIMIT},\"success\":{},\"failure\":{},\"codecs\":[{codecs}],\"sessions\":[{sessions}],\"guards\":[{guards}]}}\n",
         quoted(&report.backend),
         report.sessions_requested,
         report.failure.is_empty(),

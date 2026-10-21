@@ -18,7 +18,7 @@ document does not determine patent rights or provide legal clearance.
 | PlayFair | https://github.com/FDH2/UxPlay/tree/15a6b87172eca38b0df4e615fbf1bba108734dde/lib/playfair | Five C files, headers and lookup tables only; GPLv3 text in `vendor/playfair/LICENSE.md`. No UxPlay server, HTTP parser, plist parser, renderer or app imported. |
 | FairPlay reply table | `lib/fairplay_playfair.c` at the same UxPlay revision | 568 fixed reply bytes, extracted into `vendor/playfair/replies.bin`; source file header LGPL-2.1-or-later, copyright Juho Vaha-Herttua. Runtime bounds checked in Rust. |
 | FDK AAC | https://github.com/mstorsjo/fdk-aac/tree/c41c3c7516ea8d0d78a53b96b30bed3a29745cc6 | Decoder and required common directories from `cpp/`; Fraunhofer FDK AAC license in `vendor/fdk-aac/NOTICE`. No encoder, executable, network library or general media framework in the receiver build. |
-| FFmpeg (optional experiment only) | https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz ; tag `n9.0.2`, commit `946fcce07b6dcd0331c8cc609192aeff5e1924f8` | Native AAC plus supporting avcodec/avutil, LGPL-2.1-or-later/per-file notices; no nonfree/GPL options, external codecs, network, media programs or video codecs. Source/tool hashes and signature fingerprint are in `scripts/ffmpeg-pins.json`. This target does not compile/link FDK. |
+| FFmpeg (optional candidate) | https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz ; tag `n9.0.2`, commit `946fcce07b6dcd0331c8cc609192aeff5e1924f8` | Native AAC plus supporting avcodec/avutil, LGPL-2.1-or-later/per-file notices; no nonfree/GPL options, external codecs, network, media programs or video codecs. Source/tool hashes and signature fingerprint are in `scripts/ffmpeg-pins.json`. This target does not compile/link FDK. |
 | RustCrypto AES/CBC/CTR/SHA-512 | aes 0.8.4, cbc 0.1.2, ctr 0.9.2, sha2 0.10.9 | Maintained cryptographic primitives; MIT/Apache-2.0. |
 | Dalek | ed25519-dalek 2.2.0, x25519-dalek 2.0.1 | Signatures/key agreement; BSD-3-Clause. |
 | plist | 1.8.0 | Binary-plist reader/writer; MIT. A bounded graph validator precedes reads. |
@@ -40,8 +40,9 @@ local PlayFair byte-assembly correction is recorded in `vendor/PATCHES.md`;
 its notice are separate files. Build selection is in the project's build.rs.
 Never store device keys or screen/audio captures here.
 
-The FFmpeg feature is a decode-only experiment, not a migration or distribution
-approval. The normal FDK receiver and its distribution gate remain unchanged.
+The FFmpeg feature now supports an explicitly packaged local receiver candidate;
+`decoder-lab` separately enforces decode-only execution. This is not distribution
+approval. The accepted FDK package and its distribution gate remain unchanged.
 The user selected an open-source direction; a qualified FFmpeg-based GPLv3 release
 still needs the timing/acceptance work described in `DECODER_EXPERIMENT.md` and a
 complete source/notice and remaining-rights review. No public release was made.

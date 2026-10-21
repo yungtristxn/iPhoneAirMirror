@@ -17,6 +17,12 @@ Confirmed 2026-10-21: the user wants their own minimal, efficient Windows AirPla
   again to those timestamps. Keep advertisements consistent across /info and
   RECORD. Do not claim the hint as measured end-to-end latency. Optional 30 fps
   provides the earlier bandwidth tradeoff.
+- Decoded audio carries a validated configuration generation and additional DSP
+  delay in per-channel samples. Its first PCM timestamp is packet RTP minus that
+  delay; trim only decoder priming before the current generation's first packet.
+  Reconfigure on FLUSH, decoding failure or RTP discontinuity. No decoder-specific
+  output FIFO or inferred encoder-priming adjustment is added. Candidate backend
+  qualification and physical A/V acceptance are separate; see DECODER_EXPERIMENT.md.
 - An optional bounded local display-aspect setting can request phone-proportioned
   output at the selected resolution, avoiding a wide external-media canvas when
   the sender honors it. Explicit display width overrides the saved aspect; codec

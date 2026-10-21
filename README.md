@@ -6,9 +6,13 @@ A minimal Windows receiver for iPhone AirPlay **screen mirroring with synchroniz
 
 ## Run
 
-An optional, silent FFmpeg decoder experiment is documented in
-[DECODER_EXPERIMENT.md](docs/DECODER_EXPERIMENT.md). It has a separate guarded
-build and has not replaced the working receiver: AAC-LC timing differs from FDK.
+The opt-in FFmpeg receiver candidate and silent decoder checks are documented in
+[DECODER_EXPERIMENT.md](docs/DECODER_EXPERIMENT.md). Build/package it with
+`./scripts/Package.ps1 -FfmpegCandidate`; its executable is
+`dist/AirMirrorLite-ffmpeg-candidate/AirMirrorLite.exe`. It uses explicit decoder
+delay timestamps and remains separate from the accepted FDK receiver below.
+Physical A/V acceptance of this candidate is still outstanding. Do not run both
+receivers at once. Adding the `decoder-lab` build feature disables reception.
 
 Build with `./scripts/Build.ps1 -Fetch -Test`, then `./scripts/Package.ps1`.
 Launch `dist/AirMirrorLite/AirMirrorLite.exe`, select **AirMirrorLite** in iPhone

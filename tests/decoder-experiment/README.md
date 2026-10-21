@@ -6,11 +6,11 @@ capture. Do not point it at the preserved `dist` executable. Neither tool builds
 or installs dependencies. Python analysis uses the existing development NumPy.
 
 Root-level builds provide two separately provisioned experimental executables.
-Use `--features decoder-lab` for the FDK control and `--features ffmpeg-aac` for
+Use `--features decoder-lab` for the FDK control and `--features ffmpeg-aac,decoder-lab` for
 the candidate, with separate target directories. Both lab builds reject normal
 receiver startup, making the comparison independent of unrelated receiver code.
 The normal default build and preserved package remain FDK. See
-`docs/DECODER_EXPERIMENT.md` for the measured LC timing blocker and build commands.
+`docs/DECODER_EXPERIMENT.md` for the measured raw LC offset, timing policy and build commands.
 The runner is available on each with:
 
 ```powershell
@@ -62,9 +62,16 @@ other lags, agree with the coarse onset measurement, and differ by at most 44
 samples (about 1 ms) for a drop-in replacement. A larger extra delay is reported
 and fails even if the aligned waveform is otherwise similar. The tools do not
 infer physical speaker/display synchronization from codec alignment.
-Decoder-reported delay is recorded after the first decoded frame as explanatory
-metadata only. It never shifts PCM/timestamps or relaxes the measured alignment
-gate; the two libraries' reported metadata is not itself a physical measurement.
+Raw diagnostic delay remains explanatory; the two libraries' fields are not
+interchangeable. Schema 2 also records the atomic additional-DSP-delay contract
+and PCM normalized by the production integer timestamp mapper. Each generation
+starts at known source sample 441,000. The analyzer checks metadata, trimmed
+bytes, exact source intervals and repeated hashes, then compares their common
+source interval without aligning the quality samples. The same temporal gate
+applies; negative tests cover missing trim, wrong sign, stale delay/generation
+and shifted PCM. `raw_adoption_gate` remains visible independently of
+`normalized_adoption_gate`, which determines current qualification. Schema 1
+reports cannot acquire normalized qualification retroactively.
 
 Timing includes per-call IPC/decode wall time (p50/p95/max) and worker CPU from
 `GetProcessTimes` before each process exits. The p95 call must fit the fixture's
