@@ -129,3 +129,27 @@ Microsoft API references:
 The observed iPhone portrait stream was 498x1080. Display fitting can avoid loss
 from unnecessary scaling but cannot reconstruct detail absent from the stream.
 Negotiated capture capabilities and decoder resource bounds remain unchanged.
+
+## Actual high-resolution mirroring and native application icon (2026-10-21)
+
+The previous 498x1080 portrait limit came from the 1920x1080 H.264 advertisement,
+not the window size. [UxPlay's maintained protocol reference](https://github.com/FDH2/UxPlay/blob/15a6b87172eca38b0df4e615fbf1bba108734dde/README.md)
+documents feature bit 42 (ScreenMultiCodec) and higher-height HEVC requests.
+The implementation independently parses bounded hvc1/hvcC configuration records;
+no upstream parser or renderer was imported. Short zero alignment tails are
+accepted outside hvcC, with nonzero/truncated boxes still rejected.
+
+[Windows HEVC decoder documentation](https://learn.microsoft.com/en-us/windows/win32/medfound/h-265---hevc-video-decoder)
+describes Annex-B input and D3D acceleration. MFTEnumEx activation, D3D11 awareness
+and a 3840x2160 NV12 hardware configuration gate advertisement. Validated SPS
+sizes are supplied to Media Foundation before output-type selection. Every output
+sample must expose a decoder-bound DXGI surface; no software decode fallback.
+Synthetic 4K landscape and 992x2160 portrait, then live iPhone 994x2160, passed on
+the local RTX 4070 SUPER. Windows HEVC Video Extension 2.5.33.0 was already installed.
+
+The [Windows icon resource guidance](https://learn.microsoft.com/en-us/windows/win32/menurc/about-icons)
+informs the embedded multi-image ICO. The original design and generator are in
+assets/app-icon.svg and scripts/Generate-Icon.py. Windows SDK rc.exe embeds the
+icon/version resource, and the UI loads DPI-appropriate small/large icons.
+Native tests load 16, 32, 48 and 256-pixel resource variants and check dimensions.
+No third-party artwork, font, runtime library or icon installer was added.

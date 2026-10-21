@@ -18,6 +18,29 @@ fn main() {
     );
     println!("cargo:rerun-if-changed=native");
     println!("cargo:rerun-if-changed=vendor");
+    println!("cargo:rerun-if-changed=assets/app-icon.ico");
+    // Use the installed SDK resource compiler; no new build/runtime dependency.
+    let sdk = std::env::var_os("ProgramFiles(x86)").expect("Windows SDK location");
+    let sdk_bin = Path::new(&sdk).join("Windows Kits/10/bin");
+    let mut versions: Vec<_> = fs::read_dir(sdk_bin)
+        .expect("Windows SDK bin")
+        .filter_map(Result::ok)
+        .map(|e| e.path().join("x64/rc.exe"))
+        .filter(|p| p.is_file())
+        .collect();
+    versions.sort();
+    let rc = versions.last().expect("Windows SDK rc.exe is required");
+    let resource = Path::new(&std::env::var_os("OUT_DIR").unwrap()).join("app.res");
+    let status = std::process::Command::new(rc)
+        .current_dir("native")
+        .arg("/nologo")
+        .arg("/fo")
+        .arg(&resource)
+        .arg("app.rc")
+        .status()
+        .expect("compile application icon");
+    assert!(status.success(), "application resource compilation failed");
+    println!("cargo:rustc-link-arg={}", resource.display());
     let mut fairplay = cc::Build::new();
     fairplay
         .warnings(false)
@@ -69,6 +92,7 @@ fn main() {
         "wmcodecdspuuid",
         "d3d11",
         "dxgi",
+        "dxguid",
         "dcomp",
         "d2d1",
         "dwrite",

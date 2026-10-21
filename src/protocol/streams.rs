@@ -281,6 +281,8 @@ fn video_loop(
     super::framing::configure_accepted_stream(&s)?;
     let mut cipher = video_cipher(&key, id);
     let mut config = Vec::new();
+    let mut codec = None;
+    let mut dimensions = (0, 0);
     while !stop.load(Ordering::Acquire) {
         let mut header = [0; 128];
         if !read_exact_stop(&mut s, &mut header, &stop)? {
@@ -288,7 +290,17 @@ fn video_loop(
         }
         let len = u32::from_le_bytes(header[..4].try_into()?) as usize;
         let kind = u16::from_le_bytes(header[4..6].try_into()?) & 0xff;
-        ensure!(len <= h264::MAX_FRAME, "mirror payload exceeds 2 MiB");
+        let frame_budget = if codec == Some(265) {
+            super::hevc::MAX_FRAME
+        } else {
+            h264::MAX_FRAME
+        };
+        let budget = match kind {
+            0 => frame_budget,
+            1 | 2 | 5 => 65536,
+            _ => bail!("unsupported mirror packet type {kind}"),
+        };
+        ensure!(len <= budget, "mirror payload budget");
         let mut payload = vec![0; len];
         if !read_exact_stop(&mut s, &mut payload, &stop)? {
             break;
@@ -296,10 +308,16 @@ fn video_loop(
         match kind {
             0 => {
                 cipher.apply_keystream(&mut payload);
-                h264::annex_b(&mut payload)?;
+                let active_codec =
+                    codec.ok_or_else(|| anyhow::anyhow!("video before codec configuration"))?;
+                if active_codec == 265 {
+                    super::hevc::annex_b(&mut payload)?;
+                } else {
+                    h264::annex_b(&mut payload)?;
+                }
                 if !config.is_empty() {
                     ensure!(
-                        config.len() + payload.len() <= h264::MAX_FRAME,
+                        config.len() + payload.len() <= frame_budget,
                         "combined frame budget"
                     );
                     let mut joined = std::mem::take(&mut config);
@@ -318,13 +336,33 @@ fn video_loop(
                 );
                 shared.send_video(Media::Video {
                     epoch,
+                    codec: active_codec,
+                    width: dimensions.0,
+                    height: dimensions.1,
                     data: payload,
                     pts,
                 })?;
             }
             1 => {
-                config = h264::avcc_config(&payload)?;
-                shared.log("H.264 configuration accepted");
+                let next = if payload.get(4..8) == Some(b"hvc1") {
+                    265
+                } else {
+                    264
+                };
+                ensure!(
+                    codec.is_none_or(|old| old == next),
+                    "codec changed within a session"
+                );
+                if next == 265 {
+                    ensure!(shared.video_profile.hevc, "HEVC not advertised");
+                    let parsed = super::hevc::config(&payload)?;
+                    dimensions = (parsed.width, parsed.height);
+                    config = parsed.annex_b;
+                } else {
+                    config = h264::avcc_config(&payload)?;
+                }
+                codec = Some(next);
+                shared.log(&format!("H.{next} configuration accepted"));
             }
             2 | 5 => {
                 ensure!(len <= 65536, "mirror status budget");

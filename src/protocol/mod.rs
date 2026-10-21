@@ -1,6 +1,7 @@
 pub mod clock;
 pub mod framing;
 pub mod h264;
+pub mod hevc;
 pub mod pairing;
 pub mod plist;
 mod streams;
@@ -28,6 +29,40 @@ pub const FEATURES: u64 = (1 << 2)
     | (1 << 27)
     | (1 << 28)
     | (1 << 30);
+#[derive(Clone, Copy, Debug)]
+pub struct VideoProfile {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub hevc: bool,
+}
+impl VideoProfile {
+    pub fn new(height: u32, hevc_available: bool) -> Result<Self> {
+        let width = match height {
+            1080 => 1920,
+            1440 => 2560,
+            2160 => 3840,
+            _ => bail!("resolution must be 1080, 1440 or 2160"),
+        };
+        ensure!(
+            height == 1080 || hevc_available,
+            "higher-resolution mirroring requires a native HEVC decoder and GPU support; use --resolution 1080 for compatibility"
+        );
+        Ok(Self {
+            width,
+            height,
+            fps: if height == 1080 { 60 } else { 30 },
+            hevc: height > 1080,
+        })
+    }
+    pub fn features(self) -> u64 {
+        FEATURES | if self.hevc { 1u64 << 42 } else { 0 }
+    }
+    pub fn features_text(self) -> String {
+        let bits = self.features();
+        format!("0x{:X},0x{:X}", bits as u32, bits >> 32)
+    }
+}
 struct Session {
     id: u64,
     shared: Arc<Shared>,
@@ -88,7 +123,7 @@ fn info(s: &Shared) -> Value {
         ("name", Value::String("AirMirrorLite".into())),
         ("model", Value::String("AppleTV3,2".into())),
         ("sourceVersion", Value::String("220.68".into())),
-        ("features", number(FEATURES)),
+        ("features", number(s.video_profile.features())),
         ("statusFlags", number(68)),
         (
             "pk",
@@ -108,15 +143,18 @@ fn info(s: &Shared) -> Value {
             "displays",
             Value::Array(vec![dict([
                 ("uuid", Value::String(s.pi.clone())),
-                ("width", number(1920)),
-                ("height", number(1080)),
-                ("widthPixels", number(1920)),
-                ("heightPixels", number(1080)),
+                ("width", number(s.video_profile.width.into())),
+                ("height", number(s.video_profile.height.into())),
+                ("widthPixels", number(s.video_profile.width.into())),
+                ("heightPixels", number(s.video_profile.height.into())),
                 ("widthPhysical", number(0)),
                 ("heightPhysical", number(0)),
                 ("rotation", Value::Boolean(false)),
-                ("refreshRate", Value::Real(1.0 / 60.0)),
-                ("maxFPS", number(60)),
+                (
+                    "refreshRate",
+                    Value::Real(1.0 / f64::from(s.video_profile.fps)),
+                ),
+                ("maxFPS", number(s.video_profile.fps.into())),
                 ("overscanned", Value::Boolean(false)),
                 ("features", number(14)),
             ])]),
@@ -343,6 +381,21 @@ fn teardown_types(body: &[u8]) -> Result<Option<Vec<u64>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn high_resolution_advertisement_is_capability_gated() {
+        assert!(VideoProfile::new(2160, false).is_err());
+        assert!(VideoProfile::new(1440, false).is_err());
+        assert!(VideoProfile::new(4320, true).is_err());
+        let high = VideoProfile::new(2160, true).unwrap();
+        assert_eq!((high.width, high.height, high.fps), (3840, 2160, 30));
+        assert_eq!(high.features() >> 32, 0x400);
+        assert!(high.features_text().ends_with(",0x400"));
+        let legacy = VideoProfile::new(1080, true).unwrap();
+        assert_eq!((legacy.width, legacy.height, legacy.fps), (1920, 1080, 60));
+        assert_eq!(legacy.features(), FEATURES);
+        assert!(legacy.features_text().ends_with(",0x0"));
+        assert_eq!(VideoProfile::new(1440, true).unwrap().width, 2560);
+    }
     #[test]
     fn default_audio_mode_notification() {
         let body = plist::encode(&dict([("audioMode", Value::String("default".into()))])).unwrap();

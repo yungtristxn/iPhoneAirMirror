@@ -19,7 +19,16 @@ unsafe extern "C" {
     fn am_flush_audio(app: *mut c_void);
     fn am_title(app: *mut c_void, title: *const c_char);
     fn am_pump(app: *mut c_void, wait_ms: u32) -> i32;
-    fn am_video(app: *mut c_void, data: *const u8, len: u32, pts: f64) -> i32;
+    fn am_hevc_available(app: *mut c_void) -> i32;
+    fn am_video(
+        app: *mut c_void,
+        data: *const u8,
+        len: u32,
+        pts: f64,
+        codec: u32,
+        width: u32,
+        height: u32,
+    ) -> i32;
     fn am_video_ready(app: *mut c_void) -> i32;
     fn am_audio(app: *mut c_void, data: *const i16, samples: u32, pts: f64) -> i32;
     fn am_reset(app: *mut c_void) -> i32;
@@ -104,6 +113,9 @@ impl App {
         }
         Ok(())
     }
+    pub fn hevc_available(&self) -> bool {
+        unsafe { am_hevc_available(self.0.as_ptr()) != 0 }
+    }
     pub fn video_ready(&self) -> bool {
         unsafe { am_video_ready(self.0.as_ptr()) != 0 }
     }
@@ -135,12 +147,30 @@ impl App {
         let r = unsafe { am_pump(self.0.as_ptr(), timeout) };
         if r < 0 { Err(error()) } else { Ok(r) }
     }
-    pub fn video(&self, data: &[u8], pts: f64) -> Result<()> {
+    pub fn video(&self, data: &[u8], pts: f64, codec: u32, width: u32, height: u32) -> Result<()> {
         ensure!(
-            data.len() <= 2 * 1024 * 1024 && pts.is_finite(),
+            matches!(codec, 264 | 265)
+                && data.len()
+                    <= if codec == 265 {
+                        4 * 1024 * 1024
+                    } else {
+                        2 * 1024 * 1024
+                    }
+                && pts.is_finite(),
             "invalid video sample"
         );
-        if unsafe { am_video(self.0.as_ptr(), data.as_ptr(), data.len() as u32, pts) } == 0 {
+        if unsafe {
+            am_video(
+                self.0.as_ptr(),
+                data.as_ptr(),
+                data.len() as u32,
+                pts,
+                codec,
+                width,
+                height,
+            )
+        } == 0
+        {
             return Err(error());
         }
         Ok(())

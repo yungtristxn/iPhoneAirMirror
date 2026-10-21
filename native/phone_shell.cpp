@@ -7,6 +7,7 @@
 #include <cmath>
 #include <future>
 #include "control_artwork.h"
+#include "resources.h"
 using namespace Gdiplus;
 namespace {
 constexpr DWORD WINDOW_STYLE=WS_POPUP|WS_THICKFRAME|WS_SYSMENU|WS_MINIMIZEBOX;
@@ -26,10 +27,11 @@ HRESULT PhoneShell::create(HANDLE wake,bool hidden){
         GdiplusStartupInput startup;if(GdiplusStartup(&gdiplus_,&startup,nullptr)!=Ok){created.set_value(nullptr);return;}
         painter_=std::make_unique<ControlPainter>();
         INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_STANDARD_CLASSES};InitCommonControlsEx(&controls);
-        WNDCLASSW wc{};wc.lpfnWndProc=main_proc;wc.hInstance=GetModuleHandleW(nullptr);wc.style=CS_DBLCLKS;wc.lpszClassName=L"AirMirrorLiteWindow";wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);RegisterClassW(&wc);
+        WNDCLASSW wc{};wc.lpfnWndProc=main_proc;wc.hInstance=GetModuleHandleW(nullptr);wc.hIcon=LoadIconW(wc.hInstance,MAKEINTRESOURCEW(IDI_AIRMIRRORLITE));wc.style=CS_DBLCLKS;wc.lpszClassName=L"AirMirrorLiteWindow";wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);RegisterClassW(&wc);
         WNDCLASSW pc=wc;pc.lpfnWndProc=palette_proc;pc.lpszClassName=L"AirMirrorLiteControls";RegisterClassW(&pc);
         window=CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP,wc.lpszClassName,L"AirMirrorLite",WINDOW_STYLE,0,0,360,760,nullptr,nullptr,wc.hInstance,this);
         if(window){
+            update_icons();
             BOOL dark=TRUE;DwmSetWindowAttribute(window,DWMWA_USE_IMMERSIVE_DARK_MODE,&dark,sizeof(dark));
             DWORD border=DWMWA_COLOR_NONE;DwmSetWindowAttribute(window,DWMWA_BORDER_COLOR,&border,sizeof(border));
             palette_=CreateWindowExW(WS_EX_LAYERED|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,pc.lpszClassName,L"AirMirrorLite quick controls",WS_POPUP,0,0,72,220,window,nullptr,wc.hInstance,this);
@@ -44,11 +46,19 @@ HRESULT PhoneShell::create(HANDLE wake,bool hidden){
         created.set_value(window);
         if(window){MSG msg;while(GetMessageW(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}}
         painter_.reset();
+        if(small_icon_)DestroyIcon(small_icon_);if(large_icon_)DestroyIcon(large_icon_);small_icon_=large_icon_=nullptr;
         if(gdiplus_){GdiplusShutdown(gdiplus_);gdiplus_=0;}
     });
     HWND result=ready.get();return result&&palette_&&tooltip_?initial_paint_:E_FAIL;
 }
 void PhoneShell::show(){PostMessageW(window,WM_SHOW,0,0);}
+void PhoneShell::update_icons(){
+    UINT dpi=GetDpiForWindow(window);auto instance=GetModuleHandleW(nullptr);
+    auto load=[&](int metric){int size=GetSystemMetricsForDpi(metric,dpi);return static_cast<HICON>(LoadImageW(instance,MAKEINTRESOURCEW(IDI_AIRMIRRORLITE),IMAGE_ICON,size,size,LR_DEFAULTCOLOR));};
+    HICON next_small=load(SM_CXSMICON),next_large=load(SM_CXICON);
+    if(next_small){SendMessageW(window,WM_SETICON,ICON_SMALL,reinterpret_cast<LPARAM>(next_small));if(small_icon_)DestroyIcon(small_icon_);small_icon_=next_small;}
+    if(next_large){SendMessageW(window,WM_SETICON,ICON_BIG,reinterpret_cast<LPARAM>(next_large));if(large_icon_)DestroyIcon(large_icon_);large_icon_=next_large;}
+}
 void PhoneShell::shutdown(){if(thread_.joinable()){if(window)PostMessageW(window,WM_SHUTDOWN,0,0);thread_.join();}window=nullptr;}
 void PhoneShell::set_status(const std::wstring& title){
     SetWindowTextW(window,title.c_str());
@@ -214,7 +224,7 @@ LRESULT CALLBACK PhoneShell::main_proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
     case WM_PAINT:{PAINTSTRUCT paint;BeginPaint(h,&paint);EndPaint(h,&paint);a->signal();return 0;}
     case WM_SIZE:a->shape_window();a->place_palette();a->signal();return 0;
     case WM_MOVE:a->place_palette();return 0;
-    case WM_DPICHANGED:{auto r=reinterpret_cast<RECT*>(lp);SetWindowPos(h,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE);a->shape_window();a->place_palette();a->signal();return 0;}
+    case WM_DPICHANGED:{auto r=reinterpret_cast<RECT*>(lp);SetWindowPos(h,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE);a->update_icons();a->shape_window();a->place_palette();a->signal();return 0;}
     case WM_NCHITTEST:{POINT pt{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};ScreenToClient(h,&pt);RECT r;GetClientRect(h,&r);float s=a->dpi_scale();
         if(!a->fullscreen && pt.x>r.right-int(36*s)&&pt.y>r.bottom-int(36*s))return HTBOTTOMRIGHT;
         return a->fullscreen?HTCLIENT:HTCAPTION;}
@@ -230,7 +240,7 @@ LRESULT CALLBACK PhoneShell::main_proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         if(w>max_w){w=max_w;height=(w-border)/a->aspect_+border;}
         r->right=r->left+LONG(w);r->bottom=r->top+LONG(height);a->user_sized_=true;return TRUE;}
     case WM_GETMINMAXINFO:{auto m=reinterpret_cast<MINMAXINFO*>(lp);float s=a->dpi_scale();float height=a->aspect_<1?360*s:180*s;m->ptMinTrackSize={LONG((height-2*rim_pixels(s))*a->aspect_+2*rim_pixels(s)),LONG(height)};m->ptMaxTrackSize={4096,4096};return 0;}
-    case WM_FORMAT:{float next=float(wp)/float(lp);if(std::isfinite(next)&&next>.2f&&next<5.0f&&wp<=1920&&lp<=1920){
+    case WM_FORMAT:{float next=float(wp)/float(lp);if(std::isfinite(next)&&next>.2f&&next<5.0f&&wp<=3840&&lp<=3840){
         bool changed=a->display_w_!=wp||a->display_h_!=UINT(lp);RECT r;GetWindowRect(h,&r);
         a->aspect_=next;a->display_w_=UINT(wp);a->display_h_=UINT(lp);
         if(changed){a->dismiss_volume();if(!a->fullscreen){if(!a->user_sized_)a->default_size();else{r=a->fitted_rect(r);SetWindowPos(h,nullptr,r.left,r.top,r.right-r.left,r.bottom-r.top,SWP_NOZORDER|SWP_NOACTIVATE);}}}

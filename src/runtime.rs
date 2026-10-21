@@ -17,6 +17,9 @@ use std::{
 pub enum Media {
     Video {
         epoch: u64,
+        codec: u32,
+        width: u32,
+        height: u32,
         data: Vec<u8>,
         pts: f64,
     },
@@ -38,6 +41,7 @@ pub struct Shared {
     pub identity: SigningKey,
     pub device: String,
     pub pi: String,
+    pub video_profile: protocol::VideoProfile,
     video: SyncSender<Media>,
     audio: SyncSender<Media>,
     log: Mutex<(File, u64)>,
@@ -134,6 +138,7 @@ impl ReceiverApp {
         port: u16,
         advertise: bool,
         wake: native::Wake,
+        video_profile: protocol::VideoProfile,
     ) -> Result<Self> {
         let lan = if advertise {
             Some(native::lan_ipv4()?)
@@ -188,6 +193,7 @@ impl ReceiverApp {
             next: AtomicU64::new(1),
             connections: AtomicUsize::new(0),
             identity,
+            video_profile,
             device: device.clone(),
             pi: pi.clone(),
             video: vtx,
@@ -196,6 +202,10 @@ impl ReceiverApp {
             status: Mutex::new("Ready — select AirMirrorLite on iPhone".into()),
             wake,
         });
+        shared.log(&format!(
+            "requested_video={}x{} fps={} hevc={}",
+            video_profile.width, video_profile.height, video_profile.fps, video_profile.hevc
+        ));
         let listener = TcpListener::bind((bind, port))?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
@@ -214,7 +224,7 @@ impl ReceiverApp {
                 "invalid computer DNS hostname"
             );
             let host = format!("{computer}.local");
-            let features = format!("0x{:X},0x0", protocol::FEATURES);
+            let features = video_profile.features_text();
             discovery.push(native::Discovery::register(
                 "AirMirrorLite._airplay._tcp.local",
                 &host,
@@ -338,8 +348,15 @@ impl ReceiverApp {
                     break;
                 }
                 match self.video.try_recv() {
-                    Ok(Media::Video { epoch, data, pts }) if epoch == owner && owner != 0 => {
-                        if let Err(e) = app.video(&data, pts) {
+                    Ok(Media::Video {
+                        epoch,
+                        data,
+                        pts,
+                        codec,
+                        width,
+                        height,
+                    }) if epoch == owner && owner != 0 => {
+                        if let Err(e) = app.video(&data, pts, codec, width, height) {
                             self.shared.status(&e.to_string());
                             self.shared.disconnect.fetch_add(1, Ordering::AcqRel);
                         } else {

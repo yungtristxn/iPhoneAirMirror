@@ -25,12 +25,13 @@ fn run() -> Result<()> {
     }
     if args.iter().any(|s| s == "--help") {
         println!(
-            "AirMirrorLite\n  --ui-test           silent native UI and GPU tests\n  --self-test         full media tests, including an audible test tone\n  --ui-test-dir PATH  with --ui-test or --self-test, render idle/control artwork diagnostics\n  --ui-preview        synthetic video preview; no discovery or network\n  --no-discovery      run without DNS-SD (local integration tests)\n  --bind IP           bind a specific local IPv4 address (default: 0.0.0.0)\n  --port PORT         control port (default: 7000)\n  --seconds N         stop after N seconds (validation)\n  --data-dir PATH     receiver identity and bounded log (default: EXE/local)\n  --hidden            hide window during automated validation\n\nWindow: drag to move; bottom-right resize; 0 default size; C hide/show controls; M mute; Up/Down volume; F11 fullscreen; D disconnect; Escape leaves fullscreen/disconnects; close exits."
+            "AirMirrorLite\n  --ui-test           silent native UI and GPU tests\n  --self-test         full media tests, including an audible test tone\n  --ui-test-dir PATH  with --ui-test or --self-test, render idle/control artwork diagnostics\n  --ui-preview        synthetic video preview; no discovery or network\n  --no-discovery      run without DNS-SD (local integration tests)\n  --resolution N     request 1080, 1440 or 2160 lines (default: highest native support)\n  --bind IP           bind a specific local IPv4 address (default: 0.0.0.0)\n  --port PORT         control port (default: 7000)\n  --seconds N         stop after N seconds (validation)\n  --data-dir PATH     receiver identity and bounded log (default: EXE/local)\n  --hidden            hide window during automated validation\n\nWindow: drag to move; bottom-right resize; 0 default size; C hide/show controls; M mute; Up/Down volume; F11 fullscreen; D disconnect; Escape leaves fullscreen/disconnects; close exits."
         );
         return Ok(());
     }
     let mut bind: IpAddr = "0.0.0.0".parse()?;
     let mut port = 7000;
+    let mut resolution = None;
     let mut seconds = None;
     let mut advertise = true;
     let mut hidden = false;
@@ -48,6 +49,14 @@ fn run() -> Result<()> {
             "--bind" => {
                 i += 1;
                 bind = args.get(i).context("--bind requires IP")?.parse()?;
+            }
+            "--resolution" => {
+                i += 1;
+                resolution = Some(
+                    args.get(i)
+                        .context("--resolution requires 1080, 1440 or 2160")?
+                        .parse::<u32>()?,
+                );
             }
             "--port" => {
                 i += 1;
@@ -134,7 +143,12 @@ fn run() -> Result<()> {
         }
         return Ok(());
     }
-    let mut receiver = runtime::ReceiverApp::new(&data, bind, port, advertise, app.waker()?)?;
+    let profile = protocol::VideoProfile::new(
+        resolution.unwrap_or(if app.hevc_available() { 2160 } else { 1080 }),
+        app.hevc_available(),
+    )?;
+    let mut receiver =
+        runtime::ReceiverApp::new(&data, bind, port, advertise, app.waker()?, profile)?;
     println!(
         "AirMirrorLite ready. Select it in iPhone Control Center > Screen Mirroring.\nLog: {}",
         data.join("receiver.log").display()

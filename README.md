@@ -2,7 +2,7 @@
 
 A minimal Windows receiver for iPhone AirPlay **screen mirroring with synchronized sound** over the local network.
 
-**Status:** working local implementation on `feat/airplay-mvp`. Real iPhone picture and sound passed a five-minute session with user-confirmed synchronization and no freezes. Native hardware decode, isolated AAC-ELD, parser/security checks and shutdown have separate evidence in docs/STATE.md. Longer runs, Wi-Fi-loss recovery and end-to-end latency remain unverified.
+**Status:** working local implementation on `feat/airplay-mvp`. Real iPhone HEVC mirroring is confirmed at **994×2160**, up from 498×1080. A previous H.264 session passed five minutes with user-confirmed synchronized audio and no freezes. Current high-resolution checks are silent; HEVC A/V sync has not been re-tested. See docs/STATE.md for evidence and remaining checks.
 
 ## Run
 
@@ -15,7 +15,8 @@ no administrator rights, Bonjour service, account or cloud connection.
 - Frameless, rounded phone view that follows the mirrored video’s aspect ratio.
   Drag the picture to move; drag the curved bottom-right grip to resize. Default
   size preserves source pixels when they fit the monitor, avoiding unnecessary
-  shrinking or enlargement. It does not increase the iPhone’s transmitted resolution.
+  shrinking or enlargement. The separate HEVC negotiation now requests a higher
+  transmitted resolution when native support is available.
 - Side controls: speaker, default size, fullscreen and close. Pause over the
   speaker for a horizontal volume slider; click to mute/unmute. Buttons stay
   fixed as the flyout opens. Volume changes only PC playback.
@@ -35,7 +36,8 @@ no administrator rights, Bonjour service, account or cloud connection.
   it is not an allowlist of trusted people.
 - Firewall access should be limited to this exact executable, **Private** profile
   and **LocalSubnet**. Do not allow public-network access or disable protection.
-- `--ui-test` runs **silent** native controls and synthetic hardware-video checks.
+- `--ui-test` runs **silent** native controls, embedded-icon and synthetic
+  H.264/HEVC hardware-video checks.
   `scripts/Test-Media.ps1` uses this mode by default; it submits no audio samples.
 - `--ui-test --ui-test-dir local/ui-renders` also renders idle/control artwork at
   100%, 125% and 200% for inspection. It cannot export a mirrored phone frame.
@@ -43,9 +45,22 @@ no administrator rights, Bonjour service, account or cloud connection.
 - The full `--self-test` / `scripts/Test-Media.ps1 -Audio` probe includes an audible
   AAC test tone. Do not run it unless the user explicitly requests audible testing.
 
+By default, a compatible native HEVC decoder/GPU requests **3840×2160 at up to
+30 fps**. iPhone chooses the actual dimensions for its screen aspect ratio; the
+verified portrait result is 994×2160. To choose a different request when starting
+AirMirrorLite, use `--resolution 1440` (2560×1440 / 30 fps) or
+`--resolution 1080` (H.264 compatibility / 60 fps). A new mirroring connection is
+needed after changing the request. Hosts without native HEVC support default to
+1080; explicitly selecting a higher mode requires native HEVC and GPU support.
+
+The executable includes its own multi-size icon for Explorer, the taskbar and
+Alt-Tab; no separate icon installation is needed.
+
 Runtime requirements: Windows 10/11 x64 with the Microsoft Visual C++ x64 runtime
 (`MSVCP140.dll`, `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`), Media Foundation, a D3D11 H.264
-decoder/video processor, and a working default audio endpoint. Initialization
+decoder/video processor, and a working default audio endpoint. Higher modes use
+the installed Windows HEVC Video Extension (when available) and an HEVC-capable
+GPU; the application does not install or redistribute that codec. Initialization
 fails explicitly if these or the AppContainer worker are unavailable.
 No silent software-video or video-only fallback is enabled.
 

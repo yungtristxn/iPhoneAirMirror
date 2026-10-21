@@ -136,3 +136,50 @@ A development renderer initially hung on thread-local destruction after tests
 completed. It now has an explicit UI-thread lifetime and is released before
 thread teardown. Successful native-test exit and loopback timed shutdown verify
 the fix. No sound test was rerun after the user's stop instruction.
+
+## Actual higher-resolution video and embedded icon
+
+Silent native probes cover H.264 landscape/portrait and HEVC 3840x2160 plus
+992x2160. HEVC output requires decoder-bound DXGI surfaces, and the 4K probe
+requires at least eight decoded hardware surfaces with exact 3840x2160 output.
+Embedded icon tests load the PE resource at 16, 32, 48 and 256 pixels and verify
+bitmap dimensions, plus both window icon handles. The ICO contains nine sizes.
+
+The HEVC parser tests cover malformed/truncated box lengths and parameter arrays,
+NAL lengths/layer IDs, unsupported depth/profile, coded dimensions, DPB budget,
+bounded zero alignment padding and 8,192 deterministic mutations. H.264 now also
+rejects over-budget coded area hidden by cropping. Real /info checks in
+`python scripts/Test-VideoProfiles.py` verify 1080/60, 1440/30, 2160/30, and the
+conditional high feature bit. All these checks are silent.
+
+HEVC bounds: 4 MiB compressed access unit (including initial parameter sets),
+64 KiB configuration, eight child boxes/arrays, eight parameter NALs per array,
+16 KiB per parameter NAL, 4,096 NALs per access unit. Main profile, 8-bit 4:2:0,
+single layer, level <= 5.1, at most eight decoded pictures in SPS, coded luma
+<= 3840x2160 before cropping. Native output allows bounded padding through
+3840x2176; queued decoded HEVC frames are limited to four, admission below three.
+The compressed queue remains eight entries (up to 32 MiB for HEVC). GPU surfaces
+use more memory at 2160; older 1080 memory/CPU measurements do not describe 4K.
+
+Live silent phone acceptance on 2026-10-21: the first configuration was safely
+rejected for a short container-alignment tail. After the zero-only padding fix,
+the user confirmed picture appears. The receiver reported H.265, 994x2160,
+131 then 263 then 351 decoded/GPU decoder surfaces, with zero audio samples and
+no presentation error. Previous portrait was 498x1080: nearly four times as many
+source pixels. This confirms actual higher-resolution phone delivery and GPU
+presentation; it does not claim a new sound/A-V-sync or sustained-motion test.
+
+The accepted live HEVC binary was
+`89868E0383ED49968F99A7F4443F8004B92EBCBF67384ADC4D1DF550D1FBB955`.
+Its session reached 1,876 decoder surfaces and 1,871 presentations, then the user
+closed it cleanly; no receiver/worker or control listener remained. A passive
+9.24-second quiet-screen sample had 126.63→126.73 MiB host private memory,
+1001→1001 handles and 0.00–0.51% sampled CPU of one core. This excludes GPU memory
+and is not a sustained-motion benchmark. The final package additionally guards
+partially initialized decoders; a silent failure/recovery probe verifies that
+state before the 4K decode test. No additional phone interaction was requested.
+
+Final parser guards also reject embedded Annex-B delimiters inside length-delimited
+NALs and invalid SPS emulation-prevention sequences, so a nested unvalidated
+parameter set cannot bypass the dimension checks before native decoding. These
+negative tests pass for both H.264 and HEVC. They were added after the live run.

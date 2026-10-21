@@ -1,10 +1,11 @@
 // Diagnostic only: OS H.264 encoder makes synthetic bars in memory.
 // No capture, recording or network traffic. Exercise the actual decoder/render path.
-static HRESULT probe_video(App* app, UINT width, UINT height) {
-    ComPtr<IMFTransform> enc; CHECK(CoCreateInstance(CLSID_CMSH264EncoderMFT, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&enc)));
+static HRESULT probe_video(App* app, UINT width, UINT height,UINT codec=264) {
+    CHECK(app->init_decoder(codec,width,height));
+    ComPtr<IMFTransform> enc;if(codec==265){CHECK(create_hevc_transform(true,&enc));}else{CHECK(CoCreateInstance(CLSID_CMSH264EncoderMFT,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&enc)));}
     ComPtr<IMFMediaType> output; CHECK(MFCreateMediaType(&output));
-    CHECK(output->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video)); CHECK(output->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264));
-    CHECK(output->SetUINT32(MF_MT_AVG_BITRATE, 4000000)); CHECK(output->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive));
+    CHECK(output->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video)); CHECK(output->SetGUID(MF_MT_SUBTYPE, codec==265?MFVideoFormat_HEVC:MFVideoFormat_H264));
+    CHECK(output->SetUINT32(MF_MT_AVG_BITRATE, codec==265?16000000:4000000));if(codec==265){CHECK(output->SetUINT32(MF_MT_MPEG2_PROFILE,1));} CHECK(output->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive));
     CHECK(MFSetAttributeSize(output.Get(), MF_MT_FRAME_SIZE, width, height)); CHECK(MFSetAttributeRatio(output.Get(), MF_MT_FRAME_RATE, 30, 1));
     CHECK(MFSetAttributeRatio(output.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1)); CHECK(enc->SetOutputType(0, output.Get(), 0));
     ComPtr<IMFMediaType> input; CHECK(MFCreateMediaType(&input)); CHECK(output->CopyAllItems(input.Get()));
@@ -21,7 +22,7 @@ static HRESULT probe_video(App* app, UINT width, UINT height) {
         }return S_OK;
     };
     double start=now_seconds();
-    for (int f=0;f<45;++f) {
+    for (int f=0;f<(codec==265?15:45);++f) {
         DWORD size=width*height*3/2;ComPtr<IMFMediaBuffer> buf;CHECK(MFCreateMemoryBuffer(size,&buf));BYTE* bytes;CHECK(buf->Lock(&bytes,nullptr,nullptr));
         for(UINT y=0;y<height;++y)for(UINT x=0;x<width;++x)bytes[y*width+x]=BYTE(16+((x+f*12)/80%7)*30);
         memset(bytes+width*height,128,width*height/2);buf->Unlock();CHECK(buf->SetCurrentLength(size));
@@ -51,6 +52,15 @@ extern "C" int am_video_probe(void* p) {
     auto app=static_cast<App*>(p);uint64_t before=app->decoder_surfaces;
     HRESULT hr=probe_video(app,1920,1080);
     if(SUCCEEDED(hr))hr=probe_video(app,1080,1920);
+    if(SUCCEEDED(hr)&&app->hevc_available){
+        // A partial codec-initialization failure must be recoverable, not a null dereference.
+        app->decoder.Reset();app->decoder_ready=false;const uint8_t dummy=0;
+        if(app->submit(&dummy,1,now_seconds())!=MF_E_TRANSFORM_TYPE_NOT_SET)return 0;
+        uint64_t hevc_before=app->decoder_surfaces;hr=probe_video(app,3840,2160,265);
+        if(SUCCEEDED(hr)&&(app->decoder_surfaces-hevc_before<8||app->width!=3840||app->height!=2160))hr=E_FAIL;
+        if(SUCCEEDED(hr))hr=probe_video(app,992,2160,265);
+        if(SUCCEEDED(hr)&&(app->width!=992||app->height!=2160))hr=E_FAIL;
+    }
     if(FAILED(hr)){error_hr("synthetic GPU probe",hr);return 0;}
     if(app->decoder_surfaces-before<60){error_hr("insufficient hardware decoder surfaces",E_FAIL);return 0;}return 1;
 }

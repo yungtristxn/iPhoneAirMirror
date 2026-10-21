@@ -6,10 +6,18 @@ pub fn dimensions(nal: &[u8]) -> Result<(u32, u32)> {
         nal.len() >= 5 && nal.len() <= 16384 && nal[0] & 31 == 7,
         "SPS size/type"
     );
+    ensure!(
+        !nal[1..].windows(3).any(|w| w == [0, 0, 1]),
+        "embedded H.264 start code"
+    );
     let mut rbsp = Vec::with_capacity(nal.len());
     let mut zeros = 0;
-    for &b in &nal[1..] {
+    for (index, &b) in nal[1..].iter().enumerate() {
         if zeros >= 2 && b == 3 {
+            ensure!(
+                nal.get(index + 2).is_some_and(|&next| next <= 3),
+                "invalid H.264 emulation prevention"
+            );
             zeros = 0;
             continue;
         }
@@ -108,6 +116,7 @@ pub fn dimensions(nal: &[u8]) -> Result<(u32, u32)> {
     let wmb = b.ue()? + 1;
     let hmb = b.ue()? + 1;
     ensure!(wmb <= 120 && hmb <= 120, "H.264 coded dimensions");
+    ensure!(wmb * hmb <= 120 * 68, "H.264 coded pixel budget");
     ensure!(b.n(1)? == 1, "interlaced video unsupported");
     b.n(1)?;
     let (mut left, mut right, mut top, mut bottom) = (0, 0, 0, 0);
@@ -149,6 +158,10 @@ pub fn avcc_config(data: &[u8]) -> Result<Vec<u8>> {
             .get(*p..*p + len)
             .ok_or_else(|| anyhow::anyhow!("truncated parameter NAL"))?;
         ensure!(
+            !bytes[1..].windows(3).any(|w| w == [0, 0, 1]),
+            "embedded H.264 parameter start code"
+        );
+        ensure!(
             bytes[0] & 0x80 == 0 && bytes[0] & 31 == kind,
             "parameter NAL type"
         );
@@ -188,6 +201,10 @@ pub fn annex_b(data: &mut [u8]) -> Result<bool> {
         let n = u32::from_be_bytes(header.try_into()?) as usize;
         ensure!(n > 0 && n <= data.len() - p - 4, "NAL length");
         ensure!(data[p + 4] & 0x80 == 0, "forbidden NAL bit");
+        ensure!(
+            !data[p + 5..p + 4 + n].windows(3).any(|w| w == [0, 0, 1]),
+            "embedded H.264 start code"
+        );
         let kind = data[p + 4] & 31;
         ensure!((1..=12).contains(&kind), "unsupported NAL type");
         idr |= kind == 5;
@@ -259,6 +276,7 @@ mod tests {
         assert_eq!(dimensions(&test_sps(120, 68, 4)).unwrap(), (1920, 1080));
         assert!(dimensions(&test_sps(121, 68, 4)).is_err());
         assert!(dimensions(&test_sps(120, 120, 0)).is_err());
+        assert!(dimensions(&test_sps(120, 120, 420)).is_err());
     }
     #[test]
     fn deterministic_mutated_codec_records_do_not_panic() {
@@ -288,5 +306,13 @@ mod tests {
         }
         let mut good = [0, 0, 0, 1, 101];
         assert!(annex_b(&mut good).unwrap());
+    }
+    #[test]
+    fn embedded_annex_b_cannot_hide_sps() {
+        let mut packet = vec![0, 0, 0, 6, 0x41, 0, 0, 1, 0x67, 0];
+        assert!(annex_b(&mut packet).is_err());
+        let mut bad = test_sps(120, 68, 4);
+        bad.extend_from_slice(&[0, 0, 3, 255]);
+        assert!(dimensions(&bad).is_err());
     }
 }

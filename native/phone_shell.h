@@ -32,6 +32,7 @@ public:
     static constexpr UINT WM_SHUTDOWN=WM_APP+1, WM_FORMAT=WM_APP+2, WM_REFRESH=WM_APP+3, WM_SHOW=WM_APP+4, WM_TEST=WM_APP+5;
 private:
     HWND palette_=nullptr,tooltip_=nullptr;
+    HICON small_icon_=nullptr,large_icon_=nullptr;
     HANDLE wake_=nullptr;
     std::thread thread_;
     bool hidden_=false, popup_=false, tracking_=false, dragging_slider_=false, user_sized_=false,hover_pending_=false;
@@ -48,6 +49,7 @@ private:
     RECT fitted_rect(RECT original) const;
     HRESULT test_on_ui_thread(const wchar_t* directory);
     void shape_window();
+    void update_icons();
     void place_palette();
     HRESULT paint_palette(const wchar_t* diagnostic_path=nullptr,float diagnostic_scale=0);
     void toggle_fullscreen();

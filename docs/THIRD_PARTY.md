@@ -44,3 +44,12 @@ One GPU-to-GPU NV12 copy per presented frame retains the paused picture for resi
 without holding a Media Foundation decoder-pool surface. An earlier retained
 decoder-surface implementation stalled at rotation; the private GPU copy avoids
 that ownership conflict. There is no CPU readback or video re-encoding in reception.
+
+## High-resolution video and app icon
+
+HEVC uses the already-installed Windows HEVC Video Extension through Media
+Foundation, with D3D11 hardware decode. No HEVC codec binaries or upstream HEVC
+parser sources are redistributed. The hvc1/hvcC layout was checked against the
+pinned UxPlay interoperability reference above and implemented with explicit
+bounds in Rust. The app icon is original project artwork; its multi-size ICO is
+reproducible using scripts/Generate-Icon.py (Pillow is development-only).

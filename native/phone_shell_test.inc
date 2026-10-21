@@ -9,6 +9,14 @@ HRESULT PhoneShell::test_on_ui_thread(const wchar_t* directory){
     auto hover=[&](){palette_proc(palette_,WM_MOUSEMOVE,0,point(0));palette_proc(palette_,WM_MOUSEHOVER,0,point(0));};
     auto save=[&](const wchar_t* name,float scale=0){return directory&&*directory?paint_palette((std::wstring(directory)+L"/"+name).c_str(),scale):S_OK;};
     auto ratio=[&](){RECT r;GetWindowRect(window,&r);float rim=float(2*rim_pixels(dpi_scale()));return (r.right-r.left-rim)/(r.bottom-r.top-rim);};
+    UI_REQUIRE(FindResourceW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDI_AIRMIRRORLITE),RT_GROUP_ICON));
+    UI_REQUIRE(SendMessageW(window,WM_GETICON,ICON_SMALL,0)&&SendMessageW(window,WM_GETICON,ICON_BIG,0));
+    for(int size:{16,32,48,256}){
+        HICON icon=static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDI_AIRMIRRORLITE),IMAGE_ICON,size,size,LR_DEFAULTCOLOR));
+        UI_REQUIRE(icon);ICONINFO info{};bool ok=GetIconInfo(icon,&info)!=FALSE;BITMAP bitmap{};
+        if(ok)ok=GetObjectW(info.hbmColor,sizeof(bitmap),&bitmap)>0&&bitmap.bmWidth==size&&bitmap.bmHeight==size;
+        if(info.hbmColor)DeleteObject(info.hbmColor);if(info.hbmMask)DeleteObject(info.hbmMask);DestroyIcon(icon);UI_REQUIRE(ok);
+    }
     UI_REQUIRE((GetWindowLongPtrW(window,GWL_STYLE)&WS_CAPTION)==0);
     RECT client,outer;GetClientRect(window,&client);GetWindowRect(window,&outer);
     UI_REQUIRE(client.right==outer.right-outer.left&&client.bottom==outer.bottom-outer.top);

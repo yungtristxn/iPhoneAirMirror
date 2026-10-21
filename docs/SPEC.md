@@ -4,7 +4,10 @@ Confirmed 2026-10-21: the user wants their own minimal, efficient Windows AirPla
 
 ## Scope
 - Native iPhone Control Center > Screen Mirroring over the same local network.
-- H.264 SDR screen video with correct aspect ratio and portrait/landscape changes.
+- H.264 SDR compatibility plus capability-gated HEVC Main/8-bit 4:2:0 SDR
+  mirroring. Default request 3840x2160/30 when native HEVC/GPU support exists;
+  optional 1440/30 and H.264 1080/60. Sender chooses actual picture dimensions.
+  Correct aspect ratio and portrait/landscape changes remain required.
 - Synchronized phone audio through Windows speakers using WASAPI.
 - One active sender; a second sender must not silently replace the current one.
 - One frameless, rounded phone view, fitted to the actual mirrored video aspect.
@@ -17,6 +20,7 @@ Confirmed 2026-10-21: the user wants their own minimal, efficient Windows AirPla
   disconnect and a minimal ready/connecting state; no title bar or fake notch.
   A side chevron hides the controls; hovering the collapsed edge reveals the
   expand chevron. Keyboard access remains available when collapsed.
+- Embedded multi-size application icon, including DPI-appropriate native window icons.
 - Ordinary-user runtime; close fully exits, deregisters discovery and closes sockets.
 - No timer, watermark, subscription, account or cloud relay.
 
@@ -35,7 +39,7 @@ Use bounded protocol/session code and an actual restricted worker for retained r
 5. One active sender is enforced; invalid/unexpected protocol sequences are rejected.
 6. Malformed lengths, truncated records, invalid pairing transitions and excessive bodies do not crash the app or cause unbounded memory growth.
 7. Hardware decode is confirmed on compatible hardware; any fallback is explicitly reported.
-8. CPU/GPU/working-set/frame-rate measurements state device, resolution and workload. 1080p-class/up-to-60-fps is an initial capability target, not a guarantee.
+8. CPU/GPU/working-set/frame-rate measurements state device, resolution and workload. Capability targets are H.264 1080/60 and native HEVC up to 2160/30, subject to sender negotiation and hardware; neither is a sustained-rate guarantee.
 9. Closing the window leaves no receiver processes, listeners or discovery registration.
 10. Build/package/release identity and imported component licenses are recorded.
 

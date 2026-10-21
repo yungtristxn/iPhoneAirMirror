@@ -52,12 +52,20 @@ struct Handle {
     ~Handle() { if (h && h != INVALID_HANDLE_VALUE) CloseHandle(h); }
     Handle() = default; Handle(const Handle&) = delete; Handle& operator=(const Handle&) = delete;
 };
+static HRESULT create_hevc_transform(bool encoder,IMFTransform** transform) {
+    MFT_REGISTER_TYPE_INFO type{MFMediaType_Video,MFVideoFormat_HEVC};IMFActivate** list=nullptr;UINT32 count=0;
+    HRESULT hr=MFTEnumEx(encoder?MFT_CATEGORY_VIDEO_ENCODER:MFT_CATEGORY_VIDEO_DECODER,
+        MFT_ENUM_FLAG_SYNCMFT|MFT_ENUM_FLAG_LOCALMFT|MFT_ENUM_FLAG_SORTANDFILTER,encoder?nullptr:&type,encoder?&type:nullptr,&list,&count);
+    if(FAILED(hr))return hr;hr=MF_E_TOPO_CODEC_NOT_FOUND;
+    for(UINT32 i=0;i<count;++i){if(FAILED(hr))hr=list[i]->ActivateObject(IID_PPV_ARGS(transform));list[i]->Release();}CoTaskMemFree(list);return hr;
+}
 struct VideoFrame { ComPtr<IMFSample> sample; double pts; UINT width; UINT height; };
 struct AudioFrame { std::vector<int16_t> pcm; size_t pos = 0; double pts = 0; };
 #include "phone_compositor.h"
 struct App {
     HWND window = nullptr; Handle wake, audio_event;
     PhoneShell shell;
+    bool hevc_available=false,decoder_ready=false;UINT codec=264;
     PhoneCompositor chrome;
     ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
     ComPtr<IDXGISwapChain1> swap; ComPtr<ID3D11VideoDevice> vdevice; ComPtr<ID3D11VideoContext> vcontext;
@@ -104,6 +112,13 @@ struct App {
         CHECK(chrome.init(device.Get(),factory.Get(),window,swap.Get()));CHECK(chrome.layout(shell));
         factory->MakeWindowAssociation(window, DXGI_MWA_NO_ALT_ENTER);
         UINT token; CHECK(MFCreateDXGIDeviceManager(&token, &manager)); CHECK(manager->ResetDevice(device.Get(), token));
+        {
+            ComPtr<IMFTransform> probe;ComPtr<IMFAttributes> attrs;UINT32 aware=0;
+            D3D11_VIDEO_DECODER_DESC desc{D3D11_DECODER_PROFILE_HEVC_VLD_MAIN,3840,2160,DXGI_FORMAT_NV12};UINT configs=0;
+            hevc_available=SUCCEEDED(create_hevc_transform(false,&probe))&&SUCCEEDED(probe->GetAttributes(&attrs))
+                &&SUCCEEDED(attrs->GetUINT32(MF_SA_D3D11_AWARE,&aware))&&aware
+                &&SUCCEEDED(vdevice->GetVideoDecoderConfigCount(&desc,&configs))&&configs>0;
+        }
         CHECK(init_decoder());
         ComPtr<IMMDeviceEnumerator> en; CHECK(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&en)));
         ComPtr<IMMDevice> endpoint; CHECK(en->GetDefaultAudioEndpoint(eRender, eConsole, &endpoint));
@@ -119,24 +134,32 @@ struct App {
         if (!hidden) shell.show();
         return S_OK;
     }
-    HRESULT init_decoder() {
+    HRESULT init_decoder(UINT next_codec=264,UINT initial_width=0,UINT initial_height=0) {
+        decoder_ready=false;
+        codec=next_codec;
         video.clear(); last_frame.sample.Reset(); paused_texture.Reset(); decoder.Reset(); processor.Reset(); venum.Reset(); width = height = 0;
-        CHECK(CoCreateInstance(CLSID_CMSH264DecoderMFT, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&decoder)));
+        if(codec==265){if(!hevc_available)return MF_E_TOPO_CODEC_NOT_FOUND;CHECK(create_hevc_transform(false,&decoder));}
+        else {CHECK(CoCreateInstance(CLSID_CMSH264DecoderMFT, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&decoder)));}
         ComPtr<IMFAttributes> attributes; CHECK(decoder->GetAttributes(&attributes));
         UINT32 aware = 0; CHECK(attributes->GetUINT32(MF_SA_D3D11_AWARE, &aware)); if (!aware) return E_NOINTERFACE;
         CHECK(attributes->SetUINT32(MF_LOW_LATENCY, TRUE));
         CHECK(decoder->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, reinterpret_cast<ULONG_PTR>(manager.Get())));
-        ComPtr<ICodecAPI> codec; if (SUCCEEDED(decoder.As(&codec))) {
+        ComPtr<ICodecAPI> codec_api; if (SUCCEEDED(decoder.As(&codec_api))) {
             VARIANT v; VariantInit(&v); v.vt = VT_BOOL; v.boolVal = VARIANT_TRUE;
-            codec->SetValue(&CODECAPI_AVLowLatencyMode, &v);
-            v.vt = VT_UI4; v.ulVal = 1920; codec->SetValue(&CODECAPI_AVDecVideoMaxCodedWidth, &v);
-            v.ulVal = 1920; codec->SetValue(&CODECAPI_AVDecVideoMaxCodedHeight, &v);
+            codec_api->SetValue(&CODECAPI_AVLowLatencyMode, &v);
+            v.vt = VT_UI4; v.ulVal = this->codec==265?3840:1920; codec_api->SetValue(&CODECAPI_AVDecVideoMaxCodedWidth, &v);
+            v.ulVal = this->codec==265?2176:1920; codec_api->SetValue(&CODECAPI_AVDecVideoMaxCodedHeight, &v);
         }
         ComPtr<IMFMediaType> type; CHECK(MFCreateMediaType(&type));
-        CHECK(type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video)); CHECK(type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264));
+        CHECK(type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video)); CHECK(type->SetGUID(MF_MT_SUBTYPE, codec==265?MFVideoFormat_HEVC:MFVideoFormat_H264));
+        if(codec==265){
+            if(initial_width<48||initial_width>3840||initial_height<48||initial_height>2160)return E_INVALIDARG;
+            CHECK(type->SetUINT32(MF_MT_MPEG2_PROFILE,1));CHECK(MFSetAttributeSize(type.Get(),MF_MT_FRAME_SIZE,initial_width,initial_height));
+            CHECK(MFSetAttributeRatio(type.Get(),MF_MT_FRAME_RATE,30,1));CHECK(type->SetUINT32(MF_MT_INTERLACE_MODE,MFVideoInterlace_Progressive));
+        }
         CHECK(decoder->SetInputType(0, type.Get(), 0)); CHECK(set_output());
         CHECK(decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0));
-        CHECK(decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)); return S_OK;
+        CHECK(decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0));decoder_ready=true; return S_OK;
     }
     HRESULT set_output() {
         for (DWORD i = 0; i < 32; ++i) {
@@ -144,7 +167,7 @@ struct App {
             GUID sub; CHECK(t->GetGUID(MF_MT_SUBTYPE, &sub));
             if (sub != MFVideoFormat_NV12) continue;
             UINT w = 0, h = 0; MFGetAttributeSize(t.Get(), MF_MT_FRAME_SIZE, &w, &h);
-            if (w > 1920 || h > 1920 || uint64_t(w)*h > 2088960) return MF_E_INVALIDMEDIATYPE;
+            if (codec==265?(w>3840||h>2176||uint64_t(w)*h>3840ull*2176):(w>1920||h>1920||uint64_t(w)*h>2088960)) return MF_E_INVALIDMEDIATYPE;
             video.clear();last_frame.sample.Reset();paused_texture.Reset();
             CHECK(decoder->SetOutputType(0, t.Get(), 0)); width = w; height = h;
             MFVideoArea aperture{}; UINT32 size=0;
@@ -171,16 +194,18 @@ struct App {
             CHECK(b.As(&gpu));
             ComPtr<ID3D11Texture2D> decoded_texture; CHECK(gpu->GetResource(IID_PPV_ARGS(&decoded_texture)));
             D3D11_TEXTURE2D_DESC texture_desc{}; decoded_texture->GetDesc(&texture_desc);
-            if (texture_desc.BindFlags & D3D11_BIND_DECODER) ++decoder_surfaces;
+            if (!(texture_desc.BindFlags & D3D11_BIND_DECODER))return E_NOINTERFACE;
+            ++decoder_surfaces;
             ++gpu_frames; ++decoded;
-            if (video.size() == 8) { video.pop_front(); ++late_frames; }
+            if (video.size() == (codec==265?4:8)) { video.pop_front(); ++late_frames; }
             shell.video_size(width,height);
             video.push_back({s, pts / 1e7, width, height});
         }
         return E_UNEXPECTED;
     }
     HRESULT submit(const uint8_t* bytes, unsigned len, double pts) {
-        if (!bytes || !len || len > 2*1024*1024 || !std::isfinite(pts)) return E_INVALIDARG;
+        if(!decoder_ready||!decoder)return MF_E_TRANSFORM_TYPE_NOT_SET;
+        if (!bytes || !len || len > (codec==265?4u:2u)*1024*1024 || !std::isfinite(pts)) return E_INVALIDARG;
         ComPtr<IMFMediaBuffer> buffer; CHECK(MFCreateMemoryBuffer(len, &buffer)); BYTE* p;
         CHECK(buffer->Lock(&p, nullptr, nullptr)); memcpy(p, bytes, len); buffer->Unlock(); CHECK(buffer->SetCurrentLength(len));
         ComPtr<IMFSample> sample; CHECK(MFCreateSample(&sample)); CHECK(sample->AddBuffer(buffer.Get()));
@@ -355,10 +380,13 @@ int am_pump(void* p, unsigned wait_ms) {
     HRESULT hr = a->tick(); if (FAILED(hr)) { error_hr("media presentation", hr); return -1; }
     if (a->shell.disconnect.exchange(false)) return 2; return 1;
 }
-int am_video(void* p, const uint8_t* data, unsigned len, double pts) {
-    HRESULT hr = static_cast<App*>(p)->submit(data, len, pts); if (FAILED(hr)) { error_hr("H.264 decode", hr); return 0; } return 1;
+int am_hevc_available(void* p) {return static_cast<App*>(p)->hevc_available?1:0;}
+int am_video(void* p, const uint8_t* data, unsigned len, double pts, unsigned codec,unsigned width,unsigned height) {
+    auto app=static_cast<App*>(p);if(codec!=264&&codec!=265)return 0;
+    if(app->codec!=codec||!app->decoder_ready){HRESULT hr=app->init_decoder(codec,width,height);if(FAILED(hr)){error_hr("video codec selection",hr);return 0;}}
+    HRESULT hr = app->submit(data, len, pts); if (FAILED(hr)) { error_hr("video decode", hr); return 0; } return 1;
 }
-int am_video_ready(void* p) { return static_cast<App*>(p)->video.size()<6; }
+int am_video_ready(void* p) {auto a=static_cast<App*>(p);return a->video.size()<(a->codec==265?3:6);}
 int am_audio(void* p, const int16_t* pcm, unsigned samples, double pts) {
     auto a = static_cast<App*>(p);
     if (!pcm || samples > 4096 || samples % 2 || !std::isfinite(pts)) {error_hr("invalid PCM sample",E_INVALIDARG);return 0;}
@@ -385,6 +413,7 @@ const char* am_stats(void* p) {
     text = "adapter=" + a->adapter + " decoded=" + std::to_string(a->decoded) + " dxgi_frames=" + std::to_string(a->gpu_frames)
         + " decoder_surfaces=" + std::to_string(a->decoder_surfaces) + " presented=" + std::to_string(a->presented) + " late=" + std::to_string(a->late_frames)
         + " audio_samples=" + std::to_string(a->audio_frames) + " resolution=" + std::to_string(a->width) + "x" + std::to_string(a->height)
+        + " codec=" + std::to_string(a->codec) + " hevc_available=" + std::to_string(a->hevc_available)
         + " local_volume=" + std::to_string(int(a->shell.volume*100)) + " muted=" + std::to_string(a->shell.muted.load());
     return text.c_str();
 }
