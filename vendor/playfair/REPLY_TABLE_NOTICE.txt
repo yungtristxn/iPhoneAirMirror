@@ -1,0 +1,17 @@
+replies.bin is a 568-byte table extracted without changes from reply_message in:
+https://github.com/FDH2/UxPlay/blob/15a6b87172eca38b0df4e615fbf1bba108734dde/lib/fairplay_playfair.c
+
+Copyright (C) 2018 Juho Vaha-Herttua
+
+This library is free software; you can redistribute it and/or modify it under
+the terms of the GNU Lesser General Public License as published by the Free
+Software Foundation; either version 2.1 of the License, or (at your option)
+any later version.
+
+This library is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License for details.
+
+Only the fixed reply bytes are used. The source's unchecked mode-indexing
+function is not compiled or called. Rust verifies exact lengths, stages,
+versions, and mode range before accessing the table.
