@@ -97,12 +97,28 @@ listener/discovery and muted=1 are verified. A bounded DNS-SD query resolves
 AirMirrorLite HAP to the expected host and selected LAN IPv4. Launch evidence and
 candidate manifest are in local/hap-verification/.
 
-Pending human check: select AirMirrorLite HAP from a silent Settings screen and
-report whether picture appears and selection-to-picture wait is shorter. No
-phone connection has reached this candidate yet. Do not promote it over the
-working legacy receiver or claim live screen/audio compatibility or speedup from
-the automated checks. The full working F92829... build and prior friend ZIP stay
+First real iPhone check: the user reports picture appears with a similar wait.
+The exact2FF3927... log verifies HAP M1 at40030.144, verified M4 and control
+encryption at40030.185, an authenticated event connection, and successful HEVC
+994x2160 screen decoding/presentation. Accepted TCP40030.135 -> first
+picture40030.396 is261 ms. SRP work totals7.2 ms; the M1/M4 exchange including
+phone/network time is41 ms. There is no measured phone-tap timestamp.
+
+The legacy-pairing hypothesis did not predict the user's perceived improvement:
+modern pairing works but has not demonstrated a startup speedup. A follow-up
+metadata trace and five reconnects confirm prompt TCP replies and four first-frame
+intervals of177-270 ms; one video transport waited about one second. STARTUP_TRACE.md
+records the measured stages, unresolved delay and limited DNS evidence. A small
+first-frame composition attachment gap was fixed and silently GPU-tested; it is
+not claimed to explain five seconds. Current audio_samples=0 and muted=1; live HAP audio
+and A/V sync remain untested. The working F92829... build and prior friend ZIP stay
 unchanged; no new candidate has been uploaded or shared.
+
+The subsequent graphics-only correction builds as C10FEA1... and attaches the
+first successful video surface in the same dispatch before counting it. Its
+silent native GPU/first-frame/busy/resume checks pass. The device-tested2FF3927...
+executable is retained separately; do not label the new binary a measured
+startup speedup. See STARTUP_TRACE.md for exact hashes and evidence boundaries.
 
 Build with CARGO_HOME=work/cargo:
 ```

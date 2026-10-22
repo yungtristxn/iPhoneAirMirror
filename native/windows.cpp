@@ -573,7 +573,10 @@ struct App {
         if(replace_cache){spare_paused_texture=paused_texture;spare_paused_sample=last_frame.sample;paused_texture=std::move(next_paused);}
         last_frame={std::move(next_sample),0,visible_width,visible_height,src,color,rotation,frame_serial};
         shell.video_size(display_width,display_height);presented_rotation=rotation;
-        if(shell.screen_blank){CHECK(chrome.set_screen_visibility(false,true));shell.screen_blank=false;shell.chrome_dirty=true;}
+        // Initial presentation must attach in this dispatch too. Otherwise the
+        // counter can advance one wake/dispatch before the composition commits.
+        CHECK(chrome.set_screen_visibility(false,true));
+        if(shell.screen_blank){shell.screen_blank=false;shell.chrome_dirty=true;}
         if(presented_width!=display_width||presented_height!=display_height){presented_width=display_width;presented_height=display_height;++presented_shape_changes;}
         ++presented; return S_OK;
     }

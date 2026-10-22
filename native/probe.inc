@@ -147,6 +147,12 @@ static HRESULT probe_video(App* app,VideoProbeContext& probe, UINT width, UINT h
             }
         }return S_OK;
     };
+    auto tick_attached=[&]() -> HRESULT {
+        const auto before=app->presented;CHECK(app->tick());
+        if(app->presented>before&&(!app->chrome.video_attached||app->chrome.masked||app->shell.screen_blank)){
+            error_hr("synthetic presentation counted before video attachment",E_FAIL);return E_FAIL;
+        }return S_OK;
+    };
     double start=now_seconds();
     for (int f=0;f<(codec==265?15:45);++f) {
         DWORD size=width*height*3/2;ComPtr<IMFMediaBuffer> buf;CHECK(MFCreateMemoryBuffer(size,&buf));BYTE* bytes;CHECK(buf->Lock(&bytes,nullptr,nullptr));
@@ -154,10 +160,10 @@ static HRESULT probe_video(App* app,VideoProbeContext& probe, UINT width, UINT h
         memset(bytes+width*height,128,width*height/2);buf->Unlock();CHECK(buf->SetCurrentLength(size));
         ComPtr<IMFSample> sample;CHECK(MFCreateSample(&sample));CHECK(sample->AddBuffer(buf.Get()));CHECK(sample->SetSampleTime(LONGLONG((start+0.12+double(f)/30)*1e7)));CHECK(sample->SetSampleDuration(333333));
         HRESULT hr=enc->ProcessInput(0,sample.Get(),0);if(hr==MF_E_NOTACCEPTING){CHECK(drain());hr=enc->ProcessInput(0,sample.Get(),0);}CHECK(hr);CHECK(drain());
-        while(now_seconds()<start+double(f+1)/30){CHECK(app->tick());Sleep(2);}
+        while(now_seconds()<start+double(f+1)/30){CHECK(tick_attached());Sleep(2);}
     }
     CHECK(enc->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN,0));CHECK(drain());
-    double until=now_seconds()+0.4;while(now_seconds()<until){CHECK(app->tick());Sleep(2);}
+    double until=now_seconds()+0.4;while(now_seconds()<until){CHECK(tick_attached());Sleep(2);}
     const uint64_t inputs=probe.validated-inputs_before,outputs=app->decoded-decoded_before;
     const unsigned pending_after=app->decode_pending.active_count;
     fprintf(stderr,"synthetic decoder accounting codec=%u size=%ux%u rotation=%u continued=%u inputs=%llu outputs=%llu pending_before=%u pending_after=%u peak=%u\n",
@@ -434,13 +440,18 @@ static HRESULT probe_interactive_video(App* app) {
 static HRESULT probe_first_present_commit(App* app){
     if(!app->last_frame.sample)return E_FAIL;auto sample=app->last_frame.sample;
     const UINT width=app->last_frame.width,height=app->last_frame.height;app->shell.reset_video();
+    CHECK(app->chrome.set_screen_visibility(false,false)); // Same detached baseline as am_reset.
     if(!app->video_slot_reserved){if(WaitForSingleObject(app->video_event.h,1000)!=WAIT_OBJECT_0)return E_FAIL;app->video_slot_reserved=true;}
     const auto before=app->presented;
     HRESULT busy=app->draw(sample.Get(),(width/2)&~1u,height,nullptr,nullptr,nullptr,true);
-    if(busy!=S_FALSE||app->shell.has_video||app->shell.status==2||app->presented!=before)return E_FAIL;
+    if(busy!=S_FALSE||app->shell.has_video||app->shell.status==2||app->presented!=before
+        ||app->chrome.video_attached||app->chrome.masked)return E_FAIL;
     ULONGLONG deadline=GetTickCount64()+1000;
     do {CHECK(app->draw(sample.Get(),width,height));if(app->presented>before)break;Sleep(2);}while(GetTickCount64()<deadline);
-    if(app->presented!=before+1||!app->shell.has_video)return E_FAIL;
+    // Inspect before another tick/layout: the first successful draw itself must
+    // commit attachment. Eventual attachment would miss the one-dispatch gap.
+    if(app->presented!=before+1||!app->shell.has_video||!app->chrome.video_attached
+        ||app->chrome.masked||app->shell.screen_blank)return E_FAIL;
     do {RECT r{};GetClientRect(app->window,&r);int rim=PhoneShell::rim_pixels(app->shell.dpi_scale());
         if(r.bottom>2*rim&&std::abs(double(r.right-2*rim)/(r.bottom-2*rim)-double(width)/height)<.02)return S_OK;
         if(am_pump(app,10)<0)return E_FAIL;

@@ -165,3 +165,8 @@ verified pairing mode is a possible future protocol project requiring separate
 research, implementation and physical validation; it is not an established
 small toggle or a guaranteed fix. Extra decoder prewarming or weaker timeout
 checks would not account for the observed seconds before connection establishment.
+
+Follow-up: the separately authorized HAP implementation now works with the real
+iPhone, but the user reports a similar wait. That does not confirm the earlier
+legacy-pairing attribution. See VERIFIED_PAIRING.md and STARTUP_TRACE.md for
+actual handshake/frame timings, five reconnections and the remaining uncertainty.

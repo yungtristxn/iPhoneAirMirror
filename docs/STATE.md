@@ -2,7 +2,7 @@
 
 Updated: 2026-10-22
 
-## Verified newer pairing implementation in progress
+## Verified HAP screen works; startup improvement remains unproven
 - User authorized a separate modern verified-pairing candidate. Active branch is
   codex/verified-pairing from cc8079c; implementation6438855. Original F92829... executable remains in
   dist/AirMirrorLite-ffmpeg-candidate/ and an additional exact copy is preserved in
@@ -13,19 +13,31 @@ Updated: 2026-10-22
 - 139 Rust tests in HAP/legacy modes, strict Clippy/formatting and release build
   pass. Invalid HAP audio datagrams are discarded before admission; key-bearing
   decrypted request/plist buffers are wiped. Independent network checks and silent
-  GPU/native validation pass, with zero audio submitted. HAP EXE SHA-256:
+  GPU/native validation pass, with zero audio submitted. Device-tested HAP EXE SHA-256:
   `2FF3927A51B69C9D91875AF1D654352FB1EF1734F7B36A05CABCA0960E9C70A0`.
   Evidence: local/hap-pairing/20261022T202500438422Z/result.json and
-  local/hap-verification/media-result.json. No physical
-  HAP phone/sound acceptance yet. VERIFIED_PAIRING.md records pins, boundaries,
+  local/hap-verification/media-result.json. VERIFIED_PAIRING.md records pins, boundaries,
   commands and the public-setup-code versus identity-allowlist distinction.
 - Additional independent encrypted AAC-ELD/LC SETUP, worker readiness, partial
   teardown/reconfiguration and wrong/missing-key rejection pass with no RTP/PCM
   sent and zero output counters: local/hap-pairing/20261022T203352735374Z/result.json.
-- Runnable build: dist/AirMirrorLite-hap-candidate/AirMirrorLite.exe, open with
-  --mute. DNS-SD target/listener/mute verified; prior receiver hashes intact.
-  Phone question is pending: select AirMirrorLite HAP from Settings, check picture
-  and perceived selection delay. No physical connection attempt observed yet.
+- Runnable build: dist/AirMirrorLite-hap-candidate/AirMirrorLite.exe. Phone checks
+  ran muted; DNS-SD target/listener/mute were verified and fallback hashes intact.
+  User confirms HAP picture appears but selection delay feels similar. Log proves
+  verified M1/M4, encrypted control/events and HEVC994x2160 presentation; accepted
+  TCP to picture261 ms, pairing exchange41 ms. Live audio/sync remains untested.
+  Prior legacy-pairing diagnosis is unconfirmed.
+- Five reconnects with bounded DNS/TCP header metadata: SYN replies0.111-0.193 ms;
+  accepted TCP -> first submitted frame177/178/211/270 ms, plus one1191 ms attempt
+  that waited1009 ms for the separate video connection. User still reports~5s.
+  Trace does not establish missing-AAAA/DNS causality or measure the phone tap/
+  physical scanout. STARTUP_TRACE.md records scope, evidence and parser limitations.
+- Small renderer correction attaches/commits the first successful video frame in
+  the same dispatch before counting it. Native GPU tests pass190 surfaces with no
+  audio. New build SHA-256:
+  `C10FEA1AB69E58C1F2477062580CE652D2525878E5C0C461DC6B6EDB41D34E76`.
+  This is not claimed to fix the full delay. The prior2FF3927... phone-checked build
+  is preserved before replacement. No additional phone check is requested now.
 
 ## Remaining startup delay investigated
 - User reports approximately five seconds after selection. Latest actual iPhone
@@ -120,6 +132,7 @@ cargo build --release --locked --offline --features ffmpeg-aac,display-update-ex
 ./scripts/Test-Media.ps1 -Executable work/ffmpeg-receiver-target/release/airmirror-lite.exe
 python -B scripts/Test-ControlLifecycle.py --exe work/ffmpeg-receiver-target/release/airmirror-lite.exe
 ```
-The prior legacy Photos/lock checks passed. The new HAP phone check above is pending.
+The HAP screen and reconnect checks above passed; the larger reported delay is
+unresolved. No further phone action is pending. Real HAP audio/A/V sync is untested.
 Keep future tests silent and avoid Computer Use. Do not run --self-test or -Audio
 without a new explicit user request for audible testing.
