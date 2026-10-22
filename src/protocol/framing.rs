@@ -5,6 +5,7 @@ use std::{
     net::TcpStream,
     time::{Duration, Instant},
 };
+use zeroize::{Zeroize, Zeroizing};
 pub const MAX_BODY: usize = 64 * 1024;
 pub const MAX_HEADER: usize = 8192;
 /// Winsock accept() inherits nonblocking mode from our polling listeners.
@@ -24,6 +25,11 @@ pub struct Request {
     pub version: String,
     pub headers: BTreeMap<String, String>,
     pub body: Vec<u8>,
+}
+impl Drop for Request {
+    fn drop(&mut self) {
+        self.body.zeroize();
+    }
 }
 pub fn parse_header(data: &[u8]) -> Result<(Request, usize)> {
     ensure!(
@@ -97,7 +103,7 @@ pub fn parse_header(data: &[u8]) -> Result<(Request, usize)> {
     ))
 }
 pub fn read_request(
-    stream: &mut TcpStream,
+    stream: &mut impl Read,
     pending: &mut Vec<u8>,
     cancelled: impl Fn() -> bool,
     idle: Duration,
@@ -120,12 +126,13 @@ pub fn read_request(
                 start.unwrap_or_else(Instant::now),
             )?;
             req.body = pending[end..end + len].to_vec();
-            pending.drain(..end + len);
+            let remaining = compact_pending(pending, end + len)?;
+            pending.truncate(remaining);
             return Ok(Some(req));
         }
         ensure!(pending.len() < MAX_HEADER, "header too large");
-        let mut block = [0u8; 2048];
-        match stream.read(&mut block) {
+        let mut block = Zeroizing::new([0u8; 2048]);
+        match stream.read(&mut block[..]) {
             Ok(0) if pending.is_empty() => return Ok(None),
             Ok(0) => bail!("truncated request"),
             Ok(n) => {
@@ -144,8 +151,18 @@ pub fn read_request(
         }
     }
 }
+/// Clear the consumed plaintext and the old tail before shortening the buffer.
+/// The caller owns the remaining pipelined bytes and the returned request copy.
+fn compact_pending(pending: &mut [u8], consumed: usize) -> Result<usize> {
+    ensure!(consumed <= pending.len(), "request compaction boundary");
+    let remaining = pending.len() - consumed;
+    pending[..consumed].zeroize();
+    pending.copy_within(consumed.., 0);
+    pending[remaining..].zeroize();
+    Ok(remaining)
+}
 fn read_until(
-    stream: &mut TcpStream,
+    stream: &mut impl Read,
     pending: &mut Vec<u8>,
     len: usize,
     cancelled: &impl Fn() -> bool,
@@ -156,7 +173,7 @@ fn read_until(
             !cancelled() && start.elapsed() < Duration::from_secs(5),
             "body deadline"
         );
-        let mut block = [0u8; 4096];
+        let mut block = Zeroizing::new([0u8; 4096]);
         let max = block.len().min(len - pending.len());
         match stream.read(&mut block[..max]) {
             Ok(0) => bail!("truncated body"),
@@ -217,5 +234,40 @@ mod tests {
                 .1,
             164
         );
+    }
+
+    #[test]
+    fn compaction_preserves_overlap_and_wipes_every_retired_byte() {
+        let original = b"consumed-body-and-next-request";
+        for consumed in [0, 1, 4, 20, original.len()] {
+            let mut pending = original.to_vec();
+            let remaining = compact_pending(&mut pending, consumed).unwrap();
+            assert_eq!(&pending[..remaining], &original[consumed..]);
+            // Check the retired region before truncate makes it inaccessible.
+            assert!(pending[remaining..].iter().all(|&byte| byte == 0));
+        }
+        let mut pending = original.to_vec();
+        assert!(compact_pending(&mut pending, original.len() + 1).is_err());
+        assert_eq!(pending, original);
+    }
+
+    #[test]
+    fn pipelined_requests_keep_owned_bodies_after_pending_is_cleared() {
+        let first = b"POST /pair-setup RTSP/1.0\r\nContent-Length: 6\r\n\r\nsecret";
+        let second = b"POST /info RTSP/1.0\r\nContent-Length: 4\r\n\r\nnext";
+        let mut input = std::io::Cursor::new([first.as_slice(), second.as_slice()].concat());
+        let mut pending = Vec::new();
+        let first = read_request(&mut input, &mut pending, || false, Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.body, b"secret");
+        assert_eq!(pending, second);
+        let second = read_request(&mut input, &mut pending, || false, Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        assert!(pending.is_empty());
+        assert_eq!(first.body, b"secret");
+        assert_eq!(second.body, b"next");
+        assert_eq!(second.target, "/info");
     }
 }

@@ -1,14 +1,15 @@
-//! Optional display updates on the legacy plaintext reverse RTSP event channel.
-//! This module neither negotiates HAP nor falls back from encrypted input.
+//! Optional display updates on the explicitly negotiated reverse RTSP channel.
+//! Verified HAP sessions use authenticated records; there is no plaintext fallback.
 //! Wire references: omarroth/doubletake 5e2f1cbe3e1070bcefec8e549c7baf884727bc00,
 //! internal/airplay/{event_channel,receiver_media}.go; the observed sender command
 //! is a binary plist with type=updateDisplayInfo and one complete display dict.
+use super::secure::{ControlStream, RecordKeys};
 use ::plist::Value;
 use anyhow::{Result, bail, ensure};
 use std::{
     collections::BTreeMap,
     io::{self, Read, Write},
-    net::{IpAddr, TcpListener, TcpStream},
+    net::{IpAddr, TcpListener},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -146,8 +147,8 @@ impl Schedule {
 }
 
 /// Optional failures are logged once and absorbed. They never cancel media.
-/// Only call for the existing legacy pairing mode: no encrypted-mode detection,
-/// crypto negotiation, plaintext retry, unsolicited baseline or command pipeline.
+/// Legacy pairing wrapper. No encrypted-mode detection, plaintext retry,
+/// unsolicited baseline or command pipeline.
 pub fn run(
     listener: TcpListener,
     peer: IpAddr,
@@ -167,6 +168,42 @@ pub fn run(
     )
 }
 
+/// Keys must come from this session's completed pairing, never from input sniffing.
+pub fn run_with_keys(
+    listener: TcpListener,
+    peer: IpAddr,
+    stop: Arc<AtomicBool>,
+    updates: Arc<DisplayUpdates>,
+    base_display: Value,
+    keys: Option<RecordKeys>,
+    log: impl Fn(&str),
+) -> Result<()> {
+    if keys.is_none() {
+        return run(listener, peer, stop, updates, base_display, log);
+    }
+    report_optional(
+        run_channel(
+            listener,
+            peer,
+            &stop,
+            &updates,
+            &base_display,
+            &log,
+            ChannelOptions {
+                policy: Policy::default(),
+                keys,
+            },
+        ),
+        &stop,
+        &log,
+    )
+}
+
+struct ChannelOptions {
+    policy: Policy,
+    keys: Option<RecordKeys>,
+}
+
 fn run_with_policy(
     listener: TcpListener,
     peer: IpAddr,
@@ -176,7 +213,22 @@ fn run_with_policy(
     log: impl Fn(&str),
     policy: Policy,
 ) -> Result<()> {
-    let result = run_channel(listener, peer, &stop, &updates, &base_display, &log, policy);
+    report_optional(
+        run_channel(
+            listener,
+            peer,
+            &stop,
+            &updates,
+            &base_display,
+            &log,
+            ChannelOptions { policy, keys: None },
+        ),
+        &stop,
+        &log,
+    )
+}
+
+fn report_optional(result: Result<()>, stop: &AtomicBool, log: &impl Fn(&str)) -> Result<()> {
     if let Err(error) = result
         && !stop.load(Ordering::Acquire)
     {
@@ -194,13 +246,14 @@ fn run_channel(
     updates: &DisplayUpdates,
     base_display: &Value,
     log: &impl Fn(&str),
-    policy: Policy,
+    options: ChannelOptions,
 ) -> Result<()> {
+    let ChannelOptions { policy, keys } = options;
     validate_display(base_display)?;
     listener.set_nonblocking(true)?;
     let accepted_by = Instant::now() + policy.connect_timeout;
     let mut rejected = 0;
-    let mut stream = loop {
+    let stream = loop {
         if stop.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -222,6 +275,18 @@ fn run_channel(
     };
     // Only the negotiated peer's one connection carries commands.
     drop(listener);
+    // Restore blocking mode inherited from Winsock accept() before wrapping.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(IO_POLL))?;
+    stream.set_write_timeout(Some(IO_POLL))?;
+    stream.set_nodelay(true)?;
+    let mut stream = if let Some(keys) = keys {
+        log("display-update event channel connected (authenticated records)");
+        ControlStream::new_encrypted(stream, keys)
+    } else {
+        log("display-update event channel connected (legacy plaintext)");
+        ControlStream::new(stream)
+    };
     let result = run_updates(&mut stream, stop, updates, base_display, log, policy);
     if let Err(error) = result
         && !stop.load(Ordering::Acquire)
@@ -243,19 +308,13 @@ fn run_channel(
 }
 
 fn run_updates(
-    stream: &mut TcpStream,
+    stream: &mut (impl Read + Write),
     stop: &AtomicBool,
     updates: &DisplayUpdates,
     base_display: &Value,
     log: &impl Fn(&str),
     policy: Policy,
 ) -> Result<()> {
-    // Restore blocking mode inherited from Winsock accept().
-    stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(IO_POLL))?;
-    stream.set_write_timeout(Some(IO_POLL))?;
-    stream.set_nodelay(true)?;
-    log("display-update event channel connected (legacy plaintext)");
     let mut schedule = Schedule {
         applied: updates.initial,
         sent_at: None,
@@ -380,7 +439,7 @@ fn transient(error: &io::Error) -> bool {
     )
 }
 fn write_command(
-    stream: &mut TcpStream,
+    stream: &mut impl Write,
     mut bytes: &[u8],
     stop: &AtomicBool,
     deadline: Instant,
@@ -397,7 +456,17 @@ fn write_command(
             Err(error) => return Err(error.into()),
         }
     }
-    Ok(true)
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        ensure!(Instant::now() < deadline, "event command flush deadline");
+        match stream.flush() {
+            Ok(()) => return Ok(true),
+            Err(error) if transient(&error) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 struct ReplyHeader {
@@ -539,7 +608,7 @@ fn response_body(body: &[u8]) -> Result<Reply> {
     Ok(Reply::Accepted)
 }
 fn read_response(
-    stream: &mut TcpStream,
+    stream: &mut impl Read,
     cseq: u32,
     stop: &AtomicBool,
     deadline: Instant,
@@ -589,7 +658,10 @@ fn read_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{net::SocketAddr, thread::JoinHandle};
+    use std::{
+        net::{SocketAddr, TcpStream},
+        thread::JoinHandle,
+    };
 
     fn base() -> Value {
         super::super::plist::dict([

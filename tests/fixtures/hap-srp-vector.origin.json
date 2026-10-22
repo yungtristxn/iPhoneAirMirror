@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "fixture": "hap-srp-vector.json",
+  "upstream_repository": "https://github.com/apple/HomeKitADK",
+  "upstream_commit": "fb201f98f5fdc7fef6a455054f08b59cca5d1ec8",
+  "upstream_file": "Tests/HAPCryptoTest.c",
+  "source_url": "https://github.com/apple/HomeKitADK/blob/fb201f98f5fdc7fef6a455054f08b59cca5d1ec8/Tests/HAPCryptoTest.c",
+  "source_lines": {
+    "exchange": "165-316",
+    "padding_regression": "469-476"
+  },
+  "copyright": "Copyright (c) 2015-2019 The HomeKit ADK Contributors",
+  "license": "Apache-2.0",
+  "license_url": "https://github.com/apple/HomeKitADK/blob/fb201f98f5fdc7fef6a455054f08b59cca5d1ec8/LICENSE.md",
+  "authors_url": "https://github.com/apple/HomeKitADK/blob/fb201f98f5fdc7fef6a455054f08b59cca5d1ec8/CONTRIBUTORS.md",
+  "conversion": "Only public numeric test values and the published padding-regression input were transcribed into JSON; no implementation code was imported. Hex case/whitespace normalized; source arrays otherwise unchanged.",
+  "group_source": "https://www.rfc-editor.org/rfc/rfc5054.html#appendix-A",
+  "client_private_source": "https://github.com/wolfSSL/wolfssl/issues/18#issuecomment-83941582",
+  "client_private_note": "The public client exponent is in the original vector cited by Apple at line165; Apple itself stores A but omits a.",
+  "symbol_mapping": {
+    "salt_hex": "srp_salt",
+    "server_private_hex": "srp_b",
+    "verifier_hex": "srp_v",
+    "client_public_hex": "srp_A",
+    "server_public_hex": "srp_B",
+    "scrambling_u_hex": "srp_u",
+    "premaster_secret_hex": "srp_S",
+    "session_key_hex": "srp_k",
+    "client_proof_hex": "srp_m1",
+    "server_proof_hex": "srp_m2"
+  },
+  "padding_contract_source": "https://github.com/apple/HomeKitADK/blob/fb201f98f5fdc7fef6a455054f08b59cca5d1ec8/PAL/Crypto/OpenSSL/HAPOpenSSL.c",
+  "padding_contract": {
+    "scrambling_u": "SHA512 of fixed-width A || fixed-width B",
+    "session_key": "SHA512 of S after removing leading zero bytes",
+    "client_proof": "A and B omit leading zero bytes in the M1 hash; salt remains its full 16 bytes",
+    "server_proof": "M2 hashes the full 384-byte A, followed by the 64-byte M1 and K"
+  },
+  "evidence_limit": "Crypto known answers and encoding reference only; not an AirPlay transient wire trace, independent wire interoperability or physical iPhone acceptance.",
+  "derived_vectors": {
+    "status": "Project-generated public test-only vectors; not published Apple known answers.",
+    "method": "Same RFC5054 modulus, generator, salt, username and password as the published vector. Leading-zero A uses a=1 and original b. Leading-zero B searches b0+i with original a. Leading-zero S searches a0+i with original b. First match within i=1..4096; HAP encoding follows the pinned Apple implementation. Both client and server Python pow/hashlib formulas must agree, and all original Apple fields are checked first.",
+    "expected_padding_verifier": "Expected bytes derived separately for the exact upstream little-endian test_bn_pad input."
+  }
+}

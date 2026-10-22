@@ -6,6 +6,12 @@ A minimal Windows receiver for iPhone AirPlay **screen mirroring with synchroniz
 
 ## Run
 
+The newer verified-pairing experiment is documented in
+[VERIFIED_PAIRING.md](docs/VERIFIED_PAIRING.md). It builds separately with
+`ffmpeg-aac,hap-pairing-experiment` in `work/hap-receiver-target` and advertises
+**AirMirrorLite HAP**. It does not replace the verified legacy build. Phone
+interoperability is still under validation; use the original receiver as fallback.
+
 The opt-in FFmpeg receiver candidate and silent decoder checks are documented in
 [DECODER_EXPERIMENT.md](docs/DECODER_EXPERIMENT.md). Build/package it with
 `./scripts/Package.ps1 -FfmpegCandidate`; its executable is

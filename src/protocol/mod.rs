@@ -2,10 +2,14 @@ pub mod clock;
 pub mod events;
 pub mod framing;
 pub mod h264;
+mod hap;
+mod hap_srp;
 pub mod hevc;
+mod media_crypto;
 pub mod orientation;
 pub mod pairing;
 pub mod plist;
+pub mod secure;
 mod streams;
 use crate::runtime::{ReceiverStatus, Shared};
 use ::plist::Value;
@@ -17,12 +21,42 @@ use std::{
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
+use zeroize::{Zeroize, Zeroizing};
+
+// Authenticated SETUP may contain a plaintext media key (shk). Keep copies in
+// the bounded plist tree scoped and wipe their byte storage on every return path.
+struct SetupValue(Value);
+impl std::ops::Deref for SetupValue {
+    type Target = Value;
+    fn deref(&self) -> &Value {
+        &self.0
+    }
+}
+impl Drop for SetupValue {
+    fn drop(&mut self) {
+        wipe_setup_data(&mut self.0);
+    }
+}
+fn wipe_setup_data(value: &mut Value) {
+    match value {
+        Value::Data(bytes) => bytes.zeroize(),
+        Value::Array(values) => values.iter_mut().for_each(wipe_setup_data),
+        Value::Dictionary(values) => values.values_mut().for_each(wipe_setup_data),
+        _ => {}
+    }
+}
 // Screen mirroring, FairPlay, AAC, legacy pairing and unified /info. Excludes
 // photo, HLS/URL playback, ALAC/PCM, metadata, remote-control and AP2 buffering.
 // Bit 8 + displays.rotation is an opt-in interoperability experiment, not a
 // proven Photos orientation fix. Pinned UxPlay records the same AppleTV pairing
 // but deliberately leaves it disabled because its behavior is uncertain.
 pub const ROTATABLE_DISPLAY: bool = cfg!(feature = "rotation-advertisement-experiment");
+pub const HAP_ENABLED: bool = cfg!(feature = "hap-pairing-experiment");
+pub const RECEIVER_NAME: &str = if HAP_ENABLED {
+    "AirMirrorLite HAP"
+} else {
+    "AirMirrorLite"
+};
 pub const FEATURES: u64 = (1 << 2)
     | (1 << 6)
     | (1 << 7)
@@ -32,7 +66,7 @@ pub const FEATURES: u64 = (1 << 2)
     | (1 << 14)
     | (1 << 20)
     | (1 << 21)
-    | (1 << 27)
+    | if HAP_ENABLED { 1u64 << 48 } else { 1 << 27 }
     | (1 << 28)
     | (1 << 30)
     | if ROTATABLE_DISPLAY { 1 << 8 } else { 0 };
@@ -99,6 +133,7 @@ struct Session {
     shared: Arc<Shared>,
     streams: Option<streams::Streams>,
     pair: pairing::Pairing,
+    hap: hap::Pairing,
     fp: pairing::FairPlay,
     claimed: bool,
 }
@@ -125,15 +160,13 @@ impl Session {
     }
     fn setup(&mut self, body: &[u8], peer: IpAddr, local: IpAddr) -> Result<Vec<u8>> {
         self.claim()?;
-        let shared_key = *self.pair.shared()?;
-        let value = plist::decode(body)?;
+        self.require_verified()?;
+        let value = SetupValue(plist::decode(body)?);
         ensure!(value.as_dictionary().is_some(), "SETUP dictionary");
         let mut response = ::plist::Dictionary::new();
 
-        if get(&value, "ekey").is_ok() {
+        if get(&value, "ekey").is_ok() || (HAP_ENABLED && self.streams.is_none()) {
             ensure!(self.streams.is_none(), "duplicate encrypted SETUP");
-            let encrypted = bytes::<72>(&value, "ekey")?;
-            let iv = bytes::<16>(&value, "eiv")?;
             if let Ok(timing) = get(&value, "timingProtocol") {
                 ensure!(
                     timing.as_string() == Some("NTP"),
@@ -144,25 +177,39 @@ impl Session {
             ensure!(timing > 0, "NTP timing port required");
             // Complete pairing/FairPlay and encrypted-field checks before taking
             // the pristine startup worker reserved for the first session.
-            let fairplay = self.fp.message()?;
-            let worker_started = Instant::now();
-            let (mut worker, prepared) = self.shared.take_key_worker()?;
-            let worker_acquire_ms = worker_started.elapsed().as_secs_f64() * 1000.0;
-            let decrypt_started = Instant::now();
-            let key = worker.decrypt_key(fairplay, &encrypted)?;
-            let decrypt_ms = decrypt_started.elapsed().as_secs_f64() * 1000.0;
-            let key = pairing::hash16(&key, &shared_key);
+            let security = if HAP_ENABLED {
+                // Screen/audio authentication keys derive from the mutually
+                // verified HAP session or an explicit authenticated stream key.
+                // A supplied FairPlay setup remains validated, never a fallback.
+                if get(&value, "ekey").is_ok() {
+                    let encrypted = bytes::<72>(&value, "ekey")?;
+                    let _iv = bytes::<16>(&value, "eiv")?;
+                    let fairplay = self.fp.message()?;
+                    let (mut worker, _) = self.shared.take_key_worker()?;
+                    let _key = zeroize::Zeroizing::new(worker.decrypt_key(fairplay, &encrypted)?);
+                }
+                media_crypto::Security::Hap(self.hap.verified()?.clone())
+            } else {
+                let encrypted = bytes::<72>(&value, "ekey")?;
+                let iv = bytes::<16>(&value, "eiv")?;
+                let fairplay = self.fp.message()?;
+                let worker_started = Instant::now();
+                let (mut worker, prepared) = self.shared.take_key_worker()?;
+                let worker_acquire_ms = worker_started.elapsed().as_secs_f64() * 1000.0;
+                let decrypt_started = Instant::now();
+                let raw_key = zeroize::Zeroizing::new(worker.decrypt_key(fairplay, &encrypted)?);
+                let decrypt_ms = decrypt_started.elapsed().as_secs_f64() * 1000.0;
+                let key = pairing::hash16(raw_key.as_ref(), self.pair.shared()?);
+                let shutdown_started = Instant::now();
+                drop(worker);
+                self.shared.log(&format!("SETUP key worker prepared={prepared} acquire_ms={worker_acquire_ms:.1} decrypt_ms={decrypt_ms:.1} shutdown_ms={:.1}", shutdown_started.elapsed().as_secs_f64() * 1000.0));
+                media_crypto::Security::legacy(key, iv)
+            };
             let streams =
-                streams::Streams::new(peer, local, timing, key, iv, self.shared.clone(), self.id)?;
+                streams::Streams::new(peer, local, timing, security, self.shared.clone(), self.id)?;
             response.insert("timingPort".into(), number(streams.timing_port.into()));
             response.insert("eventPort".into(), number(streams.event_port.into()));
             self.streams = Some(streams);
-            let shutdown_started = Instant::now();
-            drop(worker);
-            self.shared.log(&format!(
-                "SETUP key worker prepared={prepared} acquire_ms={worker_acquire_ms:.1} decrypt_ms={decrypt_ms:.1} shutdown_ms={:.1}",
-                shutdown_started.elapsed().as_secs_f64() * 1000.0
-            ));
         }
 
         if let Ok(requested) = get(&value, "streams") {
@@ -197,7 +244,18 @@ impl Session {
                             "only stereo 44100Hz AAC-ELD/AAC-LC negotiated"
                         );
                         let control = u16::try_from(num(stream, "controlPort")?)?;
-                        let (data_port, control_port) = media.start_audio(codec, spf, control)?;
+                        let stream_id = if get(stream, "streamConnectionID").is_ok() {
+                            Some(plist::stream_connection_id(stream)?)
+                        } else {
+                            None
+                        };
+                        let direct_key = if get(stream, "shk").is_ok() {
+                            Some(bytes::<32>(stream, "shk")?)
+                        } else {
+                            None
+                        };
+                        let (data_port, control_port) =
+                            media.start_audio(codec, spf, control, stream_id, direct_key)?;
                         replies.push(dict([
                             ("type", number(96)),
                             ("dataPort", number(data_port.into())),
@@ -214,6 +272,14 @@ impl Session {
             "Connected — waiting for picture and sound",
         ));
         plist::encode(&Value::Dictionary(response))
+    }
+    fn require_verified(&self) -> Result<()> {
+        if HAP_ENABLED {
+            self.hap.verified()?;
+        } else {
+            self.pair.shared()?;
+        }
+        Ok(())
     }
 }
 impl Drop for Session {
@@ -248,11 +314,11 @@ fn info(s: &Shared) -> Value {
     dict([
         ("deviceID", Value::String(s.device.clone())),
         ("macAddress", Value::String(s.device.clone())),
-        ("name", Value::String("AirMirrorLite".into())),
+        ("name", Value::String(RECEIVER_NAME.into())),
         ("model", Value::String("AppleTV3,2".into())),
         ("sourceVersion", Value::String("220.68".into())),
         ("features", number(s.video_profile.features())),
-        ("statusFlags", number(68)),
+        ("statusFlags", number(if HAP_ENABLED { 4 } else { 68 })),
         (
             "pk",
             Value::Data(s.identity.verifying_key().as_bytes().to_vec()),
@@ -292,7 +358,7 @@ pub(crate) fn display_description(s: &Shared) -> Value {
     ])
 }
 fn respond(
-    stream: &mut TcpStream,
+    stream: &mut impl Write,
     req: &framing::Request,
     code: u16,
     content_type: &str,
@@ -320,24 +386,27 @@ fn respond(
     );
     stream.write_all(header.as_bytes())?;
     stream.write_all(body)?;
+    stream.flush()?;
     Ok(())
 }
-pub fn serve(mut socket: TcpStream, shared: Arc<Shared>) -> Result<()> {
+pub fn serve(socket: TcpStream, shared: Arc<Shared>) -> Result<()> {
     framing::configure_accepted_stream(&socket)?;
     let peer = socket.peer_addr()?.ip();
     let local = socket.local_addr()?.ip();
+    let mut socket = secure::ControlStream::new(socket);
     let id = shared.next.fetch_add(1, Ordering::AcqRel);
     let mut session = Session {
         id,
         shared: shared.clone(),
         streams: None,
         pair: Default::default(),
+        hap: Default::default(),
         fp: Default::default(),
         claimed: false,
     };
     let generation = shared.disconnect.load(Ordering::Acquire);
     let start = Instant::now();
-    let mut pending = Vec::new();
+    let mut pending = Zeroizing::new(Vec::new());
     let mut request_count = 0;
     let mut rate = Instant::now();
     loop {
@@ -406,6 +475,7 @@ pub fn serve(mut socket: TcpStream, shared: Arc<Shared>) -> Result<()> {
             )?;
             continue;
         }
+        let mut upgrade = None;
         let result = (|| -> Result<(Vec<u8>, &str, String, bool)> {
             match (req.method.as_str(), target) {
                 ("OPTIONS", _) => Ok((
@@ -423,12 +493,21 @@ pub fn serve(mut socket: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 ("POST", "/pair-setup") => {
                     session.claim()?;
                     shared.log("pair-setup");
+                    if HAP_ENABLED {
+                        ensure!(req.headers.get("x-apple-hkp").is_none_or(|kind| kind == "4"), "unsupported HAP pairing type");
+                        let started = Instant::now();
+                        let (response, secret) = session.hap.setup(&req.body)?;
+                        if let Some(secret) = secret { upgrade = Some(secure::RecordKeys::control_receiver(secret.bytes())?); }
+                        shared.log(&format!("HAP setup proof_verified={} elapsed_ms={:.1}", upgrade.is_some(), started.elapsed().as_secs_f64() * 1000.0));
+                        return Ok((response, "application/pairing+tlv8", String::new(), false));
+                    }
                     Ok((
                         session.pair.setup(&req.body, &shared.identity)?,
                         "application/octet-stream", String::new(), false,
                     ))
                 }
                 ("POST", "/pair-verify") => {
+                    ensure!(!HAP_ENABLED, "legacy pairing is disabled in the HAP candidate");
                     session.claim()?;
                     shared.log("pair-verify");
                     Ok((
@@ -438,7 +517,7 @@ pub fn serve(mut socket: TcpStream, shared: Arc<Shared>) -> Result<()> {
                 }
                 ("POST", "/fp-setup") => {
                     session.claim()?;
-                    session.pair.shared()?;
+                    session.require_verified()?;
                     shared.log("fp-setup");
                     Ok((session.fp.exchange(&req.body)?, "application/octet-stream", String::new(), false))
                 }
@@ -518,6 +597,10 @@ pub fn serve(mut socket: TcpStream, shared: Arc<Shared>) -> Result<()> {
         match result {
             Ok((body, kind, extra, done)) => {
                 respond(&mut socket, &req, 200, kind, &body, &extra)?;
+                if let Some(keys) = upgrade {
+                    socket.upgrade(keys, std::mem::take(&mut *pending))?;
+                    shared.log("HAP control encryption active; verified transient session");
+                }
                 if done {
                     break;
                 }
@@ -666,14 +749,22 @@ mod tests {
         assert!(VideoProfile::new(4320, true).is_err());
         let high = VideoProfile::new(2160, true).unwrap();
         assert_eq!((high.width, high.height, high.fps), (3840, 2160, 60));
-        assert_eq!(high.features() >> 32, 0x400);
-        assert!(high.features_text().ends_with(",0x400"));
+        let pairing_upper = if HAP_ENABLED { 0x10000 } else { 0 };
+        assert_eq!(high.features() >> 32, pairing_upper | 0x400);
+        assert!(
+            high.features_text()
+                .ends_with(&format!(",0x{:X}", pairing_upper | 0x400))
+        );
         assert_eq!(high.with_fps(30).unwrap().fps, 30);
         assert!(high.with_fps(0).is_err());
         let legacy = VideoProfile::new(1080, true).unwrap();
         assert_eq!((legacy.width, legacy.height, legacy.fps), (1920, 1080, 60));
         assert_eq!(legacy.features(), FEATURES);
-        assert!(legacy.features_text().ends_with(",0x0"));
+        assert!(
+            legacy
+                .features_text()
+                .ends_with(&format!(",0x{pairing_upper:X}"))
+        );
         assert_eq!(VideoProfile::new(1440, true).unwrap().width, 2560);
     }
     #[test]

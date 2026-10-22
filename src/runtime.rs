@@ -841,7 +841,7 @@ impl ReceiverApp {
             let host = format!("{computer}.local");
             let features = video_profile.features_text();
             discovery.push(native::Discovery::register(
-                "AirMirrorLite._airplay._tcp.local",
+                &format!("{}._airplay._tcp.local", protocol::RECEIVER_NAME),
                 &host,
                 port,
                 address,
@@ -849,7 +849,10 @@ impl ReceiverApp {
                 &[
                     ("deviceid", device.clone()),
                     ("features", features.clone()),
-                    ("flags", "0x84".into()),
+                    (
+                        "flags",
+                        if protocol::HAP_ENABLED { "0x4" } else { "0x84" }.into(),
+                    ),
                     ("model", "AppleTV3,2".into()),
                     ("srcvers", "220.68".into()),
                     ("vv", "2".into()),
@@ -859,7 +862,11 @@ impl ReceiverApp {
                 ],
             )?);
             discovery.push(native::Discovery::register(
-                &format!("{}@AirMirrorLite._raop._tcp.local", device.replace(':', "")),
+                &format!(
+                    "{}@{}._raop._tcp.local",
+                    device.replace(':', ""),
+                    protocol::RECEIVER_NAME
+                ),
                 &host,
                 port,
                 address,

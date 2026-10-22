@@ -15,6 +15,7 @@ ffmpeg-aac = []
 # Controlled local interoperability test; not enabled in packaged candidates.
 rotation-advertisement-experiment = []
 display-update-experiment = ["rotation-advertisement-experiment"]
+hap-pairing-experiment = ["display-update-experiment"]
 
 [dependencies]
 aes = "=0.8.4"
@@ -27,6 +28,10 @@ rand = "=0.8.5"
 plist = "=1.8.0"
 anyhow = "=1.0.100"
 zeroize = "=1.8.2"
+chacha20poly1305 = "=0.10.1"
+hkdf = "=0.12.4"
+srp = { version = "=0.7.0-rc.3", default-features = false }
+sha2_11 = { package = "sha2", version = "=0.11.1", features = ["zeroize"] }
 
 [build-dependencies]
 cc = "=1.2.46"
@@ -34,6 +39,7 @@ cc = "=1.2.46"
 [dev-dependencies]
 hex = "=0.4.3"
 base64 = "=0.22.1"
+serde_json = "=1.0.145"
 
 [profile.release]
 lto = "thin"

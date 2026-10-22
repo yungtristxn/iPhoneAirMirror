@@ -1,13 +1,12 @@
 use super::{
     clock::{Clock, difference, ntp},
     h264,
-    pairing::video_cipher,
+    media_crypto::{AudioCipher, Security, VideoCipher},
 };
 use crate::{
     native,
     runtime::{Media, Shared},
 };
-use aes::cipher::{BlockDecryptMut, KeyIvInit, StreamCipher, block_padding::NoPadding};
 use anyhow::{Result, bail, ensure};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -34,8 +33,7 @@ pub struct Streams {
     audio_thread: Option<JoinHandle<()>>,
     peer: IpAddr,
     local: IpAddr,
-    key: [u8; 16],
-    iv: [u8; 16],
+    security: Security,
     shared: Arc<Shared>,
     epoch: u64,
 }
@@ -44,8 +42,7 @@ impl Streams {
         peer: IpAddr,
         local: IpAddr,
         timing_remote: u16,
-        key: [u8; 16],
-        iv: [u8; 16],
+        security: Security,
         shared: Arc<Shared>,
         epoch: u64,
     ) -> Result<Self> {
@@ -66,8 +63,7 @@ impl Streams {
             audio_thread: None,
             peer,
             local,
-            key,
-            iv,
+            security,
             shared,
             epoch,
         };
@@ -92,10 +88,17 @@ impl Streams {
                     s.shared.register_display_updates(epoch, updates.clone())?;
                     s.event_port = port;
                     let base_display = super::display_description(&s.shared);
+                    let event_keys = s.security.event_keys()?;
                     s.spawn("events", move |stop, _, shared, _| {
-                        super::events::run(listener, peer, stop, updates, base_display, |message| {
-                            shared.log(message)
-                        })
+                        super::events::run_with_keys(
+                            listener,
+                            peer,
+                            stop,
+                            updates,
+                            base_display,
+                            event_keys,
+                            |message| shared.log(message),
+                        )
                     });
                 }
                 Err(error) => s
@@ -129,14 +132,21 @@ impl Streams {
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
         let peer = self.peer;
-        let key = self.key;
+        let cipher = self.security.video(id)?;
         self.spawn("video", move |stop, clock, shared, epoch| {
-            video_loop(listener, peer, key, id, stop, clock, shared, epoch)
+            video_loop(listener, peer, cipher, stop, clock, shared, epoch)
         });
         self.video_port = Some(port);
         Ok(port)
     }
-    pub fn start_audio(&mut self, codec: u8, spf: u16, remote_control: u16) -> Result<(u16, u16)> {
+    pub fn start_audio(
+        &mut self,
+        codec: u8,
+        spf: u16,
+        remote_control: u16,
+        stream_id: Option<u64>,
+        direct_key: Option<[u8; 32]>,
+    ) -> Result<(u16, u16)> {
         ensure!(self.audio_ports.is_none(), "duplicate audio stream");
         ensure!(
             (codec == 8 && spf == 480) || (codec == 4 && spf == 1024),
@@ -147,8 +157,7 @@ impl Streams {
         data.set_read_timeout(Some(Duration::from_millis(10)))?;
         control.set_nonblocking(true)?;
         let ports = (data.local_addr()?.port(), control.local_addr()?.port());
-        let key = self.key;
-        let iv = self.iv;
+        let cipher = self.security.audio(stream_id, direct_key)?;
         let peer = self.peer;
         let local_stop = Arc::new(AtomicBool::new(false));
         self.audio_stop = Some(local_stop.clone());
@@ -162,8 +171,7 @@ impl Streams {
                 control,
                 peer,
                 remote_control,
-                key,
-                iv,
+                cipher,
                 codec,
                 stop.clone(),
                 local_stop,
@@ -196,14 +204,12 @@ impl Streams {
 }
 impl Drop for Streams {
     fn drop(&mut self) {
-        use zeroize::Zeroize;
         self.stop.store(true, Ordering::Release);
         let _ = self.stop_audio();
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
-        self.key.zeroize();
-        self.iv.zeroize();
+        // Security owns zeroizing key buffers, dropped with this stream bundle.
     }
 }
 fn timed_out(e: &std::io::Error) -> bool {
@@ -373,8 +379,7 @@ fn size_label(size: Option<(u32, u32)>) -> String {
 fn video_loop(
     listener: TcpListener,
     peer: IpAddr,
-    key: [u8; 16],
-    id: u64,
+    mut cipher: VideoCipher,
     stop: Arc<AtomicBool>,
     clock: Arc<Mutex<Clock>>,
     shared: Arc<Shared>,
@@ -404,7 +409,6 @@ fn video_loop(
         "video TCP connected accept_wait_ms={:.1}",
         start.elapsed().as_secs_f64() * 1000.0
     ));
-    let mut cipher = video_cipher(&key, id);
     let mut config = Vec::new();
     let mut codec = None;
     let mut dimensions = (0, 0);
@@ -434,7 +438,7 @@ fn video_loop(
             h264::MAX_FRAME
         };
         let budget = match kind {
-            0 => frame_budget,
+            0 => frame_budget + cipher.overhead(),
             1 | 2 | 5 => 65536,
             _ => bail!("unsupported mirror packet type {kind}"),
         };
@@ -452,7 +456,7 @@ fn video_loop(
         let payload_received_at = native::now();
         match kind {
             0 => {
-                cipher.apply_keystream(&mut payload);
+                cipher.open(&header, &mut payload)?;
                 let active_codec =
                     codec.ok_or_else(|| anyhow::anyhow!("video before codec configuration"))?;
                 if super::ROTATABLE_DISPLAY {
@@ -724,14 +728,40 @@ fn advance_audio_rtp(next: &mut Option<u32>, rtp: u32, samples: u32) -> Result<(
     Ok(())
 }
 
+/// Authenticate before changing transport state. An invalid UDP record can be
+/// discarded independently because HAP audio carries its nonce in each packet.
+/// None means rejected authentication/framing, never a retry with another cipher.
+fn admit_audio_datagram(
+    cipher: &AudioCipher,
+    packet: &mut [u8],
+    data_port: Option<u16>,
+    queue: &mut AudioQueue,
+    pinned_port: &mut Option<u16>,
+    last: &mut Instant,
+) -> Result<Option<AudioAdmission>> {
+    let plain_size = match cipher.open_packet(packet) {
+        Ok(size) => size,
+        Err(_) if matches!(cipher, AudioCipher::Hap(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let packet = audio_packet(&packet[..plain_size])?;
+    if let Some(port) = data_port {
+        *pinned_port = Some(port);
+    }
+    let admission = queue.insert(packet, data_port.is_none());
+    if data_port.is_some() && admission != AudioAdmission::Ignored {
+        *last = Instant::now();
+    }
+    Ok(Some(admission))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn audio_loop(
     data: UdpSocket,
     control: UdpSocket,
     peer: IpAddr,
     remote_control: u16,
-    key: [u8; 16],
-    iv: [u8; 16],
+    cipher: AudioCipher,
     codec: u8,
     stop: Arc<AtomicBool>,
     local_stop: Arc<AtomicBool>,
@@ -756,6 +786,7 @@ fn audio_loop(
     let mut anchor_after = initial_flush.anchor_after;
     let mut pinned_port = None;
     let mut last = Instant::now();
+    let mut rejection_logged = false;
     let mut errors = 0;
     let mut resend_at = Instant::now() - Duration::from_secs(1);
     let mut serial = initial_flush.serial;
@@ -774,13 +805,20 @@ fn audio_loop(
         }
         match data.recv_from(&mut packet) {
             Ok((n, addr)) if addr.ip() == peer && pinned_port.is_none_or(|p| p == addr.port()) => {
-                if let Ok(p) = audio_packet(&packet[..n]) {
-                    pinned_port = Some(addr.port());
-                    let admitted = queue.insert(p, false);
-                    if admitted != AudioAdmission::Ignored {
-                        last = Instant::now();
+                if audio_packet(&packet[..n]).is_ok() {
+                    let admitted = admit_audio_datagram(
+                        &cipher,
+                        &mut packet[..n],
+                        Some(addr.port()),
+                        &mut queue,
+                        &mut pinned_port,
+                        &mut last,
+                    )?;
+                    if admitted.is_none() && !rejection_logged {
+                        shared.log("discarded unauthenticated audio datagram");
+                        rejection_logged = true;
                     }
-                    if admitted == AudioAdmission::Resynchronized {
+                    if admitted == Some(AudioAdmission::Resynchronized) {
                         worker.configure(codec)?;
                         audio_timing = crate::audio_timing::AudioTiming::new(worker.generation())?;
                         errors = 0;
@@ -813,9 +851,20 @@ fn audio_loop(
                         }
                     } else if n > 16
                         && packet[1] & 0x7f == 0x56
-                        && let Ok(p) = audio_packet(&packet[4..n])
+                        && audio_packet(&packet[4..n]).is_ok()
                     {
-                        queue.insert(p, true);
+                        let admitted = admit_audio_datagram(
+                            &cipher,
+                            &mut packet[4..n],
+                            None,
+                            &mut queue,
+                            &mut pinned_port,
+                            &mut last,
+                        )?;
+                        if admitted.is_none() && !rejection_logged {
+                            shared.log("discarded unauthenticated audio datagram");
+                            rejection_logged = true;
+                        }
                     }
                 }
                 Ok(_) => {}
@@ -831,7 +880,7 @@ fn audio_loop(
                 if pts.is_none() && p.arrival.elapsed() < Duration::from_millis(500) {
                     break;
                 }
-                let mut p = queue.packets.remove(&seq).unwrap();
+                let p = queue.packets.remove(&seq).unwrap();
                 advance_audio_rtp(
                     &mut next_audio_rtp,
                     p.rtp,
@@ -848,10 +897,6 @@ fn audio_loop(
                     worker.configure(codec)?;
                     audio_timing = crate::audio_timing::AudioTiming::new(worker.generation())?;
                 }
-                let encrypted = p.payload.len() / 16 * 16;
-                cbc::Decryptor::<aes::Aes128>::new(&key.into(), &iv.into())
-                    .decrypt_padded_mut::<NoPadding>(&mut p.payload[..encrypted])
-                    .map_err(|_| anyhow::anyhow!("audio ciphertext length"))?;
                 match worker.decode_block(&p.payload) {
                     Ok(mut block) => {
                         errors = 0;
@@ -928,6 +973,152 @@ fn audio_loop(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn authenticated_audio_packet(key: &[u8; 32], sequence: u16) -> Vec<u8> {
+        use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, aead::AeadInPlace};
+        let mut packet = vec![0x80, 0x60];
+        packet.extend_from_slice(&sequence.to_be_bytes());
+        packet.extend_from_slice(&(u32::from(sequence) * 480).to_be_bytes());
+        packet.extend_from_slice(&7u32.to_be_bytes());
+        let mut payload = vec![1, 2, 3, 4];
+        let mut nonce = [0; 12];
+        nonce[4..].copy_from_slice(&u64::from(sequence).to_le_bytes());
+        let tag = ChaCha20Poly1305::new_from_slice(key)
+            .unwrap()
+            .encrypt_in_place_detached(Nonce::from_slice(&nonce), &packet[4..12], &mut payload)
+            .unwrap();
+        packet.extend_from_slice(&payload);
+        packet.extend_from_slice(&tag);
+        packet.extend_from_slice(&nonce[4..]);
+        packet
+    }
+
+    #[test]
+    fn rejected_audio_datagrams_preserve_admission_state_and_valid_packets_follow() {
+        use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
+        let key = [0x47; 32];
+        let cipher = AudioCipher::Hap(ChaCha20Poly1305::new_from_slice(&key).unwrap());
+        let mut queue = AudioQueue::default();
+        let mut pinned_port = None;
+        let original_last = Instant::now() - Duration::from_secs(1);
+        let mut last = original_last;
+        let good = authenticated_audio_packet(&key, 100);
+        let mut invalid = good.clone();
+        invalid[16] ^= 1; // Tag corruption, not an unrelated malformed RTP header.
+        for mut rejected in [invalid, good[..13].to_vec()] {
+            assert_eq!(
+                admit_audio_datagram(
+                    &cipher,
+                    &mut rejected,
+                    Some(9000),
+                    &mut queue,
+                    &mut pinned_port,
+                    &mut last,
+                )
+                .unwrap(),
+                None
+            );
+            assert_eq!(pinned_port, None);
+            assert_eq!(last, original_last);
+            assert!(queue.packets.is_empty());
+            assert_eq!(queue.expected, None);
+            assert_eq!(queue.restart, None);
+        }
+        assert_eq!(
+            admit_audio_datagram(
+                &cipher,
+                &mut good.clone(),
+                Some(9001),
+                &mut queue,
+                &mut pinned_port,
+                &mut last,
+            )
+            .unwrap(),
+            Some(AudioAdmission::Queued)
+        );
+        assert_eq!(pinned_port, Some(9001));
+        assert!(last > original_last);
+        assert_eq!(queue.expected, Some(100));
+        assert_eq!(queue.packets[&100].payload, [1, 2, 3, 4]);
+
+        // Retransmission packets use the same admission gate after their outer
+        // wrapper is stripped. A rejected outlier must not resynchronize it.
+        let admitted_last = last;
+        let mut invalid = authenticated_audio_packet(&key, 500);
+        invalid[12] ^= 1;
+        assert_eq!(
+            admit_audio_datagram(
+                &cipher,
+                &mut invalid,
+                None,
+                &mut queue,
+                &mut pinned_port,
+                &mut last,
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(queue.expected, Some(100));
+        assert_eq!(queue.restart, None);
+        assert_eq!(queue.packets.len(), 1);
+        assert_eq!(queue.packets[&100].payload, [1, 2, 3, 4]);
+        assert_eq!(pinned_port, Some(9001));
+        assert_eq!(last, admitted_last);
+        let mut retransmit = authenticated_audio_packet(&key, 101);
+        assert_eq!(
+            admit_audio_datagram(
+                &cipher,
+                &mut retransmit,
+                None,
+                &mut queue,
+                &mut pinned_port,
+                &mut last,
+            )
+            .unwrap(),
+            Some(AudioAdmission::Queued)
+        );
+        assert_eq!(queue.packets.len(), 2);
+        assert_eq!(queue.packets[&101].payload, [1, 2, 3, 4]);
+        assert_eq!(pinned_port, Some(9001));
+        assert_eq!(last, admitted_last);
+    }
+
+    #[test]
+    fn audio_admission_preserves_legacy_cbc_blocks_and_plaintext_tail() {
+        use aes::cipher::{BlockEncryptMut, KeyIvInit, block_padding::NoPadding};
+        use zeroize::Zeroizing;
+        let key = [0x51; 16];
+        let iv = [0x52; 16];
+        let cipher = AudioCipher::Legacy {
+            key: Zeroizing::new(key),
+            iv: Zeroizing::new(iv),
+        };
+        let mut packet = vec![0x80, 0x60, 0, 1, 0, 0, 1, 224, 0, 0, 0, 7];
+        let payload: Vec<u8> = (0..35).collect();
+        packet.extend_from_slice(&payload);
+        cbc::Encryptor::<aes::Aes128>::new_from_slices(&key, &iv)
+            .unwrap()
+            .encrypt_padded_mut::<NoPadding>(&mut packet[12..44], 32)
+            .unwrap();
+        let mut queue = AudioQueue::default();
+        let mut port = None;
+        let mut last = Instant::now();
+        assert_eq!(
+            admit_audio_datagram(
+                &cipher,
+                &mut packet,
+                Some(9000),
+                &mut queue,
+                &mut port,
+                &mut last,
+            )
+            .unwrap(),
+            Some(AudioAdmission::Queued)
+        );
+        assert_eq!(queue.packets[&1].payload, payload);
+        assert_eq!(port, Some(9000));
+    }
+
     #[test]
     fn audio_transport_rewind_fence_survives_decoder_reprime() {
         let mut next = None;

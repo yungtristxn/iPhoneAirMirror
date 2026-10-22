@@ -2,6 +2,24 @@
 
 Updated: 2026-10-22
 
+## Verified newer pairing implementation in progress
+- User authorized a separate modern verified-pairing candidate. Active branch is
+  codex/verified-pairing from cc8079c. Original F92829... executable remains in
+  dist/AirMirrorLite-ffmpeg-candidate/ and an additional exact copy is preserved in
+  dist/AirMirrorLite-verified-legacy-fallback/. No working binary is overwritten.
+- hap-pairing-experiment adds verified transient SRP M1-M4, authenticated control
+  and event records, and authenticated screen/audio media ciphers. Service name
+  AirMirrorLite HAP; feature48 on and legacy27 off. No unpaired failure fallback.
+- 139 Rust tests in HAP/legacy modes, strict Clippy/formatting and release build
+  pass. Invalid HAP audio datagrams are discarded before admission; key-bearing
+  decrypted request/plist buffers are wiped. Independent network checks and silent
+  GPU/native validation pass, with zero audio submitted. HAP EXE SHA-256:
+  `2FF3927A51B69C9D91875AF1D654352FB1EF1734F7B36A05CABCA0960E9C70A0`.
+  Evidence: local/hap-pairing/20261022T202500438422Z/result.json and
+  local/hap-verification/media-result.json. No physical
+  HAP phone/sound acceptance yet. VERIFIED_PAIRING.md records pins, boundaries,
+  commands and the public-setup-code versus identity-allowlist distinction.
+
 ## Remaining startup delay investigated
 - User reports approximately five seconds after selection. Latest actual iPhone
   log shows 208 ms from accepted TCP to picture, decoder preparation 1.2 ms;
