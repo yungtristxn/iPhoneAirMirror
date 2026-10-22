@@ -5,6 +5,22 @@
 //! local observations are recorded in docs/ROTATION_REGRESSION.md.
 use anyhow::{Result, bail, ensure};
 
+/// Explicit screen suspension from a complete AirPlay codec-config header.
+/// Pinned UxPlay 15a6b87172eca38b0df4e615fbf1bba108734dde,
+/// lib/raop_rtp_mirror.c:580-588, distinguishes these exact low flag bytes.
+/// Unknown flags leave visibility unchanged; inactivity is not a lock signal.
+pub fn configuration_suspended(header: &[u8]) -> Result<Option<bool>> {
+    ensure!(
+        header.len() == 128 && header[4] == 1,
+        "screen-state configuration header"
+    );
+    Ok(match header[6] {
+        0x56 | 0x5e => Some(true),
+        0x16 | 0x1e => Some(false),
+        _ => None,
+    })
+}
+
 pub fn configuration_rotation(header: &[u8], rotation_advertised: bool) -> Result<u32> {
     ensure!(
         header.len() == 128 && header[4] == 1,
@@ -30,6 +46,32 @@ pub fn configuration_rotation(header: &[u8], rotation_advertised: bool) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_explicit_screen_flags_change_visibility() {
+        let mut header = [0u8; 128];
+        header[4] = 1;
+        header[5] = 7; // Rotation is independent from screen suspension.
+        header[7] = 1;
+        for flags in 0..=255 {
+            header[6] = flags;
+            let expected = match flags {
+                0x56 | 0x5e => Some(true),
+                0x16 | 0x1e => Some(false),
+                _ => None,
+            };
+            assert_eq!(configuration_suspended(&header).unwrap(), expected);
+        }
+        for len in 0..128 {
+            assert!(configuration_suspended(&header[..len]).is_err());
+        }
+        assert!(configuration_suspended(&[0; 129]).is_err());
+        for opcode in [0, 2, 5, 255] {
+            header[4] = opcode;
+            header[6] = 0x5e;
+            assert!(configuration_suspended(&header).is_err());
+        }
+    }
 
     #[test]
     fn observed_transport_rotation_is_not_a_codec_sei_or_u16_opcode() {

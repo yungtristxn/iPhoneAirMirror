@@ -32,6 +32,7 @@ pub enum Media {
         payload_received_at: f64,
         ready_at: f64,
         rotation_cw_degrees: u32,
+        visibility_serial: u64,
     },
     Audio {
         epoch: u64,
@@ -203,15 +204,56 @@ pub struct AudioFlush {
     pub cutoff: Option<protocol::AudioCutoff>,
     pub anchor_after: Option<f64>,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ScreenVisibility {
+    epoch: u64,
+    serial: u64,
+    suspended: bool,
+}
 #[derive(Default)]
 struct MediaTransitions {
     revision: u64,
     applied: u64,
     flush: AudioFlush,
+    screen: ScreenVisibility,
 }
 impl MediaTransitions {
-    fn apply<T>(&mut self, operation: impl FnOnce(AudioFlush) -> Result<T>) -> Result<T> {
-        let result = operation(self.flush)?;
+    fn reset_screen(&mut self, epoch: u64) {
+        self.screen = ScreenVisibility {
+            epoch,
+            ..ScreenVisibility::default()
+        };
+    }
+    fn publish_screen(&mut self, owner: u64, epoch: u64, suspended: bool) -> Result<(u64, bool)> {
+        ensure!(
+            epoch != 0 && owner == epoch && self.screen.epoch == epoch,
+            "screen-state session ownership changed"
+        );
+        if self.screen.suspended == suspended {
+            return Ok((self.screen.serial, false));
+        }
+        let serial = self
+            .screen
+            .serial
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("screen visibility serial exhausted"))?;
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("media transition serial exhausted"))?;
+        self.screen.serial = serial;
+        self.screen.suspended = suspended;
+        self.revision = revision;
+        Ok((serial, true))
+    }
+    fn screen_for(&self, owner: u64, epoch: u64) -> Option<ScreenVisibility> {
+        (epoch != 0 && owner == epoch && self.screen.epoch == epoch).then_some(self.screen)
+    }
+    fn apply<T>(
+        &mut self,
+        operation: impl FnOnce(AudioFlush, ScreenVisibility) -> Result<T>,
+    ) -> Result<T> {
+        let result = operation(self.flush, self.screen)?;
         self.applied = self.revision;
         Ok(result)
     }
@@ -357,6 +399,7 @@ impl Shared {
         );
         self.owner_started
             .store(native::now().to_bits(), Ordering::Release);
+        transition.reset_screen(epoch);
         transition.revision += 1;
         drop(transition);
         self.wake.signal();
@@ -378,6 +421,7 @@ impl Shared {
             .compare_exchange(epoch, 0, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
+            transition.reset_screen(0);
             let mut display = self.display_updates.lock().unwrap();
             if display.as_ref().is_some_and(|(owner, _)| *owner == epoch) {
                 *display = None;
@@ -414,6 +458,23 @@ impl Shared {
     }
     pub fn flush_snapshot(&self) -> AudioFlush {
         self.transitions.lock().unwrap().flush
+    }
+    pub fn publish_screen_state(&self, epoch: u64, suspended: bool) -> Result<u64> {
+        let mut transition = self.transitions.lock().unwrap();
+        ensure!(
+            !self.shutdown.load(Ordering::Acquire),
+            "receiver is shutting down"
+        );
+        let (serial, changed) =
+            transition.publish_screen(self.owner.load(Ordering::Acquire), epoch, suspended)?;
+        drop(transition);
+        if changed {
+            self.wake.signal();
+            self.log(&format!(
+                "phone screen suspended={suspended} epoch={epoch} visibility_serial={serial}"
+            ));
+        }
+        Ok(serial)
     }
     pub fn request_flush(&self, epoch: u64, cutoff: protocol::AudioCutoff) -> Result<()> {
         let mut transition = self.transitions.lock().unwrap();
@@ -974,9 +1035,24 @@ impl ReceiverApp {
                     }) if epoch == owner && owner != 0 => {
                         video_drain.consumed();
                         let begin = Instant::now();
-                        if let Err(e) =
-                            app.prepare_video(codec, width, height, self.shared.video_profile.fps)
-                        {
+                        let prepared = {
+                            let transition = self.shared.transitions.lock().unwrap();
+                            let Some(screen) = transition
+                                .screen_for(self.shared.owner.load(Ordering::Acquire), epoch)
+                            else {
+                                continue;
+                            };
+                            app.screen_state(screen.serial, screen.suspended)
+                                .and_then(|_| {
+                                    app.prepare_video(
+                                        codec,
+                                        width,
+                                        height,
+                                        self.shared.video_profile.fps,
+                                    )
+                                })
+                        };
+                        if let Err(e) = prepared {
                             self.shared.failure(&format!(
                                 "Video preparation failed. Reconnect mirroring. {e}"
                             ));
@@ -1000,12 +1076,33 @@ impl ReceiverApp {
                         payload_received_at,
                         ready_at,
                         rotation_cw_degrees,
+                        visibility_serial,
                     }) if epoch == owner && owner != 0 => {
                         video_drain.consumed();
                         video_timing.record(payload_received_at, ready_at, pts, native::now());
-                        if let Err(e) =
-                            app.video(&data, pts, codec, width, height, rotation_cw_degrees)
-                        {
+                        let submitted = {
+                            let transition = self.shared.transitions.lock().unwrap();
+                            let Some(screen) = transition
+                                .screen_for(self.shared.owner.load(Ordering::Acquire), epoch)
+                            else {
+                                continue;
+                            };
+                            // Apply a newly published resume before decoding its
+                            // first frame, then keep publication serialized with
+                            // submission. Old serials still decode for references.
+                            app.screen_state(screen.serial, screen.suspended)
+                                .and_then(|_| {
+                                    app.video(
+                                        &data,
+                                        pts,
+                                        codec,
+                                        (width, height),
+                                        rotation_cw_degrees,
+                                        visibility_serial,
+                                    )
+                                })
+                        };
+                        if let Err(e) = submitted {
                             self.shared.failure(&format!(
                                 "Video playback failed. Reconnect mirroring. {e}"
                             ));
@@ -1054,7 +1151,7 @@ impl ReceiverApp {
             // Wait never dispatches. Serialize this complete applied boundary
             // against SETUP/FLUSH/teardown publishers, including native tick.
             let mut transition = self.shared.transitions.lock().unwrap();
-            let dispatched = transition.apply(|boundary| {
+            let dispatched = transition.apply(|boundary, screen| {
                 let dispatch_owner = self.shared.owner.load(Ordering::Acquire);
                 if dispatch_owner != active {
                     video_timing = VideoTiming::default();
@@ -1069,6 +1166,13 @@ impl ReceiverApp {
                 if boundary.serial != flush {
                     app.flush_audio();
                     flush = boundary.serial;
+                }
+                if dispatch_owner != 0 {
+                    ensure!(
+                        screen.epoch == dispatch_owner,
+                        "screen-state owner invariant"
+                    );
+                    app.screen_state(screen.serial, screen.suspended)?;
                 }
                 app.video_sync(self.shared.audio_owner.synchronized(dispatch_owner));
                 app.dispatch()
@@ -1343,7 +1447,7 @@ mod tests {
         let mut state = gate.lock().unwrap();
         let mut pending_pcm = vec![0u64];
         state
-            .apply(|boundary| {
+            .apply(|boundary, _screen| {
                 pending_pcm.retain(|serial| *serial == boundary.serial);
                 assert!(
                     pending_pcm.is_empty(),
@@ -1360,7 +1464,7 @@ mod tests {
         state.revision = 2;
         assert!(
             state
-                .apply::<()>(|_| anyhow::bail!("native apply failed"))
+                .apply::<()>(|_, _| anyhow::bail!("native apply failed"))
                 .is_err()
         );
         assert_eq!(
@@ -1383,6 +1487,7 @@ mod tests {
             payload_received_at: 0.0,
             ready_at: 0.0,
             rotation_cw_degrees: 270,
+            visibility_serial: 0,
         };
         assert!(defer_new_owner(frame, 1, 2, &mut pending));
         match pending.take().unwrap() {
@@ -1414,6 +1519,137 @@ mod tests {
         };
         assert!(!defer_new_owner(stale_audio, 2, 2, &mut pending));
         assert!(pending.is_none());
+    }
+    #[test]
+    fn explicit_screen_transitions_are_idempotent_and_preserve_audio() {
+        let mut transition = MediaTransitions::default();
+        transition.reset_screen(7);
+        transition.flush = AudioFlush {
+            serial: 19,
+            cutoff: Some(protocol::AudioCutoff {
+                sequence: 33,
+                timestamp: 1024,
+            }),
+            anchor_after: Some(4.0),
+        };
+        assert_eq!(transition.publish_screen(7, 7, false).unwrap(), (0, false));
+        let revision = transition.revision;
+        assert_eq!(transition.publish_screen(7, 7, true).unwrap(), (1, true));
+        assert_eq!(transition.publish_screen(7, 7, true).unwrap(), (1, false));
+        assert_eq!(transition.publish_screen(7, 7, false).unwrap(), (2, true));
+        // Off/on may coalesce before presentation; the serial must still change
+        // so native presentation invalidates its old cached picture.
+        let mut applied = ScreenVisibility {
+            epoch: 7,
+            serial: 0,
+            suspended: false,
+        };
+        transition
+            .apply(|audio, screen| {
+                assert_eq!(audio.serial, 19);
+                assert_eq!(
+                    audio.cutoff,
+                    Some(protocol::AudioCutoff {
+                        sequence: 33,
+                        timestamp: 1024
+                    })
+                );
+                assert_eq!(audio.anchor_after, Some(4.0));
+                assert!(!screen.suspended);
+                assert_ne!(screen.serial, applied.serial);
+                applied = screen;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(applied.serial, 2);
+        assert_eq!(transition.applied, revision + 2);
+        assert_eq!(transition.publish_screen(7, 7, false).unwrap(), (2, false));
+        assert_eq!(transition.revision, revision + 2); // Paused pictures stay visible.
+    }
+    #[test]
+    fn screen_visibility_cannot_cross_canceled_or_replaced_owner() {
+        let mut transition = MediaTransitions::default();
+        transition.reset_screen(7);
+        transition.publish_screen(7, 7, true).unwrap();
+        transition.reset_screen(0);
+        assert!(transition.publish_screen(0, 7, false).is_err());
+        assert!(transition.screen_for(0, 7).is_none());
+        transition.reset_screen(8);
+        assert!(transition.publish_screen(8, 7, false).is_err());
+        assert!(transition.screen_for(8, 7).is_none());
+        assert_eq!(
+            transition.screen_for(8, 8),
+            Some(ScreenVisibility {
+                epoch: 8,
+                serial: 0,
+                suspended: false
+            })
+        );
+        transition.screen.serial = u64::MAX;
+        let revision = transition.revision;
+        assert!(transition.publish_screen(8, 8, true).is_err());
+        assert_eq!(transition.screen.serial, u64::MAX);
+        assert!(!transition.screen.suspended);
+        assert_eq!(transition.revision, revision);
+    }
+    #[test]
+    fn priority_screen_state_bypasses_full_video_queue_without_losing_decode_references() {
+        let (send, receive) = sync_channel(1);
+        let old = Media::Video {
+            epoch: 7,
+            codec: 265,
+            width: 994,
+            height: 2160,
+            data: vec![1, 2, 3],
+            pts: 1.0,
+            payload_received_at: 0.0,
+            ready_at: 0.0,
+            rotation_cw_degrees: 0,
+            visibility_serial: 0,
+        };
+        assert!(send.try_send(old).is_ok());
+        let gate = Mutex::new(MediaTransitions::default());
+        {
+            let mut state = gate.lock().unwrap();
+            state.reset_screen(7);
+            state.publish_screen(7, 7, true).unwrap();
+        }
+        assert!(
+            send.try_send(Media::VideoConfig {
+                epoch: 7,
+                codec: 265,
+                width: 994,
+                height: 2160
+            })
+            .is_err()
+        );
+        let mut native_screen = ScreenVisibility::default();
+        gate.lock()
+            .unwrap()
+            .apply(|_, screen| {
+                native_screen = screen;
+                Ok(())
+            })
+            .unwrap();
+        assert!(native_screen.suspended); // No compressed-video queue space needed.
+        let Media::Video {
+            data,
+            visibility_serial,
+            ..
+        } = receive.try_recv().unwrap()
+        else {
+            panic!("expected compressed frame")
+        };
+        assert_eq!(data, [1, 2, 3]); // Still available to decode, despite invisibility.
+        assert_ne!(visibility_serial, native_screen.serial);
+        gate.lock().unwrap().publish_screen(7, 7, false).unwrap();
+        // Submission obtains and applies the current state under the gate before
+        // the first fresh keyframe is given to native decoding.
+        let state = gate.lock().unwrap();
+        native_screen = state.screen_for(7, 7).unwrap();
+        assert_eq!(native_screen.serial, 2);
+        assert!(!native_screen.suspended);
+        assert_eq!(state.screen_for(7, 7).unwrap().serial, 2);
     }
     #[test]
     fn private_peer_scope() {

@@ -18,6 +18,7 @@ public:
     HWND window=nullptr;
     std::atomic<bool> quit{false}, disconnect{false}, redraw{true}, chrome_dirty{true};
     std::atomic<bool> fullscreen{false}, has_video{false}, muted{false};
+    std::atomic<bool> screen_blank{false};
     std::atomic<float> volume{1.0f};
     std::atomic<int> status{0}; // ready, connecting, streaming
     std::atomic<bool> status_dismissed{false};
@@ -34,7 +35,7 @@ public:
     std::wstring status_message() const;
     // The independent software status card exclusively owns failure/recovery
     // text. Idle chrome underneath must not duplicate it or expose its icon.
-    bool idle_artwork_visible() const {return !has_video.load()&&status.load()<3;}
+    bool idle_artwork_visible() const {return !screen_blank.load()&&!has_video.load()&&status.load()<3;}
     float gain() const {return muted.load()?0.0f:volume.load();}
     float dpi_scale() const;
     static int rim_pixels(float scale){return std::max(2,int(3*scale+.5f));}

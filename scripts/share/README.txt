@@ -14,6 +14,8 @@ AirMirrorLite - private Windows x64 test build
 4. Close the phone-shaped window to exit. The bottom-right grip resizes it;
    the side controls adjust volume, restore size, enter fullscreen and close.
    M mutes, 0 restores size, F11 toggles fullscreen and D disconnects the phone.
+   The viewport goes black when the iPhone suspends screen mirroring and returns
+   with a fresh frame when it resumes. Still photos have no inactivity timeout.
 
 Requirements
 - Windows 10/11 x64, a D3D11-capable GPU/driver with native H.264 decoding,

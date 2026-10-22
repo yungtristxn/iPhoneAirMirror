@@ -15,7 +15,7 @@ Physical A/V acceptance of this candidate is still outstanding. Do not run both
 receivers at once. Adding the `decoder-lab` build feature disables reception.
 
 For the separately authorized friend-test archive, use
-`python -B scripts/Package-Share.py --output dist/AirMirrorLite-Windows-x64-audio-burst-fix-2026-10-22.zip`.
+`python -B scripts/Package-Share.py --output dist/AirMirrorLite-Windows-x64-screen-off-2026-10-22.zip`.
 This preserves the tested FFmpeg/rotation candidate, verifies its hash against a
 fresh offline build, and includes matching source/dependencies and GPLv3 notices.
 It excludes pairing identities and logs. Extract the ZIP and use
@@ -61,6 +61,10 @@ unrestricted worker if permission is missing.
   until recovery; their instructions explain when a reconnect or restart is needed.
 - Launch the prepared executable with `--mute` to start muted; the speaker button
   or `M` restores sound. Decoding and A/V synchronization stay active while muted.
+- When the iPhone suspends its mirrored screen, the PC viewport goes black while
+  keeping its size and controls. Resume waits for a fresh frame; still photos and
+  paused video remain visible unless the sender explicitly suspends them. See
+  [SCREEN_OFF.md](docs/SCREEN_OFF.md) for validation and sender limitations.
 - Custom controls expose native accessibility names, roles, focus, invoke/toggle
   actions and volume range values. Keyboard volume also supports Home/End and
   Page Up/Down when the slider has focus.

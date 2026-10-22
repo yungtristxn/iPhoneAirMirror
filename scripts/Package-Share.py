@@ -55,7 +55,7 @@ def included_source(name):
                     "README.md", ".gitattributes", ".gitignore", "vendor/PATCHES.md",
                     "vendor/SHA256SUMS", "docs/THIRD_PARTY.md", "docs/DECODER_EXPERIMENT.md",
                     "docs/ROTATION_REGRESSION.md", "docs/PERFORMANCE_FOLLOWUP.md",
-                    "docs/AUDIO_BACKPRESSURE.md"} or name.startswith(
+                    "docs/AUDIO_BACKPRESSURE.md", "docs/SCREEN_OFF.md"} or name.startswith(
                         ("src/", "native/", "assets/", "scripts/", "tests/", "vendor/playfair/"))
 
 
@@ -164,7 +164,7 @@ def main():
               "sourceCorrespondence": "Offline Cargo freshness build equals the tested candidate hash",
               "sourceLicense": "GPL-3.0-only; imported components retain their notices",
               "audioBackend": "FFmpeg native AAC; no FDK", "testBuild": True,
-              "physicalAcceptance": "Latest Photos landscape and FFmpeg A/V confirmation remain pending",
+              "physicalAcceptance": "See source/docs/SCREEN_OFF.md and source/docs/DECODER_EXPERIMENT.md; synthetic checks do not establish iPhone or sound acceptance",
               "sourceMaterials": "source/REBUILD.txt; complete pinned FFmpeg and locked Rust sources included",
               "userData": "No identity, logs or captures; only a newly generated 994:2160 display preset"}
     write(package / "BUILD.json", json.dumps(record, indent=2) + "\n")

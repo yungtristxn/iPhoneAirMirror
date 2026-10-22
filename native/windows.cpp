@@ -107,19 +107,19 @@ static std::string output_format_diagnostics(IMFTransform* decoder){
 }
 static bool valid_rotation(UINT degrees){return degrees==0||degrees==90||degrees==180||degrees==270;}
 struct DecodeAssociations {
-    struct Entry {LONGLONG pts=0;double began=0;UINT rotation=0;bool active=false;uint64_t order=0;};
+    struct Entry {LONGLONG pts=0;double began=0;UINT rotation=0;bool active=false;uint64_t order=0,visibility_serial=0;};
     std::array<Entry,32> entries{};uint64_t next_order=0;unsigned active_count=0,high_water=0;
-    bool can_admit(LONGLONG pts,UINT rotation)const{
+    bool can_admit(LONGLONG pts,UINT rotation,uint64_t visibility_serial=0)const{
         bool free=false;
         for(const auto& entry:entries){
             if(!entry.active)free=true;
-            else if(entry.pts==pts&&entry.rotation!=rotation)return false;
+            else if(entry.pts==pts&&(entry.rotation!=rotation||entry.visibility_serial!=visibility_serial))return false;
         }
         return free&&valid_rotation(rotation);
     }
-    bool add(LONGLONG pts,double began,UINT rotation){
-        if(!can_admit(pts,rotation))return false;
-        for(auto& entry:entries)if(!entry.active){entry={pts,began,rotation,true,++next_order};++active_count;high_water=std::max(high_water,active_count);return true;}
+    bool add(LONGLONG pts,double began,UINT rotation,uint64_t visibility_serial=0){
+        if(!can_admit(pts,rotation,visibility_serial))return false;
+        for(auto& entry:entries)if(!entry.active){entry={pts,began,rotation,true,++next_order,visibility_serial};++active_count;high_water=std::max(high_water,active_count);return true;}
         return false;
     }
     bool take(LONGLONG pts,Entry& output){
@@ -128,7 +128,7 @@ struct DecodeAssociations {
         if(!match)return false;output=*match;match->active=false;--active_count;return true;
     }
 };
-struct VideoFrame { ComPtr<IMFSample> sample; double pts; UINT width; UINT height; RECT source{};VideoColor color{};UINT rotation=0; };
+struct VideoFrame { ComPtr<IMFSample> sample; double pts; UINT width; UINT height; RECT source{};VideoColor color{};UINT rotation=0;uint64_t visibility_serial=0; };
 struct AudioFrame { std::vector<int16_t> pcm; size_t pos = 0; double pts = 0; };
 constexpr size_t AUDIO_QUEUE_CAPACITY=32;
 static void mix_audio(std::deque<AudioFrame>& queue,int16_t* out,UINT32 count,double target,float gain,uint64_t& played,uint64_t& skipped){
@@ -197,6 +197,7 @@ struct App {
     std::deque<VideoFrame> video; std::deque<AudioFrame> sound;
     VideoFrame last_frame{};
     bool video_slot_reserved=false,video_sync=true;
+    uint64_t visibility_serial=0,visibility_skips=0;bool screen_suspended=false;
     bool high_resolution_timer=false;
     double present_retry_at=0;
     ComPtr<ID3D11Texture2D> paused_texture,spare_paused_texture;
@@ -398,7 +399,19 @@ struct App {
         }
         return MF_E_INVALIDMEDIATYPE;
     }
+    HRESULT screen_state(uint64_t serial,bool suspended){
+        if(serial<visibility_serial)return S_OK;
+        if(serial==visibility_serial)return suspended==screen_suspended?S_OK:E_INVALIDARG;
+        visibility_serial=serial;screen_suspended=suspended;
+        // A coalesced off/on also invalidates the old image. Keep decoder input
+        // associations so delayed outputs can be identified and discarded.
+        video.clear();last_frame={};paused_texture.Reset();spare_paused_texture.Reset();spare_paused_sample.Reset();
+        present_retry_at=0;CancelWaitableTimer(presentation_timer.h);shell.screen_blank=true;shell.redraw=false;shell.chrome_dirty=true;
+        if(chrome.composition)CHECK(chrome.set_screen_visibility(true,shell.has_video));
+        SetEvent(wake.h);return S_OK;
+    }
     void queue_video_frame(VideoFrame frame) {
+        if(screen_suspended||frame.visibility_serial!=visibility_serial){++visibility_skips;return;}
         if(source_width!=frame.width||source_height!=frame.height){source_width=frame.width;source_height=frame.height;++source_shape_changes;}
         if(video.size()==(codec==265?4:8)){video.pop_front();if(IsIconic(window))++minimized_skips;else if(video_sync)++late_frames;else ++interactive_skips;}
         video.push_back(std::move(frame));video_high_water=std::max(video_high_water,video.size());
@@ -425,19 +438,19 @@ struct App {
             DecodeAssociations::Entry pending;
             if(!decode_pending.take(pts,pending)){error_hr("decoded frame has no input orientation association",E_UNEXPECTED);return E_UNEXPECTED;}
             decoder_residence.add(ready-pending.began);
-            queue_video_frame({s,pts/1e7,width,height,output_aperture,output_color,pending.rotation});
+            queue_video_frame({s,pts/1e7,width,height,output_aperture,output_color,pending.rotation,pending.visibility_serial});
         }
         return E_UNEXPECTED;
     }
-    HRESULT submit(const uint8_t* bytes, unsigned len, double pts,UINT rotation=0) {
+    HRESULT submit(const uint8_t* bytes, unsigned len, double pts,UINT rotation=0,uint64_t frame_serial=0) {
         if(!decoder_ready||!decoder)return MF_E_TRANSFORM_TYPE_NOT_SET;
         if (!bytes || !len || len > (codec==265?4u:2u)*1024*1024 || !valid_media_time(pts)||!valid_rotation(rotation)) return E_INVALIDARG;
         const LONGLONG sample_time=LONGLONG(pts*1e7);
         // This table now owns display semantics, not just optional timing data.
         // Never evict an unresolved input or guess between conflicting same-PTS frames.
-        if(!decode_pending.can_admit(sample_time,rotation)){
+        if(!decode_pending.can_admit(sample_time,rotation,frame_serial)){
             CHECK(output());
-            if(!decode_pending.can_admit(sample_time,rotation)){error_hr("decoder orientation association budget or ambiguous timestamp",MF_E_NOTACCEPTING);return MF_E_NOTACCEPTING;}
+            if(!decode_pending.can_admit(sample_time,rotation,frame_serial)){error_hr("decoder frame association budget or ambiguous timestamp",MF_E_NOTACCEPTING);return MF_E_NOTACCEPTING;}
         }
         const double began=now_seconds();
         ComPtr<IMFMediaBuffer> buffer; CHECK(MFCreateMemoryBuffer(len, &buffer)); BYTE* p;
@@ -448,11 +461,12 @@ struct App {
         double accepted=now_seconds();HRESULT hr = decoder->ProcessInput(0, sample.Get(), 0);
         if (hr == MF_E_NOTACCEPTING) { CHECK(output());accepted=now_seconds();hr = decoder->ProcessInput(0, sample.Get(), 0); }
         CHECK(hr);
-        if(!decode_pending.add(sample_time,accepted,rotation))return E_UNEXPECTED;
+        if(!decode_pending.add(sample_time,accepted,rotation,frame_serial))return E_UNEXPECTED;
         CHECK(output());
         const double elapsed=now_seconds()-began;++submit_calls;submit_seconds+=elapsed;submit_max_seconds=std::max(submit_max_seconds,elapsed);return S_OK;
     }
-    HRESULT draw(IMFSample* frame, UINT visible_width, UINT visible_height,ID3D11Texture2D* synthetic_probe_copy=nullptr,const RECT* aperture=nullptr,const VideoColor* metadata=nullptr,bool synthetic_busy=false,UINT rotation=0) {
+    HRESULT draw(IMFSample* frame, UINT visible_width, UINT visible_height,ID3D11Texture2D* synthetic_probe_copy=nullptr,const RECT* aperture=nullptr,const VideoColor* metadata=nullptr,bool synthetic_busy=false,UINT rotation=0,uint64_t frame_serial=0) {
+        if(screen_suspended||frame_serial!=visibility_serial)return S_FALSE;
         if(!valid_rotation(rotation))return E_INVALIDARG;
         const bool quarter_turn=rotation==90||rotation==270;
         const UINT display_width=quarter_turn?visible_height:visible_width,display_height=quarter_turn?visible_width:visible_height;
@@ -542,8 +556,9 @@ struct App {
         video_slot_reserved=false;present_retry_at=0;
         CHECK(present);
         if(replace_cache){spare_paused_texture=paused_texture;spare_paused_sample=last_frame.sample;paused_texture=std::move(next_paused);}
-        last_frame={std::move(next_sample),0,visible_width,visible_height,src,color,rotation};
+        last_frame={std::move(next_sample),0,visible_width,visible_height,src,color,rotation,frame_serial};
         shell.video_size(display_width,display_height);presented_rotation=rotation;
+        if(shell.screen_blank){CHECK(chrome.set_screen_visibility(false,true));shell.screen_blank=false;shell.chrome_dirty=true;}
         if(presented_width!=display_width||presented_height!=display_height){presented_width=display_width;presented_height=display_height;++presented_shape_changes;}
         ++presented; return S_OK;
     }
@@ -600,6 +615,7 @@ struct App {
     }
     HRESULT tick() {
         CHECK(tick_audio());CHECK(chrome.layout(shell)); double n = now_seconds();bool redraw_needed=shell.redraw.exchange(false);
+        while(!video.empty()&&(screen_suspended||video.front().visibility_serial!=visibility_serial)){video.pop_front();++visibility_skips;}
         const bool minimized=IsIconic(window)!=FALSE;
         while (video.size() > 1 && (minimized||!video_sync||video[1].pts <= n)) {video.pop_front();if(minimized)++minimized_skips;else if(video_sync)++late_frames;else ++interactive_skips;}
         if(minimized){shell.redraw=true;return S_OK;}
@@ -613,9 +629,9 @@ struct App {
             if(ready!=WAIT_OBJECT_0)return HRESULT_FROM_WIN32(GetLastError());
             video_slot_reserved=true;
         }
-        if(due){auto& frame=video.front();const auto before=presented;HRESULT hr=draw(frame.sample.Get(),frame.width,frame.height,nullptr,&frame.source,&frame.color,false,frame.rotation);CHECK(hr);
+        if(due){auto& frame=video.front();const auto before=presented;HRESULT hr=draw(frame.sample.Get(),frame.width,frame.height,nullptr,&frame.source,&frame.color,false,frame.rotation,frame.visibility_serial);CHECK(hr);
             if(hr==S_OK){if(presented>before&&video_sync)presentation_late.add(now_seconds()-frame.pts);video.pop_front();}}
-        else {HRESULT hr=draw(last_frame.sample.Get(),last_frame.width,last_frame.height,nullptr,&last_frame.source,&last_frame.color,false,last_frame.rotation);CHECK(hr);if(hr==S_FALSE)shell.redraw=true;}
+        else {HRESULT hr=draw(last_frame.sample.Get(),last_frame.width,last_frame.height,nullptr,&last_frame.source,&last_frame.color,false,last_frame.rotation,last_frame.visibility_serial);CHECK(hr);if(hr==S_FALSE)shell.redraw=true;}
         return S_OK;
     }
 };
@@ -776,11 +792,15 @@ int am_prepare_video(void* p,unsigned codec,unsigned width,unsigned height,unsig
     HRESULT hr=a->init_decoder(codec,width,height);if(FAILED(hr)){a->recover_fault(hr);error_hr("prepare video decoder",hr);return 0;}return 1;
 }
 int am_hevc_available(void* p) {return static_cast<App*>(p)->hevc_available?1:0;}
-int am_video(void* p, const uint8_t* data, unsigned len, double pts, unsigned codec,unsigned width,unsigned height,unsigned rotation_cw_degrees) {
+int am_screen_state(void* p,uint64_t serial,int suspended){
+    auto app=static_cast<App*>(p);HRESULT hr=app->screen_state(serial,suspended!=0);
+    if(FAILED(hr)){app->recover_fault(hr);error_hr("screen visibility",hr);return 0;}return 1;
+}
+int am_video(void* p, const uint8_t* data, unsigned len, double pts, unsigned codec,unsigned width,unsigned height,unsigned rotation_cw_degrees,uint64_t lastvisibility_serial) {
     auto app=static_cast<App*>(p);if((codec!=264&&codec!=265)||!valid_rotation(rotation_cw_degrees))return 0;
     if(app->graphics_pending||app->audio_pending){error_hr("native devices are recovering",MF_E_NOTACCEPTING);return 0;}
     if(app->codec!=codec||!app->decoder_ready){HRESULT hr=app->init_decoder(codec,width,height);if(FAILED(hr)){error_hr("video codec selection",hr);return 0;}}
-    HRESULT hr = app->submit(data, len, pts,rotation_cw_degrees); if (FAILED(hr)) {app->recover_fault(hr);error_hr("video decode", hr); return 0; } return 1;
+    HRESULT hr = app->submit(data, len, pts,rotation_cw_degrees,lastvisibility_serial); if (FAILED(hr)) {app->recover_fault(hr);error_hr("video decode", hr); return 0; } return 1;
 }
 int am_video_ready(void* p) {auto a=static_cast<App*>(p);return a->video.size()<(a->codec==265?3:6);}
 int am_audio_ready(void* p) {return static_cast<App*>(p)->sound.size()<AUDIO_QUEUE_CAPACITY;}
@@ -805,8 +825,10 @@ void am_flush_audio(void* p) {
 }
 int am_reset(void* p) {
     auto a = static_cast<App*>(p); am_flush_audio(p); a->video.clear();
+    a->visibility_serial=0;a->screen_suspended=false;a->shell.screen_blank=false;
     a->last_frame.sample.Reset();
     a->shell.reset_video();
+    if(a->chrome.composition){HRESULT hr=a->chrome.set_screen_visibility(false,false);if(FAILED(hr)){error_hr("reset screen visibility",hr);return 0;}}
     a->reset_video_decoder();a->output_ahead={};a->presentation_late={};a->decoder_residence={};
     a->source_width=a->source_height=a->presented_width=a->presented_height=0;a->source_shape_changes=a->presented_shape_changes=0;
     a->presented_rotation=0;
@@ -824,6 +846,7 @@ const char* am_stats(void* p) {
         + " source_shape="+std::to_string(a->source_width)+"x"+std::to_string(a->source_height)+" source_changes="+std::to_string(a->source_shape_changes)
         + " presented_shape="+std::to_string(a->presented_width)+"x"+std::to_string(a->presented_height)+" presented_changes="+std::to_string(a->presented_shape_changes)
         + " presented_rotation_cw="+std::to_string(a->presented_rotation)
+        + " visibility_serial="+std::to_string(a->visibility_serial)+" suspended="+std::to_string(a->screen_suspended)+" screen_blank="+std::to_string(a->shell.screen_blank.load())
         + " client_shape="+std::to_string(client.right-client.left)+"x"+std::to_string(client.bottom-client.top)
         + a->output_format
         + " decoder_instances="+std::to_string(a->decoder_instances) + " codec=" + std::to_string(a->codec) + " hevc_available=" + std::to_string(a->hevc_available)

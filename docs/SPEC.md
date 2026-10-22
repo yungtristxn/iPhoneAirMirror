@@ -4,6 +4,11 @@ Confirmed 2026-10-21: the user wants their own minimal, efficient Windows AirPla
 
 ## Scope
 - Native iPhone Control Center > Screen Mirroring over the same local network.
+- When the sender explicitly suspends the mirrored screen, show an opaque black
+  phone viewport while preserving its size and quick controls. Resume only with
+  a fresh frame after a sender resume signal; queued/cached pre-suspension frames
+  must not reappear. A still photo or paused video alone must not trigger blackout.
+  Screen blanking does not mute or reset an independently active audio transport.
 - Windows Public/Private/Domain classification must not block startup. Select one
   active Ethernet/Wi-Fi RFC1918 IPv4 interface with a gateway; bind discovery and
   reception to that interface. No automatic network-profile or firewall changes.

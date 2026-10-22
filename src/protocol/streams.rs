@@ -410,6 +410,7 @@ fn video_loop(
     let mut dimensions = (0, 0);
     let mut hevc_sequence = None;
     let mut rotation_cw_degrees = 0;
+    let mut visibility_serial = 0;
     let mut frame_options = None;
     let mut first_frame = true;
     let mut first_config = true;
@@ -516,9 +517,11 @@ fn video_loop(
                     payload_received_at,
                     ready_at,
                     rotation_cw_degrees,
+                    visibility_serial,
                 })?;
             }
             1 => {
+                let suspended = super::orientation::configuration_suspended(&header)?;
                 if first_config {
                     shared.log(&format!(
                         "first video configuration receive_since_tcp_ms={:.1}",
@@ -549,6 +552,11 @@ fn video_loop(
                 }
                 codec = Some(next);
                 rotation_cw_degrees = next_rotation;
+                // Priority state is independent of the bounded compressed-video
+                // queue. It reaches presentation even while that queue is full.
+                if let Some(suspended) = suspended {
+                    visibility_serial = shared.publish_screen_state(epoch, suspended)?;
+                }
                 shared.log(&format!("H.{next} configuration accepted"));
                 shared.log(&format!(
                     "AirPlay display transform={} clockwise_degrees={rotation_cw_degrees}",

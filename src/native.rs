@@ -36,6 +36,7 @@ unsafe extern "C" {
     fn am_presented_size(app: *mut c_void) -> u64;
     fn am_discovery_status(discovery: *mut c_void) -> i32;
     fn am_hevc_available(app: *mut c_void) -> i32;
+    fn am_screen_state(app: *mut c_void, serial: u64, suspended: i32) -> i32;
     fn am_video(
         app: *mut c_void,
         data: *const u8,
@@ -45,6 +46,7 @@ unsafe extern "C" {
         width: u32,
         height: u32,
         rotation_cw_degrees: u32,
+        visibility_serial: u64,
     ) -> i32;
     fn am_video_ready(app: *mut c_void) -> i32;
     fn am_video_sync(app: *mut c_void, synchronized: i32);
@@ -309,10 +311,11 @@ impl App {
         data: &[u8],
         pts: f64,
         codec: u32,
-        width: u32,
-        height: u32,
+        dimensions: (u32, u32),
         rotation_cw_degrees: u32,
+        visibility_serial: u64,
     ) -> Result<()> {
+        let (width, height) = dimensions;
         ensure!(
             matches!(codec, 264 | 265)
                 && !data.is_empty()
@@ -336,9 +339,16 @@ impl App {
                 width,
                 height,
                 rotation_cw_degrees,
+                visibility_serial,
             )
         } == 0
         {
+            return Err(error());
+        }
+        Ok(())
+    }
+    pub fn screen_state(&self, serial: u64, suspended: bool) -> Result<()> {
+        if unsafe { am_screen_state(self.0.as_ptr(), serial, suspended.into()) } == 0 {
             return Err(error());
         }
         Ok(())

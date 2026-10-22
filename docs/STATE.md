@@ -2,14 +2,38 @@
 
 Updated: 2026-10-22
 
-## Current fixes and remaining Photos check
+## Screen-off blackout: automated checks passed
+- User accepted the independent Photos-view orientation limitation and declined
+  a manual layout control. New request: PC viewport goes black when the iPhone
+  screen turns off/locks, then restores on resume. No idle/photo timeout heuristic.
+- Sender configuration byte 6 values 0x56/0x5e mean suspended; 0x16/0x1e resume,
+  matching pinned UxPlay handling and live options 0x011e -> 0x015e. A priority
+  epoch/generation boundary hides video independently of queue capacity. Native
+  composition shows opaque black, clears both paused caches and waits for a fresh
+  matching frame on resume; audio and window shape are preserved.
+- 111 Rust tests pass on FFmpeg/default backends; strict Clippy, formatting,
+  release build, silent native GPU checks (190 GPU surfaces; zero audio samples)
+  and three lifecycle cycles pass. Includes resize/fullscreen/restore, busy
+  presentation, stale output and rapid lock/unlock. Read-only second review found
+  no concrete correctness issue. No Computer Use or audible tests.
+- Tested executable SHA-256:
+  `7B65C9ACA58FC8C5C4EDB13B98DF198E032A575B491FA7112AD7033926FB1F31`.
+  Baseline: `local/screen-off-baseline/`; checks: `local/screen-off-verification/`;
+  lifecycle: `local/control-lifecycle/20261022T192816883327Z/result.json`.
+- Physical lock/unlock and final desktop appearance on this build are pending.
+  Next: connect from silent Settings, lock/wake/unlock twice. Verify black while
+  suspended and fresh picture on resume. Independent Photos output without a
+  suspension signal cannot reveal physical phone power state. SCREEN_OFF.md.
+
+## Verified audio/display fixes
 - RTSP event replies from this iPhone omit CSeq. The receiver now accepts that
   observed format on its serialized event connection; explicit wrong/duplicate
   sequences remain rejected. Optional failures retain the socket until teardown.
 - Live 3A2CDD... evidence confirms repeated display acknowledgments for 2160x994
   and 994x2160. The user reports photo opening now updates correctly, but turning
-  the phone while a photo remains open still does not. That case remains open;
-  do not call all Photos rotation accepted. See ROTATION_REGRESSION.md.
+  the phone while a photo remains open still does not. The user accepts that
+  limitation for now; do not call all Photos rotation supported. See
+  ROTATION_REGRESSION.md.
 - That run also hit an audio-start burst: 32 native PCM blocks queued while all
   1,036 WASAPI frames were still padded. Admission now waits for capacity in the
   existing bounded queues. Producer retries cancel on stop/owner/FLUSH changes.
@@ -34,8 +58,8 @@ Updated: 2026-10-22
   independent external-display content; no reliable receiver-side physical-angle
   input was found. Evidence: `local/photos-external-feed-confirmed/`. Automatic
   in-photo orientation remains unresolved. Do not infer it from pixels/APStats.
-- Implementation committed as `11a3185`. This exact candidate is open with
-  --mute; its live startup stats confirm muted=1 and audio_samples=0. Launch and
+- Prior implementation committed as `11a3185`. Its muted physical run confirmed
+  muted=1 and audio_samples=0 at startup. Launch and
   copied checks: `local/photos-audio-burst-fix/`. Verified source-included ZIP:
   `dist/AirMirrorLite-Windows-x64-audio-burst-fix-2026-10-22.zip`.
 

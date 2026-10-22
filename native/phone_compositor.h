@@ -10,7 +10,8 @@
 struct PhoneCompositor {
     ComPtr<IDCompositionDevice> composition;
     ComPtr<IDCompositionTarget> target;
-    ComPtr<IDCompositionVisual> root, picture;
+    ComPtr<IDCompositionVisual> root, picture,blackout;
+    ComPtr<IDCompositionSurface> black_surface;
     ComPtr<IDCompositionRectangleClip> clip;
     ComPtr<IDXGISwapChain1> frame,video_surface;
     ComPtr<ID2D1Factory> drawing;
@@ -18,6 +19,7 @@ struct PhoneCompositor {
     UINT width=0,height=0;
     UINT video_width=1,video_height=1;
     uint64_t redraws=0;
+    bool masked=false,video_attached=false;
     bool pending=false;double retry_at=0,present_seconds=0,present_max_seconds=0;uint64_t present_busy=0;
     HRESULT init(ID3D11Device* device,IDXGIFactory2* factory,HWND window,IDXGISwapChain1* video) {
         ComPtr<IDXGIDevice> dxgi;CHECK(device->QueryInterface(IID_PPV_ARGS(&dxgi)));
@@ -34,7 +36,41 @@ struct PhoneCompositor {
         CHECK(root->AddVisual(picture.Get(),TRUE,nullptr));CHECK(target->SetRoot(root.Get()));
         CHECK(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,drawing.GetAddressOf()));
         CHECK(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,__uuidof(IDWriteFactory),reinterpret_cast<IUnknown**>(writing.GetAddressOf())));
+        CHECK(composition->CreateVisual(&blackout));CHECK(picture->AddVisual(blackout.Get(),TRUE,nullptr));
+        CHECK(initialize_black(device));
         return S_OK;
+    }
+    HRESULT initialize_black(ID3D11Device* device,ID3D11Texture2D* synthetic_pixel=nullptr){
+        // A constant 1x1 opaque surface covers the viewport independently of
+        // either flip chain's readiness. The optional copy is intrinsic-test only.
+        ComPtr<IDCompositionSurface> next;CHECK(composition->CreateSurface(1,1,DXGI_FORMAT_B8G8R8A8_UNORM,DXGI_ALPHA_MODE_PREMULTIPLIED,&next));
+        ComPtr<IDXGISurface> surface;POINT offset{};CHECK(next->BeginDraw(nullptr,IID_PPV_ARGS(&surface),&offset));
+        auto properties=D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED),96,96);
+        ComPtr<ID2D1RenderTarget> canvas;HRESULT hr=drawing->CreateDxgiSurfaceRenderTarget(surface.Get(),&properties,&canvas);
+        ComPtr<ID2D1SolidColorBrush> brush;
+        if(SUCCEEDED(hr))hr=canvas->CreateSolidColorBrush(D2D1::ColorF(0x000000,1.0f),&brush);
+        if(SUCCEEDED(hr)){
+            canvas->BeginDraw();canvas->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+            canvas->FillRectangle(D2D1::RectF(float(offset.x),float(offset.y),float(offset.x+1),float(offset.y+1)),brush.Get());hr=canvas->EndDraw();
+        }
+        if(SUCCEEDED(hr)&&synthetic_pixel){
+            D3D11_TEXTURE2D_DESC desc{};synthetic_pixel->GetDesc(&desc);
+            if(desc.Width!=1||desc.Height!=1||desc.Format!=DXGI_FORMAT_B8G8R8A8_UNORM||desc.Usage!=D3D11_USAGE_STAGING)hr=E_INVALIDARG;
+            else {ComPtr<ID3D11Texture2D> texture;hr=surface.As(&texture);if(SUCCEEDED(hr)){
+                ComPtr<ID3D11DeviceContext> context;device->GetImmediateContext(&context);
+                D3D11_BOX box{UINT(offset.x),UINT(offset.y),0,UINT(offset.x+1),UINT(offset.y+1),1};
+                context->CopySubresourceRegion(synthetic_pixel,0,0,0,0,texture.Get(),0,&box);
+            }}
+        }
+        HRESULT ended=next->EndDraw();CHECK(hr);CHECK(ended);black_surface=std::move(next);
+        CHECK(blackout->SetContent(masked?black_surface.Get():nullptr));return S_OK;
+    }
+    HRESULT set_screen_visibility(bool blank,bool has_video,bool geometry=false){
+        const bool attach=has_video&&!blank;
+        if(masked==blank&&video_attached==attach&&!geometry)return S_OK;
+        CHECK(picture->SetContent(attach?video_surface.Get():nullptr));CHECK(blackout->SetContent(blank?black_surface.Get():nullptr));
+        CHECK(composition->Commit());masked=blank;video_attached=attach;return S_OK;
     }
     // Explicit diagnostic only: save the idle artwork, never a sender/video surface.
     HRESULT save_idle_artwork(IDXGISurface* surface,const wchar_t* path) {
@@ -53,7 +89,7 @@ struct PhoneCompositor {
     }
     HRESULT layout(PhoneShell& shell,const wchar_t* diagnostic_path=nullptr,ID3D11Texture2D* idle_readback=nullptr) {
         const bool diagnostic=diagnostic_path||idle_readback;
-        if(pending&&now_seconds()<retry_at&&!diagnostic)return S_OK;
+        if(pending&&now_seconds()<retry_at&&!diagnostic&&!shell.screen_blank)return S_OK;
         if(diagnostic && shell.has_video)return E_INVALIDARG;
         RECT r{};GetClientRect(shell.window,&r);UINT w=UINT(r.right),h=UINT(r.bottom);
         if(!w||!h||IsIconic(shell.window))return S_OK;
@@ -71,7 +107,9 @@ struct PhoneCompositor {
         CHECK(clip->SetTopRightRadiusX(cr));CHECK(clip->SetTopRightRadiusY(cr));
         CHECK(clip->SetBottomLeftRadiusX(cr));CHECK(clip->SetBottomLeftRadiusY(cr));
         CHECK(clip->SetBottomRightRadiusX(cr));CHECK(clip->SetBottomRightRadiusY(cr));
-        CHECK(picture->SetContent(shell.has_video?video_surface.Get():nullptr));
+        CHECK(blackout->SetTransform(D2D1::Matrix3x2F::Scale(float(video_width),float(video_height))));
+        // Mask/geometry commits must not wait for a busy chrome Present.
+        CHECK(set_screen_visibility(shell.screen_blank,shell.has_video,shell.screen_blank));
         if(changed){CHECK(frame->ResizeBuffers(0,w,h,DXGI_FORMAT_UNKNOWN,0));width=w;height=h;}
         ComPtr<IDXGISurface> surface;CHECK(frame->GetBuffer(0,IID_PPV_ARGS(&surface)));
         auto properties=D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,

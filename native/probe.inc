@@ -81,7 +81,7 @@ static HRESULT probe_media_wait(App* app) {
     SetEvent(wake.h);CHECK(app->wait_for_media(1000));if(WaitForSingleObject(wake.h,0)!=WAIT_TIMEOUT)return E_FAIL;
     return S_OK;
 }
-static HRESULT probe_video(App* app,VideoProbeContext& probe, UINT width, UINT height,UINT codec=264,bool continue_stream=false,bool dpb16=false,UINT rotation=0) {
+static HRESULT probe_video(App* app,VideoProbeContext& probe, UINT width, UINT height,UINT codec=264,bool continue_stream=false,bool dpb16=false,UINT rotation=0,uint64_t frame_serial=0,bool hidden_output=false) {
     // These independent encoder fixtures represent separate phones/sessions.
     if(!continue_stream){app->shell.reset_video();CHECK(app->init_decoder(codec,width,height));}
     else if(!app->decoder_ready||app->codec!=codec)return E_UNEXPECTED;
@@ -110,7 +110,7 @@ static HRESULT probe_video(App* app,VideoProbeContext& probe, UINT width, UINT h
             std::vector<uint8_t> packet(bytes,bytes+len);LONGLONG pts;hr=sample->GetSampleTime(&pts);
             if(SUCCEEDED(hr)&&dpb16&&!probe_dpb16_packet(packet,probe.dpb16_sps)){error_hr("synthetic DPB16 parameter rewrite",E_FAIL);hr=E_FAIL;}
             if(SUCCEEDED(hr)){if(!probe.validate||probe.validate(packet.data(),unsigned(packet.size()),codec)!=1){error_hr("production parser rejected synthetic access unit",E_FAIL);hr=E_FAIL;}else ++probe.validated;}
-            if(SUCCEEDED(hr))hr=app->submit(packet.data(),unsigned(packet.size()),pts/1e7,rotation);compressed->Unlock();CHECK(hr);
+            if(SUCCEEDED(hr))hr=app->submit(packet.data(),unsigned(packet.size()),pts/1e7,rotation,frame_serial);compressed->Unlock();CHECK(hr);
         }return S_OK;
     };
     double start=now_seconds();
@@ -130,6 +130,7 @@ static HRESULT probe_video(App* app,VideoProbeContext& probe, UINT width, UINT h
         codec,width,height,rotation,unsigned(continue_stream),static_cast<unsigned long long>(inputs),static_cast<unsigned long long>(outputs),pending_before,pending_after,app->decode_pending.high_water);
     if(outputs>inputs+pending_before||inputs+pending_before-outputs!=pending_after
         ||(continue_stream&&pending_after>pending_before)){error_hr("decoder associations accumulated across format transition",E_FAIL);return E_FAIL;}
+    if(hidden_output)return outputs>0&&app->video.empty()&&!app->last_frame.sample&&app->shell.screen_blank&&app->chrome.masked&&!app->chrome.video_attached?S_OK:E_FAIL;
     // A paused redraw uses the retained private texture, not a live decoder surface.
     if(!app->last_frame.sample){error_hr("no retained frame after encoder drain",E_FAIL);return E_FAIL;}
     app->video.clear();
@@ -424,6 +425,68 @@ static HRESULT probe_minimized_output(App* app){
     ULONGLONG deadline=GetTickCount64()+1000;while(!app->video.empty()&&GetTickCount64()<deadline)if(am_pump(app,20)<0)return E_FAIL;
     if(app->presented<=presented||!app->video.empty()||app->presentation_late.count!=lateness+1){char detail[180];sprintf_s(detail,"minimized restore queued=%zu presented_delta=%llu iconic=%d",app->video.size(),static_cast<unsigned long long>(app->presented-presented),int(IsIconic(app->window)));error_hr(detail,E_FAIL);return E_FAIL;}return S_OK;
 }
+static HRESULT probe_screen_visibility(App* app,VideoProbeContext& probe){
+    if(!app->last_frame.sample||app->visibility_serial||app->screen_suspended||app->shell.screen_blank||app->audio_running)return E_FAIL;
+    auto original=app->last_frame;const UINT w=original.width,h=original.height;const auto codec=app->codec;
+    const bool synchronized=app->video_sync,muted=app->shell.muted;const float volume=app->shell.volume;
+    const auto presented=app->presented;const UINT shown_w=app->presented_width,shown_h=app->presented_height;
+    RECT original_window{};GetWindowRect(app->window,&original_window);
+    // The only pixel readback is the new constant 1x1 black mask, never video.
+    D3D11_TEXTURE2D_DESC desc{};desc.Width=desc.Height=desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;
+    desc.Format=DXGI_FORMAT_B8G8R8A8_UNORM;desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> pixel;CHECK(app->device->CreateTexture2D(&desc,nullptr,&pixel));CHECK(app->chrome.initialize_black(app->device.Get(),pixel.Get()));
+    D3D11_MAPPED_SUBRESOURCE mapped{};CHECK(app->context->Map(pixel.Get(),0,D3D11_MAP_READ,0,&mapped));
+    const auto rgba=static_cast<const uint8_t*>(mapped.pData);const bool opaque_black=rgba[0]==0&&rgba[1]==0&&rgba[2]==0&&rgba[3]==255;
+    app->context->Unmap(pixel.Get(),0);if(!opaque_black)return E_FAIL;
+    auto queued=original;queued.pts=now_seconds()+.5;app->queue_video_frame(std::move(queued));
+    constexpr LONGLONG delayed_pts=123456789;
+    if(!app->decode_pending.add(delayed_pts,now_seconds(),0,0))return E_FAIL;
+    if(!am_screen_state(app,1,1)||!app->video.empty()||app->last_frame.sample||app->paused_texture||app->spare_paused_texture)return E_FAIL;
+    auto black=[&]{return app->shell.screen_blank&&app->chrome.masked&&!app->chrome.video_attached&&!app->last_frame.sample
+        &&app->presented==presented&&app->presented_width==shown_w&&app->presented_height==shown_h;};
+    if(!black()||app->shell.idle_artwork_visible())return E_FAIL;
+    DecodeAssociations::Entry delayed;
+    if(!app->decode_pending.take(delayed_pts,delayed)||delayed.visibility_serial!=0)return E_FAIL;
+    auto stale=original;stale.visibility_serial=delayed.visibility_serial;app->queue_video_frame(std::move(stale));if(!app->video.empty())return E_FAIL;
+    // Compressed dependencies continue through MF even when all output is hidden.
+    CHECK(probe_video(app,probe,w,h,codec,true,false,0,0,true));if(!black())return E_FAIL;
+    for(auto size:{std::pair<int,int>{800,500},{600,900}}){
+        if(!SetWindowPos(app->window,nullptr,original_window.left,original_window.top,size.first,size.second,SWP_NOZORDER|SWP_NOACTIVATE))return E_FAIL;
+        CHECK(app->tick());if(!black())return E_FAIL;
+    }
+    DWORD_PTR ignored=0;
+    for(int i=0;i<2;++i){if(!SendMessageTimeoutW(app->window,WM_KEYDOWN,VK_F11,0,SMTO_ABORTIFHUNG,2000,&ignored))return E_FAIL;CHECK(app->tick());if(!black())return E_FAIL;}
+    WINDOWPLACEMENT placement{sizeof(placement)};GetWindowPlacement(app->window,&placement);auto minimized=placement;minimized.showCmd=SW_SHOWMINNOACTIVE;
+    SetWindowPlacement(app->window,&minimized);ShowWindow(app->window,SW_HIDE);
+    if(!am_screen_state(app,2,0)){SetWindowPlacement(app->window,&placement);return E_FAIL;}
+    CHECK(app->tick());if(!black())return E_FAIL;
+    SetWindowPlacement(app->window,&placement);ShowWindow(app->window,SW_HIDE);
+    SetWindowPos(app->window,nullptr,original_window.left,original_window.top,original_window.right-original_window.left,original_window.bottom-original_window.top,SWP_NOZORDER|SWP_NOACTIVATE);
+    CHECK(app->tick());if(!black()||app->screen_suspended)return E_FAIL;
+    if(app->draw(nullptr,w,h,nullptr,nullptr,nullptr,false,0,0)!=S_FALSE||!black())return E_FAIL;
+    auto old=original;old.pts=now_seconds();app->queue_video_frame(std::move(old));if(!app->video.empty())return E_FAIL;
+    if(!app->video_slot_reserved){if(WaitForSingleObject(app->video_event.h,1000)!=WAIT_OBJECT_0)return E_FAIL;app->video_slot_reserved=true;}
+    if(app->draw(original.sample.Get(),w,h,nullptr,&original.source,&original.color,true,original.rotation,2)!=S_FALSE||!black())return E_FAIL;
+    CHECK(probe_video(app,probe,w,h,codec,true,false,0,2));
+    if(app->shell.screen_blank||app->chrome.masked||!app->chrome.video_attached||!app->last_frame.sample||app->last_frame.visibility_serial!=2)return E_FAIL;
+    const auto paused=app->last_frame.sample;const auto resumed=app->presented;
+    // A static photo remains visible with no visibility transition.
+    if(!am_screen_state(app,2,0))return E_FAIL;for(int i=0;i<4;++i){CHECK(app->tick());Sleep(2);}
+    if(app->shell.screen_blank||app->last_frame.sample.Get()!=paused.Get()||app->presented<resumed)return E_FAIL;
+    auto fresh=app->last_frame;
+    for(uint64_t serial:{4ull,6ull}){
+        // First iteration coalesces an unseen off/on; second delivers both states.
+        if(serial==6&&!am_screen_state(app,5,1))return E_FAIL;
+        if(!am_screen_state(app,serial,0)||!app->shell.screen_blank||!app->chrome.masked||app->last_frame.sample)return E_FAIL;
+        auto old_frame=fresh;old_frame.pts=now_seconds();app->queue_video_frame(std::move(old_frame));if(!app->video.empty())return E_FAIL;
+        auto new_frame=fresh;new_frame.pts=now_seconds();new_frame.visibility_serial=serial;app->queue_video_frame(std::move(new_frame));
+        const ULONGLONG deadline=GetTickCount64()+1000;
+        while(app->shell.screen_blank&&GetTickCount64()<deadline)if(am_pump(app,20)<0)return E_FAIL;
+        if(app->shell.screen_blank||app->chrome.masked||!app->chrome.video_attached||app->last_frame.visibility_serial!=serial)return E_FAIL;
+    }
+    if(app->video_sync!=synchronized||app->shell.muted!=muted||app->shell.volume!=volume||app->audio_running||app->audio_frames)return E_FAIL;
+    return S_OK;
+}
 extern "C" int am_video_probe(void* p,ProbeValidator validate) {
     if(!p||!validate)return 0;
     auto app=static_cast<App*>(p);uint64_t before=app->decoder_surfaces;VideoProbeContext probe{validate};
@@ -453,6 +516,7 @@ extern "C" int am_video_probe(void* p,ProbeValidator validate) {
     if(SUCCEEDED(hr)){stage="interactive/synchronized transition";hr=probe_interactive_video(app);}
     if(SUCCEEDED(hr)){stage="first successful presentation commitment";hr=probe_first_present_commit(app);}
     if(SUCCEEDED(hr)){stage="minimized output/restore";hr=probe_minimized_output(app);}
+    if(SUCCEEDED(hr)){stage="screen suspend, stale output and fresh resume";hr=probe_screen_visibility(app,probe);}
     if(FAILED(hr)){error_hr(stage,hr);return 0;}
     if(app->decoder_surfaces-before<60){error_hr("insufficient hardware decoder surfaces",E_FAIL);return 0;}
     if(probe.validated<60){error_hr("insufficient production-validated synthetic access units",E_FAIL);return 0;}
@@ -509,7 +573,7 @@ static HRESULT probe_native_contracts(App* app){
             ||!pending.take(100,value)||value.rotation!=0
             ||!pending.take(300,value)||value.rotation!=90||pending.take(300,value))return E_FAIL;
         // Duplicate timestamps are safe only when their transform is identical.
-        if(!pending.add(400,4,180)||!pending.add(400,5,180)||pending.add(400,6,90)||pending.add(500,6,45))return E_FAIL;
+        if(!pending.add(400,4,180)||!pending.add(400,5,180)||pending.add(400,6,90)||pending.add(400,6,180,1)||pending.add(500,6,45))return E_FAIL;
         if(!pending.take(400,value)||value.began!=4||!pending.take(400,value)||value.began!=5)return E_FAIL;
         for(unsigned i=0;i<32;++i)if(!pending.add(i,1,(i%4)*90))return E_FAIL;
         if(pending.add(1000,2,0)||pending.active_count!=32||pending.high_water!=32)return E_FAIL;
