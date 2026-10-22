@@ -75,9 +75,12 @@ Those waits cannot be attributed to decoder initialization. New stage timing
 helps locate any remaining delay; no resolution reduction, frame dropping or
 buffer reduction was introduced to chase a synthetic benchmark.
 
-Physical first-picture speed, latest Photos behavior and FFmpeg audio sync remain
-separate acceptance boundaries. A quiet Settings reconnect can check the first;
-no sound playback is requested or authorized here.
+The user subsequently confirmed that the first picture appears sooner during the
+quiet phone check. The live log records 294.7 ms from receiver claim to first
+picture, which is not a measurement from the phone tap. Photos rotation then
+exposed a separate event-response handling failure; see STATE.md. Latest Photos
+behavior and FFmpeg audio sync remain separate acceptance boundaries; no sound
+playback is requested or authorized here.
 
 Evidence under ignored local/:
 - `connection-{before,after}-20261022/result.json`

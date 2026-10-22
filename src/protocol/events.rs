@@ -214,6 +214,34 @@ fn run_channel(
     };
     // Only the negotiated peer's one connection carries commands.
     drop(listener);
+    let result = run_updates(&mut stream, stop, updates, base_display, log, policy);
+    if let Err(error) = result
+        && !stop.load(Ordering::Acquire)
+    {
+        let reason: String = error.to_string().chars().take(192).collect();
+        log(&format!(
+            "optional display updates disabled: {reason}; event connection retained"
+        ));
+        // A malformed reply, timeout or write failure disables this optional
+        // feature permanently for the session. Do not send further commands or
+        // retry an ambiguous transaction, and do not signal a fatal event-stream
+        // disconnect to the phone by closing our accepted socket here.
+        while !stop.load(Ordering::Acquire) {
+            thread::sleep(policy.poll);
+        }
+    }
+    drop(stream);
+    Ok(())
+}
+
+fn run_updates(
+    stream: &mut TcpStream,
+    stop: &AtomicBool,
+    updates: &DisplayUpdates,
+    base_display: &Value,
+    log: &impl Fn(&str),
+    policy: Policy,
+) -> Result<()> {
     // Restore blocking mode inherited from Winsock accept().
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(IO_POLL))?;
@@ -238,22 +266,14 @@ fn run_channel(
         let command = command(base_display, update, cseq)?;
         let deadline = now + policy.command_timeout;
         schedule.sent_at = Some(now);
-        if !write_command(&mut stream, &command, stop, deadline)? {
+        if !write_command(stream, &command, stop, deadline)? {
             return Ok(());
         }
-        match read_response(&mut stream, cseq, stop, deadline)? {
+        match read_response(stream, cseq, stop, deadline, log)? {
             Reply::Accepted => {}
             Reply::Stopped => return Ok(()),
             Reply::Declined(status) => {
-                log(&format!(
-                    "optional display updates disabled: sender declined command status={status}; event connection retained"
-                ));
-                // The optional feature is unsupported. Keep the transport alive
-                // until session teardown so this is not a peer disconnect signal.
-                while !stop.load(Ordering::Acquire) {
-                    thread::sleep(policy.poll);
-                }
-                return Ok(());
+                bail!("sender declined command status={status}");
             }
         }
         schedule.applied = (update.width, update.height);
@@ -372,7 +392,7 @@ enum Reply {
     // Zero denotes a nonzero binary-plist command status, otherwise HTTP status.
     Declined(u16),
 }
-fn response_header(header: &[u8], expected_cseq: u32) -> Result<ReplyHeader> {
+fn response_header(header: &[u8], expected_cseq: u32, log: &impl Fn(&str)) -> Result<ReplyHeader> {
     ensure!(
         header.len() <= MAX_HEADER && header.ends_with(b"\r\n\r\n") && header.is_ascii(),
         "event response header budget or terminator"
@@ -381,8 +401,9 @@ fn response_header(header: &[u8], expected_cseq: u32) -> Result<ReplyHeader> {
     let mut lines = text[..text.len() - 4].split("\r\n");
     let status = lines.next().unwrap_or("");
     let mut parts = status.splitn(3, ' ');
+    let protocol = parts.next().unwrap_or("");
     ensure!(
-        matches!(parts.next(), Some("RTSP/1.0" | "HTTP/1.1")),
+        matches!(protocol, "RTSP/1.0" | "HTTP/1.1"),
         "event response protocol"
     );
     let code = parts.next().unwrap_or("");
@@ -434,18 +455,31 @@ fn response_header(header: &[u8], expected_cseq: u32) -> Result<ReplyHeader> {
         );
         Ok(text.parse()?)
     }
-    let cseq = headers
-        .get("cseq")
-        .ok_or_else(|| anyhow::anyhow!("missing event response CSeq"))?;
-    ensure!(
-        decimal(cseq)? == expected_cseq,
-        "event response CSeq mismatch"
-    );
     let length = match headers.get("content-length") {
         Some(value) => decimal(value)? as usize,
         None => 0,
     };
     ensure!(length <= MAX_REPLY_BODY, "event response body budget");
+    log(&format!(
+        "event response protocol={protocol} status={code} cseq_present={} body_bytes={length}",
+        headers.contains_key("cseq")
+    ));
+    match headers.get("cseq") {
+        Some(cseq) => ensure!(
+            decimal(cseq)? == expected_cseq,
+            "event response CSeq mismatch"
+        ),
+        None => {
+            // Apple's generic HTTP event response does not copy the RTSP CSeq.
+            // This is safe only with one outstanding request, a definite body
+            // length and no retries after any timeout or ambiguous transaction.
+            ensure!(protocol == "HTTP/1.1", "missing event response CSeq");
+            ensure!(
+                headers.contains_key("content-length"),
+                "unframed HTTP event response"
+            );
+        }
+    }
     if length > 0 && code == 200 {
         let kind = headers
             .get("content-type")
@@ -488,6 +522,7 @@ fn read_response(
     cseq: u32,
     stop: &AtomicBool,
     deadline: Instant,
+    log: &impl Fn(&str),
 ) -> Result<Reply> {
     let mut received = Vec::with_capacity(MAX_HEADER);
     let mut target = None;
@@ -501,7 +536,7 @@ fn read_response(
         if target.is_none() {
             if let Some(index) = received.windows(4).position(|w| w == b"\r\n\r\n") {
                 body_start = index + 4;
-                let header = response_header(&received[..body_start], cseq)?;
+                let header = response_header(&received[..body_start], cseq, log)?;
                 target = Some(body_start + header.length);
                 status = header.status;
             } else {
@@ -599,6 +634,38 @@ mod tests {
         }
         fn join(&mut self) {
             self.thread.take().unwrap().join().unwrap().unwrap();
+        }
+        fn wait_for_log(&self, message: &str) {
+            let started = Instant::now();
+            while !self
+                .logs
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains(message))
+            {
+                assert!(
+                    started.elapsed() < Duration::from_secs(3),
+                    "missing expected test log: {message}"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        fn assert_retained(&self, peer: &mut TcpStream) {
+            self.wait_for_log("disabled");
+            peer.set_read_timeout(Some(Duration::from_millis(150)))
+                .unwrap();
+            assert!(transient(&peer.read(&mut [0u8; 1]).unwrap_err()));
+            assert!(!self.stop.load(Ordering::Acquire));
+            assert_eq!(
+                self.logs
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|line| line.contains("disabled"))
+                    .count(),
+                1
+            );
         }
     }
     impl Drop for Session {
@@ -721,14 +788,98 @@ mod tests {
     }
 
     #[test]
+    fn http_reply_without_cseq_consumes_body_before_next_command() {
+        let session = Session::start("127.0.0.1".parse().unwrap(), Duration::from_secs(2));
+        let mut peer = session.connect();
+        session.updates.request(2160, 994).unwrap();
+        assert_eq!(
+            request(&mut peer).headers.get("cseq").map(String::as_str),
+            Some("1")
+        );
+        let body = bounded_plist(&super::super::plist::dict([(
+            "status",
+            Value::Integer(0.into()),
+        )]))
+        .unwrap();
+        write!(peer,"HTTP/1.1 200 OK\r\nContent-Type: application/x-apple-binary-plist\r\nContent-Length: {}\r\n\r\n",body.len()).unwrap();
+        peer.write_all(&body).unwrap();
+        session.updates.request(994, 2160).unwrap();
+        assert_eq!(
+            request(&mut peer).headers.get("cseq").map(String::as_str),
+            Some("2")
+        );
+        peer.write_all(b"HTTP/1.1 200 OK\r\nCSeq: 2\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+        session.wait_for_log("acknowledged revision=2");
+        let logs = session.logs.lock().unwrap();
+        assert!(
+            logs.iter()
+                .any(|line| line.contains("protocol=HTTP/1.1 status=200 cseq_present=false"))
+        );
+        assert!(
+            logs.iter()
+                .any(|line| line.contains("protocol=HTTP/1.1 status=200 cseq_present=true"))
+        );
+        assert!(!logs.iter().any(|line| line.contains("disabled")));
+    }
+
+    #[test]
+    fn missing_rtsp_cseq_and_explicit_bad_http_cseq_keep_channel_but_disable_updates() {
+        for reply in [
+            b"RTSP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nCSeq: 2\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nCSeq: invalid\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nCSeq: 1\r\ncseq: 1\r\nContent-Length: 0\r\n\r\n".as_slice(),
+        ] {
+            let session = Session::start("127.0.0.1".parse().unwrap(), Duration::from_secs(2));
+            let mut peer = session.connect();
+            session.updates.request(2160, 994).unwrap();
+            request(&mut peer);
+            peer.write_all(reply).unwrap();
+            session.updates.request(1440, 664).unwrap();
+            session.assert_retained(&mut peer);
+        }
+    }
+
+    #[test]
+    fn http_decline_and_negative_command_status_retain_connection() {
+        for negative_status in [false, true] {
+            let session = Session::start("127.0.0.1".parse().unwrap(), Duration::from_secs(2));
+            let mut peer = session.connect();
+            session.updates.request(2160, 994).unwrap();
+            request(&mut peer);
+            if negative_status {
+                let body = bounded_plist(&super::super::plist::dict([(
+                    "status",
+                    Value::Integer((-7116).into()),
+                )]))
+                .unwrap();
+                write!(peer,"HTTP/1.1 200 OK\r\nContent-Type: application/x-apple-binary-plist\r\nContent-Length: {}\r\n\r\n",body.len()).unwrap();
+                peer.write_all(&body).unwrap();
+            } else {
+                peer.write_all(b"HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n")
+                    .unwrap();
+            }
+            session.assert_retained(&mut peer);
+            assert!(
+                session
+                    .logs
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|line| line.contains("sender declined command"))
+            );
+        }
+    }
+
+    #[test]
     fn mismatched_cseq_disables_only_optional_channel_once() {
-        let mut session = Session::start("127.0.0.1".parse().unwrap(), Duration::from_secs(2));
+        let session = Session::start("127.0.0.1".parse().unwrap(), Duration::from_secs(2));
         let mut peer = session.connect();
         session.updates.request(2160, 994).unwrap();
         request(&mut peer);
         acknowledge(&mut peer, 9);
-        session.join();
-        assert!(!session.stop.load(Ordering::Acquire));
+        session.assert_retained(&mut peer);
         let logs = session.logs.lock().unwrap();
         assert_eq!(logs.iter().filter(|s| s.contains("disabled")).count(), 1);
         assert!(logs.iter().any(|s| s.contains("CSeq mismatch")));
@@ -736,12 +887,15 @@ mod tests {
 
     #[test]
     fn synthetic_stalled_reply_times_out_without_canceling_media() {
-        let mut session = Session::start("127.0.0.1".parse().unwrap(), Duration::from_millis(250));
+        let session = Session::start("127.0.0.1".parse().unwrap(), Duration::from_millis(250));
         let mut peer = session.connect();
         session.updates.request(2160, 994).unwrap();
         request(&mut peer);
-        session.join();
-        assert!(!session.stop.load(Ordering::Acquire));
+        session.assert_retained(&mut peer);
+        // A late reply never restarts commands or becomes the next update's ACK.
+        acknowledge(&mut peer, 1);
+        session.updates.request(1440, 664).unwrap();
+        assert!(transient(&peer.read(&mut [0u8; 1]).unwrap_err()));
         assert!(
             session
                 .logs
@@ -761,17 +915,30 @@ mod tests {
         peer.write_all(b"RTSP/1.0 501 Not Implemented\r\nCSeq: 1\r\nContent-Length: 0\r\n\r\n")
             .unwrap();
         session.updates.request(1440, 664).unwrap();
-        peer.set_read_timeout(Some(Duration::from_millis(200)))
-            .unwrap();
-        let error = peer.read(&mut [0u8; 1]).unwrap_err();
-        assert!(transient(&error)); // Still open, and no further command sent.
-        assert!(!session.stop.load(Ordering::Acquire));
+        session.assert_retained(&mut peer);
         let logs = session.logs.lock().unwrap();
         assert_eq!(
             logs.iter().filter(|line| line.contains("disabled")).count(),
             1
         );
         assert!(logs.iter().any(|line| line.contains("status=501")));
+    }
+
+    #[test]
+    fn malformed_reply_retains_socket_until_explicit_session_stop() {
+        let mut session = Session::start("127.0.0.1".parse().unwrap(), Duration::from_secs(2));
+        let mut peer = session.connect();
+        session.updates.request(2160, 994).unwrap();
+        request(&mut peer);
+        peer.write_all(b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 999999\r\n\r\n")
+            .unwrap();
+        session.assert_retained(&mut peer);
+        session.updates.request(1440, 664).unwrap();
+        let stopped = Instant::now();
+        session.stop.store(true, Ordering::Release);
+        session.join();
+        assert!(stopped.elapsed() < Duration::from_secs(1));
+        assert_eq!(peer.read(&mut [0u8; 1]).unwrap(), 0);
     }
 
     #[test]
@@ -810,11 +977,15 @@ mod tests {
     #[test]
     fn response_framing_rejects_unbounded_ambiguous_and_unsolicited_fields() {
         let valid = b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 0\r\n\r\n";
-        assert_eq!(response_header(valid, 1).unwrap().length, 0);
+        assert_eq!(response_header(valid, 1, &|_| {}).unwrap().length, 0);
+        assert!(
+            response_header(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", 1, &|_| {}).is_ok()
+        );
         for length in 0..valid.len() {
-            assert!(response_header(&valid[..length], 1).is_err());
+            assert!(response_header(&valid[..length], 1, &|_| {}).is_err());
         }
         for bad in [
+            "HTTP/1.1 200 OK\r\n\r\n",
             "RTSP/1.0 302 Redirect\r\nCSeq: 1\r\n\r\n",
             "RTSP/1.0 200 OK\r\n\r\n",
             "RTSP/1.0 200 OK\r\nCSeq: 2\r\n\r\n",
@@ -826,11 +997,14 @@ mod tests {
             "RTSP/1.0 200 OK\r\n CSeq: 1\r\n\r\n",
             "RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: 1\r\n\r\n",
         ] {
-            assert!(response_header(bad.as_bytes(), 1).is_err(), "{bad}");
+            assert!(
+                response_header(bad.as_bytes(), 1, &|_| {}).is_err(),
+                "{bad}"
+            );
         }
-        assert!(response_header(&vec![b'a'; MAX_HEADER + 1], 1).is_err());
+        assert!(response_header(&vec![b'a'; MAX_HEADER + 1], 1, &|_| {}).is_err());
         assert!(response_body(b"not a plist").is_err());
-        for code in [0, 1] {
+        for code in [0, 1, -7116] {
             let body = bounded_plist(&super::super::plist::dict([(
                 "status",
                 Value::Integer(code.into()),

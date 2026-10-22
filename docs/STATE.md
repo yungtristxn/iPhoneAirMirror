@@ -2,6 +2,32 @@
 
 Updated: 2026-10-22
 
+## Photos rotation event-channel correction awaiting phone check
+- User confirms the optimized build's first picture appears sooner, then reports
+  a critical mirroring failure while rotating in Photos. Exact F3B058... log shows
+  first picture 294.7 ms after claim, transform 7/CW270 at 31056.241, then
+  `missing event response CSeq` at 31056.800 and Ready at 31056.887. No GPU/decoder
+  error appears; the app continued running and later shut down cleanly.
+- The optional event reply parser required RTSP CSeq even for HTTP/1.1 replies.
+  On parser error the accepted socket was dropped; absorbing the error afterward
+  did not prevent the sender treating that TCP close as a lost session.
+- Preserve the accepted event socket after any optional command failure, disable
+  further commands, and release at session teardown. HTTP/1.1 replies may omit
+  CSeq only with a definite bounded body length and one outstanding request;
+  explicit sequence errors and RTSP omissions remain rejected. 102 Rust tests,
+  strict Clippy, release build, silent native/GPU/codec checks and three lifecycle
+  cycles pass. Tests cover omitted/mismatched/duplicate sequences, negative
+  statuses, malformed replies, timeout/late ACK and stop-aware socket retention.
+  Zero audio submitted; no new phone acceptance claimed.
+- Original bounded scalar log and exact BUILD manifest preserved under
+  `local/photos-event-failure/`. Windows event lookup found no matching recent
+  AirMirrorLite crash event. The response's exact version/status was not logged
+  by the failing build; new scalar reply diagnostics will distinguish it.
+- Corrected EXE SHA-256:
+  `1FD89573D59425C39267AF93BEBEE0D9EE6DEFB91B20C555AD19C2657D456E94`.
+  Latest native evidence: `local/media-test/result.json`; lifecycle:
+  `local/control-lifecycle/20261022T182030147988Z/result.json`.
+
 ## Connection performance follow-up
 - User clarified the delay is after selecting AirMirrorLite, before first picture.
   Replaced 20 ms control/video accept sleeps with bounded readiness waits. Retain
@@ -17,8 +43,9 @@ Updated: 2026-10-22
   three control lifecycle cycles and three video profiles pass. Zero audio output.
   Prepared worker costs about 4.9 MiB while waiting for the first connection.
 - Candidate SHA `F3B058A6E3D5732703661FDFE6CDB5FC067C31AC60D2BE81D4C38F5AF02CC9E9`.
-  Details, commands and evidence: PERFORMANCE_FOLLOWUP.md. Physical quiet
-  first-picture follow-up remains pending; no sound or Computer Use.
+  Details, commands and evidence: PERFORMANCE_FOLLOWUP.md. User confirmed the
+  quiet first picture appears sooner; the later Photos failure is tracked above.
+  No sound tests or Computer Use.
 - Implementation committed as `77717dc`; the candidate is open with verified
   listener/discovery readiness. Launch and copied validation evidence are under
   `local/connection-performance-phone-test/`. The prior candidate is preserved in

@@ -204,3 +204,45 @@ cargo build --release --locked --offline --features ffmpeg-aac,display-update-ex
 ./scripts/Test-Media.ps1 -Executable work/ffmpeg-receiver-target/release/airmirror-lite.exe
 python -B scripts/Test-VideoProfiles.py --exe work/ffmpeg-receiver-target/release/airmirror-lite.exe --display-aspect 994 2160 --expect-rotation
 ```
+
+## Live event-response failure and correction (2026-10-22)
+
+The user confirmed faster first-picture startup on F3B058..., then reported a
+critical failure when rotating Photos. The preserved scalar log shows valid
+transform 7/CW270 at 31056.241, `missing event response CSeq` at 31056.800, and
+return to Ready at 31056.887. The app continued running for about nineteen more
+seconds and shut down cleanly. No decoder/GPU failure is logged, and the recent
+Windows event lookup found no matching application crash. The evidence points
+to a dropped mirroring session after the event socket was closed, not a native
+process crash. The peer's exact protocol/status was not recorded by that build.
+
+The parser required CSeq for both RTSP and HTTP responses. Its error escaped the
+scope owning the accepted event socket, so the socket closed before the optional
+error was absorbed. Keeping the Rust media stop flag clear did not isolate that
+observable disconnect from the sender.
+
+The correction accepts omitted CSeq only for HTTP/1.1 with explicit bounded
+Content-Length. Exactly one command remains outstanding, with no pipelining or
+retry after an ambiguous response. Supplied CSeq values still require an exact
+match; duplicate, malformed and missing RTSP CSeq remain errors. This follows
+[HTTP/1.1 ordered response association](https://www.rfc-editor.org/rfc/rfc9112.html#section-9.2).
+The inspected pinned sender
+[APTransport event handler](https://github.com/EthanArbuckle/iPhone18-3_26.1_23B85_Restore/blob/90aa0cfe59d9682b4265e1354c8b19ec3c7823ab/System/Library/PrivateFrameworks/APTransport.framework/APTransport/APTransport.mm#L6895)
+builds generic HTTP responses; it does not explicitly copy a CSeq in that handler.
+This supports the compatibility path but does not prove the old phone reply's
+unrecorded version. No upstream code was imported.
+
+Any optional failure after accept now disables further display commands while
+retaining that one socket until session teardown. Memory/framing/deadline limits
+remain, late replies cannot restart commands, and shutdown remains stop-aware.
+Scalar protocol/status/CSeq-presence/body-length diagnostics provide the missing
+evidence without logging header values or body contents.
+
+102 Rust tests and strict Clippy pass, including real loopback retention checks,
+HTTP replies with and without CSeq, complete body consumption before another
+command, explicit sequence errors, unsupported/negative statuses, malformed
+responses, timeout/late reply and teardown EOF. The full silent native suite and
+three control lifecycle cycles also pass with zero audio submitted. Corrected
+EXE: `1FD89573D59425C39267AF93BEBEE0D9EE6DEFB91B20C555AD19C2657D456E94`.
+Original evidence: `local/photos-event-failure/`; new physical rotation acceptance
+is pending.
