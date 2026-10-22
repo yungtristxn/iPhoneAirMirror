@@ -23,9 +23,13 @@ Updated: 2026-10-22
   pass. Native tests include a 96-block in-memory audio burst, 160 hardware video
   surfaces and codec/worker checks; zero audio submitted. Three lifecycle cycles
   and a muted loopback startup/clean shutdown pass.
-- Next physical check: reconnect to the muted build, open one still photo and
-  keep it open while turning sideways and upright; inspect configuration/angle
-  diagnostics and confirm the audio error stays absent. No sound playback needed.
+- The muted physical check kept the same photo open while turning sideways and
+  upright. User reports
+  no error; the log confirms 604,169 submitted frames while muted, native queue
+  peak 30/32 and two acknowledged display updates. No audible sync/quality claim.
+  Rotation while the photo stays open remains stuck; clarification about the
+  iPhone's own interface rotation and whether the PC shows a separate photo feed
+  is pending. Do not guess an angle from image contents or performance packets.
 - Implementation committed as `11a3185`. This exact candidate is open with
   --mute; its live startup stats confirm muted=1 and audio_samples=0. Launch and
   copied checks: `local/photos-audio-burst-fix/`. Verified source-included ZIP:

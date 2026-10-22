@@ -41,6 +41,14 @@ claimed. Candidate executable SHA-256:
 Evidence: `local/media-test/result.json`, `local/muted-startup-check/result.json`,
 and `local/control-lifecycle/20261022T184724653263Z/result.json`.
 
+The subsequent physical iPhone check remained connected without the audio error.
+Its log records 604,169 submitted audio frames with local mute active throughout,
+native queue high-water 30/32, 1,893 decoded pictures and two successful display
+update acknowledgments. The Photos/audio-start workflow completed without error
+in this run; the synthetic test covers the exact-full-buffer boundary. This does
+not establish audible quality or A/V synchronization.
+Evidence: `local/photos-audio-burst-fix/phone-check.json` and its scalar log.
+
 Rotation while a photo remains open is still a separate investigation. Opening
 a photo now updates the external canvas, and the live RTSP acknowledgments work.
 The next useful check holds one still photo open while turning the phone and
