@@ -130,6 +130,7 @@ struct DecodeAssociations {
 };
 struct VideoFrame { ComPtr<IMFSample> sample; double pts; UINT width; UINT height; RECT source{};VideoColor color{};UINT rotation=0; };
 struct AudioFrame { std::vector<int16_t> pcm; size_t pos = 0; double pts = 0; };
+constexpr size_t AUDIO_QUEUE_CAPACITY=32;
 static void mix_audio(std::deque<AudioFrame>& queue,int16_t* out,UINT32 count,double target,float gain,uint64_t& played,uint64_t& skipped){
     memset(out,0,size_t(count)*4);
         for (UINT32 f = 0; f < count; ++f) {
@@ -733,6 +734,13 @@ void* am_wake_handle(void* p) {
 }
 void am_signal(void* handle) { SetEvent(handle); }
 void am_signal_close(void* handle) { CloseHandle(handle); }
+void am_set_muted(void* p,int enabled){
+    auto a=static_cast<App*>(p);const bool muted=enabled!=0;
+    if(a->shell.muted.exchange(muted)==muted)return;
+    // Local playback gain only; negotiated audio still controls synchronization.
+    a->shell.redraw=true;a->shell.chrome_dirty=true;
+    PostMessageW(a->window,PhoneShell::WM_REFRESH,0,0);SetEvent(a->wake.h);
+}
 void am_title(void* p, const char* title) { auto s = wide(title); static_cast<App*>(p)->shell.set_title(s); }
 void am_status(void* p,unsigned kind,const char* reason){auto a=static_cast<App*>(p);if(kind==5)a->external_unavailable=true;else if(kind==6)a->external_unavailable=false;a->shell.set_status(int(kind),wide(reason));}
 int am_status_dismissed(void* p){return static_cast<App*>(p)->shell.status_dismissed.exchange(false)?1:0;}
@@ -775,11 +783,12 @@ int am_video(void* p, const uint8_t* data, unsigned len, double pts, unsigned co
     HRESULT hr = app->submit(data, len, pts,rotation_cw_degrees); if (FAILED(hr)) {app->recover_fault(hr);error_hr("video decode", hr); return 0; } return 1;
 }
 int am_video_ready(void* p) {auto a=static_cast<App*>(p);return a->video.size()<(a->codec==265?3:6);}
+int am_audio_ready(void* p) {return static_cast<App*>(p)->sound.size()<AUDIO_QUEUE_CAPACITY;}
 int am_audio(void* p, const int16_t* pcm, unsigned samples, double pts) {
     auto a = static_cast<App*>(p);
     if (!pcm || !samples || samples > 4096 || samples % 2 || !valid_media_time(pts)) {error_hr("invalid PCM sample",E_INVALIDARG);return 0;}
     if(a->audio_pending||a->graphics_pending){error_hr("native devices are recovering",MF_E_NOTACCEPTING);return 0;}
-    if (a->sound.size() >= 32) {
+    if (a->sound.size() >= AUDIO_QUEUE_CAPACITY) {
         UINT32 padding=0;a->audio->GetCurrentPadding(&padding);char detail[300];
         sprintf_s(detail,"audio queue full padding=%u capacity=%u latency=%.4f now=%.4f first_pts=%.4f played=%llu",padding,a->audio_capacity,a->audio_latency,now_seconds(),a->sound.front().pts,(unsigned long long)a->audio_frames);
         error_hr(detail,E_FAIL);return 0;

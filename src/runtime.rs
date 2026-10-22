@@ -96,16 +96,67 @@ impl VideoTiming {
 struct DrainBudget {
     limit: usize,
     received: usize,
+    blocked: bool,
 }
 impl DrainBudget {
     fn new(limit: usize) -> Self {
-        Self { limit, received: 0 }
+        Self {
+            limit,
+            received: 0,
+            blocked: false,
+        }
     }
     fn consumed(&mut self) {
         self.received += 1;
     }
     fn exhausted(&self) -> bool {
         self.received == self.limit
+    }
+    fn block(&mut self) {
+        self.blocked = true;
+    }
+    fn backlog_possible(&self, pending: bool) -> bool {
+        !self.blocked && (self.exhausted() || pending)
+    }
+}
+fn audio_can_drain(owner: u64, failed_owner: u64, native_ready: bool) -> bool {
+    // With no owner, drain canceled messages even if the device is unavailable.
+    owner == 0 || (failed_owner != owner && native_ready)
+}
+fn send_bounded_audio(
+    sender: &SyncSender<Media>,
+    mut message: Media,
+    canceled: impl Fn() -> bool,
+    wake: impl Fn(),
+    limit: Duration,
+) -> Result<()> {
+    let started = Instant::now();
+    let mut notified_full = false;
+    loop {
+        if canceled() {
+            return Ok(());
+        }
+        match sender.try_send(message) {
+            Ok(()) => {
+                wake();
+                return Ok(());
+            }
+            Err(std::sync::mpsc::TrySendError::Full(returned)) => {
+                ensure!(
+                    started.elapsed() < limit,
+                    "audio consumer stalled; reconnect required"
+                );
+                message = returned;
+                if !notified_full {
+                    wake();
+                    notified_full = true;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                anyhow::bail!("audio consumer closed");
+            }
+        }
     }
 }
 fn pump_wait_ms(discovery_ready: bool, backlog_possible: bool) -> u32 {
@@ -234,6 +285,7 @@ pub struct Shared {
     pub volume_db: AtomicU32,
     pub owner: AtomicU64,
     audio_owner: AudioOwnership,
+    audio_failed_owner: AtomicU64,
     transitions: Mutex<MediaTransitions>,
     transition_applied: Condvar,
     pub owner_started: AtomicU64,
@@ -505,12 +557,27 @@ impl Shared {
             }
         }
     }
-    pub fn send_audio(&self, m: Media) -> Result<()> {
-        self.audio
-            .try_send(m)
-            .map_err(|_| anyhow::anyhow!("audio queue full"))?;
-        self.wake.signal();
-        Ok(())
+    pub fn send_audio(&self, m: Media, canceled: impl Fn() -> bool) -> Result<()> {
+        let (epoch, serial) = match &m {
+            Media::Audio { epoch, serial, .. } => (*epoch, *serial),
+            _ => anyhow::bail!("non-audio message on audio channel"),
+        };
+        let disconnect = self.disconnect.load(Ordering::Acquire);
+        send_bounded_audio(
+            &self.audio,
+            m,
+            || {
+                canceled()
+                    || self.shutdown.load(Ordering::Acquire)
+                    || self.disconnect.load(Ordering::Acquire) != disconnect
+                    || self.owner.load(Ordering::Acquire) != epoch
+                    || !self.audio_owner.owns(epoch)
+                    || self.audio_failed_owner.load(Ordering::Acquire) == epoch
+                    || self.flush.load(Ordering::Acquire) != serial
+            },
+            || self.wake.signal(),
+            Duration::from_millis(500),
+        )
     }
 }
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
@@ -641,6 +708,7 @@ impl ReceiverApp {
             volume_db: AtomicU32::new(0.0f32.to_bits()),
             owner: AtomicU64::new(0),
             audio_owner: AudioOwnership::default(),
+            audio_failed_owner: AtomicU64::new(0),
             transitions: Mutex::new(MediaTransitions::default()),
             transition_applied: Condvar::new(),
             owner_started: AtomicU64::new(0),
@@ -813,6 +881,14 @@ impl ReceiverApp {
             }
             let mut audio_drain = DrainBudget::new(if owner == 0 { 33 } else { 32 });
             for _ in 0..audio_drain.limit {
+                if !audio_can_drain(
+                    owner,
+                    self.shared.audio_failed_owner.load(Ordering::Acquire),
+                    app.audio_ready(),
+                ) {
+                    audio_drain.block();
+                    break;
+                }
                 match pending_audio
                     .take()
                     .map(Ok)
@@ -848,10 +924,20 @@ impl ReceiverApp {
                         // was waiting. Synchronize before its first PCM is queued.
                         app.video_sync(true);
                         if let Err(e) = app.audio(&pcm, pts) {
-                            self.shared.failure(&format!(
-                                "Audio playback failed. Reconnect mirroring. {e}"
-                            ));
+                            self.shared
+                                .audio_failed_owner
+                                .store(epoch, Ordering::Release);
+                            // Preserve the original submission error before any
+                            // cleanup call, and stop queued playback immediately.
+                            let reason = format!("Audio playback failed. Reconnect mirroring. {e}");
+                            app.flush_audio();
+                            self.shared.log(&reason);
+                            self.shared.failure(
+                                "Audio playback stopped. Reconnect mirroring to resume sound.",
+                            );
                             self.shared.disconnect.fetch_add(1, Ordering::AcqRel);
+                            audio_drain.block();
+                            break;
                         } else {
                             got_audio = true;
                         }
@@ -949,9 +1035,17 @@ impl ReceiverApp {
             // Event notifications coalesce. A consumed whole drain budget can
             // leave messages queued after the last signal; check again without
             // sleeping. The next pass still respects native video backpressure.
-            let backlog_possible = audio_drain.exhausted()
+            // A full native audio queue must wait for WASAPI/presentation events,
+            // even when the Rust drain budget or pending-owner slot is occupied.
+            if !audio_can_drain(
+                owner,
+                self.shared.audio_failed_owner.load(Ordering::Acquire),
+                app.audio_ready(),
+            ) {
+                audio_drain.block();
+            }
+            let backlog_possible = audio_drain.backlog_possible(pending_audio.is_some())
                 || video_drain.exhausted()
-                || pending_audio.is_some()
                 || pending_video.is_some()
                 || self.shared.owner.load(Ordering::Acquire) != owner;
             if app.wait(pump_wait_ms(discovery_ready, backlog_possible))? == 0 {
@@ -1373,6 +1467,168 @@ mod tests {
         assert_eq!(pump_wait_ms(false, true), 0);
         // Backpressure without consumed messages waits for the native deadline.
         assert_eq!(pump_wait_ms(true, DrainBudget::new(2).exhausted()), 1000);
+    }
+    fn synthetic_audio(index: u16) -> Media {
+        Media::Audio {
+            epoch: 1,
+            serial: 11,
+            pcm: vec![index as i16, -(index as i16)],
+            pts: 100.0 + f64::from(index) / 1000.0,
+        }
+    }
+    fn assert_synthetic_audio(message: Media, expected: u16) {
+        let Media::Audio {
+            epoch,
+            serial,
+            pcm,
+            pts,
+        } = message
+        else {
+            panic!("expected audio message");
+        };
+        assert_eq!((epoch, serial), (1, 11));
+        assert_eq!(pcm, [expected as i16, -(expected as i16)]);
+        assert_eq!(pts, 100.0 + f64::from(expected) / 1000.0);
+    }
+    #[test]
+    fn bounded_audio_burst_preserves_every_packet_and_waits_for_native_space() {
+        let (sender, receiver) = sync_channel(32);
+        let producer = std::thread::spawn(move || {
+            for index in 0..96 {
+                send_bounded_audio(
+                    &sender,
+                    synthetic_audio(index),
+                    || false,
+                    || {},
+                    Duration::from_secs(2),
+                )
+                .unwrap();
+            }
+        });
+        let mut native = std::collections::VecDeque::with_capacity(32);
+        let mut played = 0;
+        let mut capacity_stops = 0;
+        let started = Instant::now();
+        while played < 96 {
+            assert!(started.elapsed() < Duration::from_secs(5));
+            let mut budget = DrainBudget::new(32);
+            for _ in 0..budget.limit {
+                if !audio_can_drain(1, 0, native.len() < 32) {
+                    budget.block();
+                    break;
+                }
+                let Ok(message) = receiver.try_recv() else {
+                    break;
+                };
+                native.push_back(message);
+                budget.consumed();
+            }
+            if !audio_can_drain(1, 0, native.len() < 32) {
+                budget.block();
+                capacity_stops += 1;
+                // Even a retained pending-owner item cannot turn backpressure
+                // into a zero-timeout UI loop. The next engine event resumes it.
+                assert_eq!(pump_wait_ms(true, budget.backlog_possible(true)), 1000);
+                for _ in 0..8 {
+                    assert_synthetic_audio(native.pop_front().unwrap(), played);
+                    played += 1;
+                }
+            } else if producer.is_finished() && budget.received == 0 {
+                while let Some(message) = native.pop_front() {
+                    assert_synthetic_audio(message, played);
+                    played += 1;
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(native.len() <= 32);
+        }
+        producer.join().unwrap();
+        assert!(capacity_stops > 0);
+        assert!(receiver.try_recv().is_err());
+    }
+    #[test]
+    fn full_audio_channel_retries_without_mutating_pcm_or_pts() {
+        let (sender, receiver) = sync_channel(1);
+        assert!(sender.try_send(synthetic_audio(0)).is_ok());
+        let wake = Arc::new(AtomicUsize::new(0));
+        let notification = wake.clone();
+        let producer = std::thread::spawn(move || {
+            send_bounded_audio(
+                &sender,
+                synthetic_audio(1),
+                || false,
+                || {
+                    notification.fetch_add(1, Ordering::AcqRel);
+                },
+                Duration::from_secs(2),
+            )
+        });
+        let started = Instant::now();
+        while wake.load(Ordering::Acquire) == 0 {
+            assert!(started.elapsed() < Duration::from_secs(1));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!producer.is_finished());
+        assert_synthetic_audio(receiver.recv().unwrap(), 0);
+        assert_synthetic_audio(receiver.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+        producer.join().unwrap().unwrap();
+        assert_eq!(wake.load(Ordering::Acquire), 2); // One full notification + insertion.
+    }
+    #[test]
+    fn blocked_audio_producer_stops_on_transport_cancel_or_flush_without_ui_wake_flood() {
+        for flush in [false, true] {
+            let (sender, receiver) = sync_channel(1);
+            assert!(sender.try_send(synthetic_audio(0)).is_ok());
+            let stop = Arc::new(AtomicBool::new(false));
+            let serial = Arc::new(AtomicU64::new(11));
+            let wake = Arc::new(AtomicUsize::new(0));
+            let (cancel, generation, notification) = (stop.clone(), serial.clone(), wake.clone());
+            let producer = std::thread::spawn(move || {
+                send_bounded_audio(
+                    &sender,
+                    synthetic_audio(1),
+                    || cancel.load(Ordering::Acquire) || generation.load(Ordering::Acquire) != 11,
+                    || {
+                        notification.fetch_add(1, Ordering::AcqRel);
+                    },
+                    Duration::from_secs(2),
+                )
+            });
+            let started = Instant::now();
+            while wake.load(Ordering::Acquire) == 0 {
+                assert!(started.elapsed() < Duration::from_secs(1));
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            assert_eq!(wake.load(Ordering::Acquire), 1);
+            let canceled = Instant::now();
+            if flush {
+                serial.store(12, Ordering::Release);
+            } else {
+                stop.store(true, Ordering::Release);
+            }
+            producer.join().unwrap().unwrap();
+            assert!(canceled.elapsed() < Duration::from_secs(1));
+            assert_synthetic_audio(receiver.recv().unwrap(), 0);
+            assert!(receiver.try_recv().is_err()); // Only the canceled pending packet was removed.
+        }
+    }
+    #[test]
+    fn failed_audio_epoch_cannot_retry_until_a_new_owner() {
+        let owner = 7;
+        let mut failed_owner = 0;
+        let mut attempts = 0;
+        for _ in 0..32 {
+            if audio_can_drain(owner, failed_owner, true) {
+                attempts += 1;
+                failed_owner = owner;
+            }
+        }
+        assert_eq!(attempts, 1);
+        assert!(!audio_can_drain(owner, failed_owner, false));
+        assert!(audio_can_drain(owner + 1, failed_owner, true));
+        assert!(audio_can_drain(0, failed_owner, false));
     }
     #[test]
     fn negotiated_audio_owns_sync_until_explicit_teardown() {

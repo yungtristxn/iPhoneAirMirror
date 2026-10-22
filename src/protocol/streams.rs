@@ -861,12 +861,18 @@ fn audio_loop(
                         if let Some(pts) = pts
                             && pts >= native::now() - 0.1
                         {
-                            shared.send_audio(Media::Audio {
-                                epoch,
-                                serial,
-                                pcm: block.pcm,
-                                pts,
-                            })?;
+                            shared.send_audio(
+                                Media::Audio {
+                                    epoch,
+                                    serial,
+                                    pcm: block.pcm,
+                                    pts,
+                                },
+                                || {
+                                    stop.load(Ordering::Acquire)
+                                        || local_stop.load(Ordering::Acquire)
+                                },
+                            )?;
                         }
                     }
                     Err(_) => {

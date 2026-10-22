@@ -23,6 +23,7 @@ unsafe extern "C" {
     fn am_wake_handle(app: *mut c_void) -> *mut c_void;
     fn am_signal(handle: *mut c_void);
     fn am_signal_close(handle: *mut c_void);
+    fn am_set_muted(app: *mut c_void, enabled: i32);
     fn am_flush_audio(app: *mut c_void);
     fn am_title(app: *mut c_void, title: *const c_char);
     fn am_pump(app: *mut c_void, wait_ms: u32) -> i32;
@@ -48,6 +49,7 @@ unsafe extern "C" {
     fn am_video_ready(app: *mut c_void) -> i32;
     fn am_video_sync(app: *mut c_void, synchronized: i32);
     fn am_audio(app: *mut c_void, data: *const i16, samples: u32, pts: f64) -> i32;
+    fn am_audio_ready(app: *mut c_void) -> i32;
     fn am_reset(app: *mut c_void) -> i32;
     fn am_stats(app: *mut c_void) -> *const c_char;
     fn am_discover(
@@ -223,6 +225,9 @@ impl Drop for Wake {
     }
 }
 impl App {
+    pub fn set_muted(&self, muted: bool) {
+        unsafe { am_set_muted(self.0.as_ptr(), muted.into()) }
+    }
     pub fn status(&self, kind: u32, detail: &str) {
         if let Ok(text) = CString::new(detail) {
             unsafe { am_status(self.0.as_ptr(), kind, text.as_ptr()) }
@@ -267,6 +272,9 @@ impl App {
     }
     pub fn video_ready(&self) -> bool {
         unsafe { am_video_ready(self.0.as_ptr()) != 0 }
+    }
+    pub fn audio_ready(&self) -> bool {
+        unsafe { am_audio_ready(self.0.as_ptr()) != 0 }
     }
     pub fn video_probe(&self) -> Result<()> {
         if unsafe { am_video_probe(self.0.as_ptr(), validate_probe_video) } == 0 {

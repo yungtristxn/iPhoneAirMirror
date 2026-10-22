@@ -53,7 +53,7 @@ fn run() -> Result<()> {
             return Ok(());
         }
         println!(
-            "AirMirrorLite\n  --provision-worker provision restricted worker access for this EXE, then exit\n  --ui-test           silent native UI and GPU tests\n  --self-test         full media tests, including an audible test tone\n  --ui-test-dir PATH  with --ui-test or --self-test, render idle/control artwork diagnostics\n  --ui-preview        synthetic video preview; no discovery or network\n  --no-discovery      run without DNS-SD (local integration tests)\n  --fps N            request 30 or 60 fps (default: 60)\n  --latency-ms N     advertised output latency, 60..250 ms (default: 80)\n  --resolution N     request 1080, 1440 or 2160 lines (default: highest native support)\n  --display-width N  display width hint override, even pixels\n  --bind IP           bind a specific local IPv4 address (default: 0.0.0.0)\n  --port PORT         control port (default: 7000)\n  --seconds N         stop after N seconds (validation)\n  --data-dir PATH     receiver data (default: writable EXE/local, otherwise LOCALAPPDATA/AirMirrorLite)\n  --hidden            hide window during automated validation\n\nWindow: drag to move; bottom-right resize; 0 default size; C hide/show controls; M mute; Up/Down volume; F11 fullscreen; D disconnect; Escape leaves fullscreen/disconnects; close exits."
+            "AirMirrorLite\n  --provision-worker provision restricted worker access for this EXE, then exit\n  --ui-test           silent native UI and GPU tests\n  --self-test         full media tests, including an audible test tone\n  --ui-test-dir PATH  with --ui-test or --self-test, render idle/control artwork diagnostics\n  --ui-preview        synthetic video preview; no discovery or network\n  --no-discovery      run without DNS-SD (local integration tests)\n  --fps N            request 30 or 60 fps (default: 60)\n  --latency-ms N     advertised output latency, 60..250 ms (default: 80)\n  --resolution N     request 1080, 1440 or 2160 lines (default: highest native support)\n  --display-width N  display width hint override, even pixels\n  --bind IP           bind a specific local IPv4 address (default: 0.0.0.0)\n  --port PORT         control port (default: 7000)\n  --seconds N         stop after N seconds (validation)\n  --data-dir PATH     receiver data (default: writable EXE/local, otherwise LOCALAPPDATA/AirMirrorLite)\n  --mute              start receiver muted (M or speaker toggles sound)\n  --hidden            hide window during automated validation\n\nWindow: drag to move; bottom-right resize; 0 default size; C hide/show controls; M mute; Up/Down volume; F11 fullscreen; D disconnect; Escape leaves fullscreen/disconnects; close exits."
         );
         return Ok(());
     }
@@ -69,6 +69,7 @@ fn run() -> Result<()> {
     let mut seconds = None;
     let mut advertise = true;
     let mut hidden = false;
+    let mut muted = false;
     let mut probe = false;
     let mut silent_probe = false;
     let mut preview = false;
@@ -144,6 +145,7 @@ fn run() -> Result<()> {
             }
             "--no-discovery" => advertise = false,
             "--hidden" => hidden = true,
+            "--mute" => muted = true,
             "--self-test" => probe = true,
             "--ui-test" => {
                 probe = true;
@@ -215,6 +217,9 @@ fn run() -> Result<()> {
         }
         return Ok(());
     }
+    // Normal receiver startup can stay quiet even if Photos opens a Live Photo
+    // or negotiates audio automatically. Tests retain their own silent routing.
+    app.set_muted(muted);
     let mut profile = protocol::VideoProfile::new(
         resolution.unwrap_or(if app.hevc_available() { 2160 } else { 1080 }),
         app.hevc_available(),

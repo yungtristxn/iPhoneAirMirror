@@ -460,8 +460,48 @@ extern "C" int am_video_probe(void* p,ProbeValidator validate) {
     if(!app->input_prepare.count||!std::isfinite(app->input_prepare.average())||app->input_prepare.minimum<0||app->input_prepare.maximum<app->input_prepare.minimum)return 0;
     return 1;
 }
+static HRESULT probe_audio_backpressure(App* app){
+    if(app->audio_running||!app->sound.empty()||app->audio_frames)return E_UNEXPECTED;
+    struct ClearQueue {App* app;~ClearQueue(){app->sound.clear();}} clear{app};
+    // Reproduce a burst larger than the native bound while a simulated 1036-frame
+    // endpoint is full. Use the real readiness query and mixer; never call am_audio,
+    // WASAPI GetBuffer/ReleaseBuffer or Start, even on a failed assertion.
+    constexpr unsigned packet_frames=480,packets=96,endpoint_frames=1036;
+    std::array<int16_t,endpoint_frames*2> output{};
+    unsigned next=0,consumed=0;uint64_t played=0,skipped=0;size_t peak=0;
+    const double base=10;
+    auto supply=[&]{
+        while(next<packets&&am_audio_ready(app)){
+            std::vector<int16_t> pcm(packet_frames*2);const int16_t marker=int16_t(next+1);
+            for(unsigned f=0;f<packet_frames;++f){pcm[f*2]=marker;pcm[f*2+1]=int16_t(-marker);}
+            app->sound.push_back({std::move(pcm),0,base+double(next*packet_frames)/44100});++next;
+            peak=std::max(peak,app->sound.size());
+        }
+    };
+    supply();if(am_audio_ready(app)||app->sound.size()!=AUDIO_QUEUE_CAPACITY||next!=AUDIO_QUEUE_CAPACITY)return E_FAIL;
+    // Future prefill is silence and consumes no queued PCM; a full endpoint
+    // exposes zero writable frames. Neither condition permits another enqueue.
+    mix_audio(app->sound,output.data(),endpoint_frames,base-.1,1,played,skipped);
+    if(played||skipped||am_audio_ready(app)||app->sound.size()!=AUDIO_QUEUE_CAPACITY
+        ||std::any_of(output.begin(),output.end(),[](int16_t value){return value!=0;}))return E_FAIL;
+    mix_audio(app->sound,output.data(),0,base,1,played,skipped);
+    if(played||skipped||am_audio_ready(app)||app->sound.size()!=AUDIO_QUEUE_CAPACITY)return E_FAIL;
+    while(consumed<packets*packet_frames){
+        const unsigned count=std::min(endpoint_frames,packets*packet_frames-consumed);
+        mix_audio(app->sound,output.data(),count,base+double(consumed)/44100,1,played,skipped);
+        for(unsigned f=0;f<count;++f){const int16_t marker=int16_t((consumed+f)/packet_frames+1);
+            if(output[f*2]!=marker||output[f*2+1]!=-marker)return E_FAIL;}
+        consumed+=count;
+        if(!am_audio_ready(app))return E_FAIL;
+        supply();if(app->sound.size()>AUDIO_QUEUE_CAPACITY)return E_FAIL;
+    }
+    if(next!=packets||played!=packets*packet_frames||skipped||!app->sound.empty()
+        ||peak!=AUDIO_QUEUE_CAPACITY||!am_audio_ready(app)||app->audio_running||app->audio_frames)return E_FAIL;
+    return S_OK;
+}
 static HRESULT probe_native_contracts(App* app){
     CHECK(probe_platform_contracts());
+    CHECK(probe_audio_backpressure(app));
     {
         DecodeAssociations pending;DecodeAssociations::Entry value;
         if(!pending.add(100,1,0)||!pending.add(300,2,90)||!pending.add(200,3,270))return E_FAIL;

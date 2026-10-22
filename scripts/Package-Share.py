@@ -54,7 +54,8 @@ def included_source(name):
     return name in {"Cargo.toml", "Cargo.lock", "build.rs", "LICENSE.md", "NOTICE.md",
                     "README.md", ".gitattributes", ".gitignore", "vendor/PATCHES.md",
                     "vendor/SHA256SUMS", "docs/THIRD_PARTY.md", "docs/DECODER_EXPERIMENT.md",
-                    "docs/ROTATION_REGRESSION.md", "docs/PERFORMANCE_FOLLOWUP.md"} or name.startswith(
+                    "docs/ROTATION_REGRESSION.md", "docs/PERFORMANCE_FOLLOWUP.md",
+                    "docs/AUDIO_BACKPRESSURE.md"} or name.startswith(
                         ("src/", "native/", "assets/", "scripts/", "tests/", "vendor/playfair/"))
 
 

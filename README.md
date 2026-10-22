@@ -15,7 +15,7 @@ Physical A/V acceptance of this candidate is still outstanding. Do not run both
 receivers at once. Adding the `decoder-lab` build feature disables reception.
 
 For the separately authorized friend-test archive, use
-`python -B scripts/Package-Share.py --output dist/AirMirrorLite-Windows-x64-photos-rotation-fix-2026-10-22.zip`.
+`python -B scripts/Package-Share.py --output dist/AirMirrorLite-Windows-x64-audio-burst-fix-2026-10-22.zip`.
 This preserves the tested FFmpeg/rotation candidate, verifies its hash against a
 fresh offline build, and includes matching source/dependencies and GPLv3 notices.
 It excludes pairing identities and logs. Extract the ZIP and use
@@ -59,6 +59,8 @@ unrestricted worker if permission is missing.
   Escape dismisses the volume flyout or a dismissible connection error before
   leaving fullscreen or disconnecting. Unavailable-device/listener messages remain
   until recovery; their instructions explain when a reconnect or restart is needed.
+- Launch the prepared executable with `--mute` to start muted; the speaker button
+  or `M` restores sound. Decoding and A/V synchronization stay active while muted.
 - Custom controls expose native accessibility names, roles, focus, invoke/toggle
   actions and volume range values. Keyboard volume also supports Home/End and
   Page Up/Down when the slider has focus.
