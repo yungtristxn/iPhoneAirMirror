@@ -76,12 +76,33 @@ Wire evidence: local/hap-pairing/20261022T202500438422Z/result.json; native
 evidence: local/hap-verification/media-result.json (190 GPU surfaces,192 validated
 access units, zero submitted audio). These separate checks do not yet establish
 a real phone's encrypted media negotiation or faster phone tap-to-picture time.
+The expanded independent checker also passes encrypted AAC-ELD and AAC-LC SETUP,
+explicit32-byte and derived stream-key selection, actual isolated codec-worker
+readiness, partial audio teardown/reconfiguration and invalid/missing key rejection.
+Native UDP tables verify transport creation/removal. It sends no RTP or PCM and
+requires both audio output counters to stay zero. Evidence:
+local/hap-pairing/20261022T203352735374Z/result.json.
 Review fixed single-datagram HAP
 audio denial of service: invalid UDP authentication now leaves port admission,
 queue, clock and liveness untouched and logs only its first rejection. A valid
 following packet remains eligible. Request bodies, parser compaction buffers and
 the authenticated SETUP plist's byte fields are also wiped when no longer needed;
 this does not claim erasure of every allocator/library/register copy.
+
+## Runnable phone trial
+
+Implementation commit6438855 is deployed separately at
+dist/AirMirrorLite-hap-candidate/AirMirrorLite.exe. It is open with --mute;
+listener/discovery and muted=1 are verified. A bounded DNS-SD query resolves
+AirMirrorLite HAP to the expected host and selected LAN IPv4. Launch evidence and
+candidate manifest are in local/hap-verification/.
+
+Pending human check: select AirMirrorLite HAP from a silent Settings screen and
+report whether picture appears and selection-to-picture wait is shorter. No
+phone connection has reached this candidate yet. Do not promote it over the
+working legacy receiver or claim live screen/audio compatibility or speedup from
+the automated checks. The full working F92829... build and prior friend ZIP stay
+unchanged; no new candidate has been uploaded or shared.
 
 Build with CARGO_HOME=work/cargo:
 ```

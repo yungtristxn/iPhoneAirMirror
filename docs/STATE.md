@@ -4,7 +4,7 @@ Updated: 2026-10-22
 
 ## Verified newer pairing implementation in progress
 - User authorized a separate modern verified-pairing candidate. Active branch is
-  codex/verified-pairing from cc8079c. Original F92829... executable remains in
+  codex/verified-pairing from cc8079c; implementation6438855. Original F92829... executable remains in
   dist/AirMirrorLite-ffmpeg-candidate/ and an additional exact copy is preserved in
   dist/AirMirrorLite-verified-legacy-fallback/. No working binary is overwritten.
 - hap-pairing-experiment adds verified transient SRP M1-M4, authenticated control
@@ -19,6 +19,13 @@ Updated: 2026-10-22
   local/hap-verification/media-result.json. No physical
   HAP phone/sound acceptance yet. VERIFIED_PAIRING.md records pins, boundaries,
   commands and the public-setup-code versus identity-allowlist distinction.
+- Additional independent encrypted AAC-ELD/LC SETUP, worker readiness, partial
+  teardown/reconfiguration and wrong/missing-key rejection pass with no RTP/PCM
+  sent and zero output counters: local/hap-pairing/20261022T203352735374Z/result.json.
+- Runnable build: dist/AirMirrorLite-hap-candidate/AirMirrorLite.exe, open with
+  --mute. DNS-SD target/listener/mute verified; prior receiver hashes intact.
+  Phone question is pending: select AirMirrorLite HAP from Settings, check picture
+  and perceived selection delay. No physical connection attempt observed yet.
 
 ## Remaining startup delay investigated
 - User reports approximately five seconds after selection. Latest actual iPhone
@@ -113,6 +120,6 @@ cargo build --release --locked --offline --features ffmpeg-aac,display-update-ex
 ./scripts/Test-Media.ps1 -Executable work/ffmpeg-receiver-target/release/airmirror-lite.exe
 python -B scripts/Test-ControlLifecycle.py --exe work/ffmpeg-receiver-target/release/airmirror-lite.exe
 ```
-The requested quiet Photos/lock checks passed. No further phone action is pending.
+The prior legacy Photos/lock checks passed. The new HAP phone check above is pending.
 Keep future tests silent and avoid Computer Use. Do not run --self-test or -Audio
 without a new explicit user request for audible testing.

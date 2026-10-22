@@ -1,12 +1,15 @@
 """Independent, silent HAP transient-pairing/control regression.
 
 SRP uses Python integer arithmetic only as a test oracle. Production must use its
-maintained crypto implementation. No audio SETUP, media payload, phone, discovery
-or UI automation is performed. Requires the existing cryptography package.
+maintained crypto implementation. Audio SETUP exercises isolated decoder startup;
+no RTP audio, encoded media payload, PCM, phone, discovery or UI automation is
+performed. Requires the existing cryptography package.
 """
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import ctypes
 from datetime import datetime, timezone
 import hashlib
 import hmac
@@ -17,6 +20,7 @@ import plistlib
 import re
 import secrets
 import socket
+import struct
 import subprocess
 import threading
 import time
@@ -28,7 +32,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = ROOT / "tests/fixtures/hap-srp-vector.json"
 MAX_HEADER, MAX_BODY, MAX_RECORD = 8192, 65536, 1024
-IO_SECONDS, RUN_SECONDS = 3.0, 35
+IO_SECONDS, RUN_SECONDS, CODEC_READY_SECONDS = 3.0, 35, 8.0
 GROUP = json.loads(FIXTURE.read_text(encoding="utf-8"))["group"]
 N, G, WIDTH = int(GROUP["prime_hex"], 16), GROUP["generator"], 384
 
@@ -321,45 +325,188 @@ def timing(sock, stop, errors):
                 data, address = sock.recvfrom(64)
             except socket.timeout:
                 continue
-            if len(data) == 32 and data[1] & 0x7f == 0x52:
+            if not stop.is_set() and len(data) == 32 and data[1] & 0x7f == 0x52:
                 stamp = int(time.perf_counter() * (1 << 32)).to_bytes(8, "big")
                 sock.sendto(bytes((0x80, 0xd3, 0, 7)) + bytes(4) + data[24:32] + stamp + stamp, address)
     except Exception as error:
-        errors.append(type(error).__name__)
+        if not stop.is_set():
+            errors.append(type(error).__name__)
 
 
-def lifecycle(wire):
-    ok(wire.request("GET", "/info", headers={"X-Test-Padding": "x" * 1300}, fragmented=True))
-    require(wire.records.sent_records >= 2, "Multi-record request control not exercised")
+@contextmanager
+def timing_peer():
     stop, errors = threading.Event(), []
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as ntp:
         ntp.bind(("127.0.0.1", 0)); ntp.settimeout(.05)
         worker = threading.Thread(target=timing, args=(ntp, stop, errors), daemon=True)
         worker.start()
+        try:
+            yield ntp, stop
+        finally:
+            stop.set(); worker.join(timeout=1)
+            require(not worker.is_alive() and not errors, "Synthetic timing responder failed")
+
+
+def owned_udp_endpoints(process_id, ports):
+    """Inspect bound UDP ports without sending audio or probing them with packets."""
+    # GetExtendedUdpTable(AF_INET, UDP_TABLE_OWNER_PID): DWORD count followed by
+    # MIB_UDPROW_OWNER_PID (local address, network-order local port, owner PID).
+    class Row(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_uint32) for name in ("address", "port", "pid")]
+
+    class Table(ctypes.Structure):
+        _fields_ = [("count", ctypes.c_uint32), ("rows", Row * 1)]
+
+    query = ctypes.WinDLL("iphlpapi.dll").GetExtendedUdpTable
+    query.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.c_int,
+                      ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32]
+    query.restype = ctypes.c_uint32
+    size = ctypes.c_uint32(0)
+    require(query(None, ctypes.byref(size), 0, socket.AF_INET, 1, 0) == 122, "UDP table size query failed")
+    for _ in range(3):
+        require(Table.rows.offset <= size.value <= 1024 * 1024, "UDP table budget")
+        buffer = ctypes.create_string_buffer(size.value)
+        status = query(buffer, ctypes.byref(size), 0, socket.AF_INET, 1, 0)
+        if status == 122:
+            continue
+        require(status == 0, f"UDP table query failed: {status}")
+        count = ctypes.c_uint32.from_buffer(buffer).value
+        require(Table.rows.offset + count * ctypes.sizeof(Row) <= min(size.value, len(buffer)), "UDP table row count")
+        found = {}
+        for index in range(count):
+            row = Row.from_buffer_copy(buffer, Table.rows.offset + index * ctypes.sizeof(Row))
+            port = socket.ntohs(row.port & 0xffff)
+            if row.pid == process_id and port in ports:
+                require(port not in found, "Duplicate owned UDP endpoint")
+                found[port] = socket.inet_ntoa(struct.pack("=I", row.address))
+        return found
+    raise RuntimeError("UDP table kept growing during bounded retries")
+
+
+def require_bound_udp(process_id, ports):
+    found = owned_udp_endpoints(process_id, ports)
+    require(set(found) == set(ports) and all(address == "127.0.0.1" for address in found.values()),
+            "Negotiated UDP ports are not bound by the test receiver on loopback")
+
+
+def negotiated_port(value):
+    require(type(value) is int and 0 < value < 65536, "Invalid negotiated port")
+    return value
+
+
+def setup_timing(wire, ntp, process_id):
+    setup = plistlib.dumps({"timingPort": ntp.getsockname()[1], "timingProtocol": "NTP"}, fmt=plistlib.FMT_BINARY)
+    reply = plistlib.loads(ok(wire.request("SETUP", "rtsp://localhost/1", setup)))
+    port = negotiated_port(reply.get("timingPort"))
+    require_bound_udp(process_id, [port])
+    return port
+
+
+def read_receiver_log(data_dir):
+    with (data_dir / "receiver.log").open("rb") as source:
+        data = source.read(1024 * 1024 + 1)
+    require(len(data) <= 1024 * 1024, "Receiver log budget")
+    return data.decode("utf-8")
+
+
+def codec_ready_count(data_dir, codec):
+    name = {8: "AAC-ELD", 4: "AAC-LC"}[codec]
+    return len(re.findall(rf"\baudio codec={name} backend=[^\r\n]+ sample_rate=44100 channels=2 AppContainer=yes\b",
+                          read_receiver_log(data_dir)))
+
+
+def wait_codec_ready(data_dir, codec, previous):
+    deadline = time.monotonic() + CODEC_READY_SECONDS
+    while codec_ready_count(data_dir, codec) <= previous:
+        require(time.monotonic() < deadline, "Isolated audio decoder readiness deadline")
+        time.sleep(.025)
+
+
+def audio_control_lifecycle(wire, ntp_port, data_dir, process_id):
+    evidence = []
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as control:
+        control.bind(("127.0.0.1", 0))
+        # This socket supplies a real bound remote control port only. Nothing is
+        # sent to either audio data/control endpoint, including sync or resend.
+        for codec, spf, audio_format, key_fields, key_source in [
+            (8, 480, 1 << 24, {"shk": bytes(range(32))}, "explicit_shk32"),
+            (4, 1024, 1 << 22, {"streamConnectionID": 43}, "derived_stream_id"),
+        ]:
+            before = codec_ready_count(data_dir, codec)
+            stream = {"type": 96, "ct": codec, "spf": spf, "audioFormat": audio_format,
+                      "controlPort": control.getsockname()[1], **key_fields}
+            body = plistlib.dumps({"streams": [stream]}, fmt=plistlib.FMT_BINARY)
+            reply = plistlib.loads(ok(wire.request("SETUP", "rtsp://localhost/1", body)))
+            require(len(reply.get("streams", [])) == 1 and reply["streams"][0].get("type") == 96,
+                    "Audio SETUP reply stream mismatch")
+            ports = [negotiated_port(reply["streams"][0].get(key)) for key in ("dataPort", "controlPort")]
+            require(len(set([ntp_port, *ports])) == 3, "Audio/timing UDP ports overlap")
+            require_bound_udp(process_id, [ntp_port, *ports])
+            wait_codec_ready(data_dir, codec, before)
+            ok(wire.request("RECORD", "rtsp://localhost/1"))
+            volume = ok(wire.request("GET_PARAMETER", "rtsp://localhost/1", b"volume\r\n"))
+            require(volume.startswith(b"volume: "), "Audio control parameter reply missing")
+            teardown = plistlib.dumps({"streams": [{"type": 96}]}, fmt=plistlib.FMT_BINARY)
+            ok(wire.request("TEARDOWN", "rtsp://localhost/1", teardown))
+            require(not owned_udp_endpoints(process_id, ports), "Audio ports survived acknowledged partial teardown")
+            require_bound_udp(process_id, [ntp_port])
+            ok(wire.request("GET", "/info"))
+            evidence.append({"codec": codec, "samples_per_frame": spf, "audio_format": audio_format,
+                             "key_source": key_source, "codec_ready_appcontainer": True,
+                             "bound_audio_ports": ports, "audio_ports_removed": True,
+                             "timing_retained": True, "audio_datagrams_sent": 0})
+    return evidence
+
+
+def lifecycle(wire, data_dir, process_id):
+    ok(wire.request("GET", "/info", headers={"X-Test-Padding": "x" * 1300}, fragmented=True))
+    require(wire.records.sent_records >= 2, "Multi-record request control not exercised")
+    with timing_peer() as (ntp, timing_stop):
         video = None
         try:
-            setup = plistlib.dumps({"timingPort": ntp.getsockname()[1], "timingProtocol": "NTP"}, fmt=plistlib.FMT_BINARY)
-            first = plistlib.loads(ok(wire.request("SETUP", "rtsp://localhost/1", setup)))
-            require(0 < first.get("timingPort", 0) < 65536, "No negotiated timing port")
+            ntp_port = setup_timing(wire, ntp, process_id)
             setup = plistlib.dumps({"streams": [{"type": 110, "streamConnectionID": 42}]}, fmt=plistlib.FMT_BINARY)
             reply = plistlib.loads(ok(wire.request("SETUP", "rtsp://localhost/1", setup)))
             port = reply["streams"][0]["dataPort"]
             require(0 < port < 65536, "Invalid negotiated video port")
             video = socket.create_connection(("127.0.0.1", port), timeout=IO_SECONDS)
             video.settimeout(IO_SECONDS)
+            audio = audio_control_lifecycle(wire, ntp_port, data_dir, process_id)
+            timing_stop.set()
             ok(wire.request("TEARDOWN", "rtsp://localhost/1")); wire.closed()
+            require(not owned_udp_endpoints(process_id, [ntp_port]), "Timing port survived full teardown")
             try:
                 require(video.recv(1) == b"", "Video socket survived teardown")
             except ConnectionResetError:
                 pass
-            return {"sent_records": wire.records.sent_records, "received_records": wire.records.received_records}
+            return {"sent_records": wire.records.sent_records, "received_records": wire.records.received_records}, audio
         finally:
             if video: video.close()
-            stop.set(); worker.join(timeout=1)
-            require(not worker.is_alive() and not errors, "Synthetic timing responder failed")
 
 
-def run_checks(port):
+def reject_audio_keys(port, data_dir, process_id):
+    cases = []
+    for name, fields in [("short_shk", {"shk": bytes(31)}), ("long_shk", {"shk": bytes(33)}),
+                         ("missing_shk_and_stream_id", {})]:
+        with Wire(port) as wire, timing_peer() as (ntp, timing_stop), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as control:
+            pair(wire)
+            control.bind(("127.0.0.1", 0))
+            timing_port = setup_timing(wire, ntp, process_id)
+            before = codec_ready_count(data_dir, 8)
+            stream = {"type": 96, "ct": 8, "spf": 480, "audioFormat": 1 << 24,
+                      "controlPort": control.getsockname()[1], **fields}
+            body = plistlib.dumps({"streams": [stream]}, fmt=plistlib.FMT_BINARY)
+            timing_stop.set()
+            status, _ = wire.request("SETUP", "rtsp://localhost/1", body)
+            require(400 <= status <= 599, f"Invalid audio keys accepted: {name}")
+            wire.closed()
+            require(not owned_udp_endpoints(process_id, [timing_port]), "Rejected audio SETUP retained its timing socket")
+            require(codec_ready_count(data_dir, 8) == before, "Invalid audio keys started a decoder")
+        cases.append(name)
+    return cases
+
+
+def run_checks(port, data_dir, process_id):
     checks = []
     with Wire(port) as wire:
         info = plistlib.loads(ok(wire.request("GET", "/info")))
@@ -369,8 +516,11 @@ def run_checks(port):
     checks.append("public info/OPTIONS; transient feature48 set and legacy feature27 clear")
     with Wire(port) as wire:
         saved_m3 = pair(wire)
-        records = lifecycle(wire)
+        records, audio = lifecycle(wire, data_dir, process_id)
     checks.append("mutually verified M1-M4; encrypted fragmented/multirecord info; timing/video SETUP; teardown closes control/video")
+    checks.append("same encrypted session: AAC-ELD explicit shk32 then AAC-LC derived stream key; isolated codec startup, RECORD/parameters, partial audio teardown and retained timing/control; no audio packets")
+    rejected_audio = reject_audio_keys(port, data_dir, process_id)
+    checks.append("short/long shk and missing shk/streamConnectionID fail closed without decoder startup; next fresh HAP session remains usable")
     with Wire(port) as wire:
         pair(wire, short_public=True, four_byte_flags=True)
         ok(wire.request("GET", "/info"))
@@ -423,7 +573,7 @@ def run_checks(port):
         pair(wire); ok(wire.request("GET", "/info"))
         ok(wire.request("TEARDOWN", "rtsp://localhost/1")); wire.closed()
     checks.append("fresh verified reconnect after negative controls")
-    return checks, records
+    return checks, records, {"modes": audio, "rejected_key_cases": rejected_audio, "audio_datagrams_sent": 0}
 
 
 def main():
@@ -455,7 +605,7 @@ def main():
             spec = importlib.util.spec_from_file_location("control_lifecycle", ROOT / "scripts/Test-ControlLifecycle.py")
             helpers = importlib.util.module_from_spec(spec); spec.loader.exec_module(helpers)
             require(any(row["pid"] == child.pid for row in helpers.ipv4_listeners(port)), "Missing owned listener positive control")
-            checks, record_counts = run_checks(port)
+            checks, record_counts, audio_control = run_checks(port, data, child.pid)
             require(child.wait(timeout=RUN_SECONDS + 5) == 0, "Receiver timed shutdown failed")
             require(not helpers.ipv4_listeners(port), "Receiver listener survived shutdown")
             log = log_path.read_text(encoding="utf-8")
@@ -464,10 +614,11 @@ def main():
                 require(counters and all(int(value) == 0 for value in counters), f"Unexpected audio endpoint data: {name}")
             require("receiver stopped; all session threads joined" in log, "Unjoined session threads")
             require(hashlib.sha256(executable.read_bytes()).hexdigest() == executable_hash, "Executable changed during validation")
-            result = {"schema_version": 1, "executable": str(executable), "sha256": executable_hash,
+            result = {"schema_version": 2, "executable": str(executable), "sha256": executable_hash,
                       "fixture_sha256": hashlib.sha256(FIXTURE.read_bytes()).hexdigest(), "known_answer_vectors": vector_count,
-                      "checks": checks, "positive_record_counts": record_counts, "audio_samples": 0, "audio_silence_frames": 0,
-                      "evidence": "Independent Python SRP M4 verification and ChaCha20-Poly1305 loopback control against the real receiver. No audio SETUP, encoded media payload, real phone, discovery, GPU picture or A/V acceptance. Fragmented client writes may be coalesced by TCP."}
+                      "checks": checks, "positive_record_counts": record_counts, "audio_control": audio_control,
+                      "audio_samples": 0, "audio_silence_frames": 0,
+                      "evidence": "Independent Python SRP M4 verification and ChaCha20-Poly1305 loopback control against the real receiver, including audio SETUP and isolated decoder startup. No RTP audio, sync/retransmit audio packets, encoded media payload, PCM, real phone, discovery, GPU picture or A/V acceptance. Fragmented client writes may be coalesced by TCP."}
             (data / "result.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
             print(f"PASS: {data / 'result.json'}")
         finally:
