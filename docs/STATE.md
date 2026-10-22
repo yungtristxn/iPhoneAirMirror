@@ -37,7 +37,8 @@ Updated: 2026-10-22
   audio. New build SHA-256:
   `C10FEA1AB69E58C1F2477062580CE652D2525878E5C0C461DC6B6EDB41D34E76`.
   This is not claimed to fix the full delay. The prior2FF3927... phone-checked build
-  is preserved before replacement. No additional phone check is requested now.
+  is preserved in work/hap-phone-verified-2ff3927/. Source0844d2d was deployed while
+  the app was closed, and it remains closed. No additional phone check is requested.
 
 ## Remaining startup delay investigated
 - User reports approximately five seconds after selection. Latest actual iPhone
