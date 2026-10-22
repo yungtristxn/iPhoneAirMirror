@@ -66,7 +66,17 @@ Live-owner invariant and serial-exhaustion errors remain failures.
 - Test evidence: local/photo-handoff-verification/. EXE SHA-256:
   F928294B01BB7F27ECC1571E4B8F4B301DF153081A696980FE5F7822C7BBDA40.
 
-The quiet phone comparison remains pending; generated-frame checks alone do not
-establish that the reported jump is improved. The accepted 7B65C9... screen-off
-build is preserved in work/pre-photo-handoff-candidate/. No sound playback,
-Computer Use or phone-screen capture is involved.
+## Quiet phone comparison
+
+The user reports "Smoother now" and confirms black-on-lock/picture restoration
+still works on the exact F92829... build. The scalar log confirms 994x2160 hardware
+presentation, muted=1, zero submitted audio samples and suspend/resume generations
+1/2. Evidence: physical-check-log.txt and validation.json under the directory above.
+
+The captured comparison segment retained the same coded format: its preserved
+format-handoff counter stayed zero and no display-update command was needed. Thus
+this is user-reported visual improvement and a real lock/unlock regression check,
+not direct live evidence for the changed-format path or a measured 400 ms phone
+latency gain. Those code paths have the separate native/scheduler evidence above.
+The accepted 7B65C9... build remains in work/pre-photo-handoff-candidate/.
+No sound playback, Computer Use or phone-screen capture was used.

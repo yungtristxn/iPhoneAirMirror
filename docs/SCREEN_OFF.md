@@ -46,6 +46,11 @@ teardown error. The Photos handoff follow-up now distinguishes normal cancellati
 from live-owner failures, with a focused regression and clean lifecycle checks.
 No audible A/V or end-to-end lock latency claim is made.
 
+The subsequent F92829... Photos handoff build also passed the user's lock/unlock
+check. Its log records suspend/resume generations 1/2 and fresh presentation,
+muted with zero submitted audio samples. See PHOTOS_TRANSITION.md for that exact
+build and local/photo-handoff-verification/ for its independent evidence.
+
 Timing boundary: priority blanking starts after the suspension configuration is
 parsed. Existing bounded video-reader backpressure or clock waits can delay
 reaching a later wire record; this feature does not claim instant sensor-to-PC
