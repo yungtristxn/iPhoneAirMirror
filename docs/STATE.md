@@ -20,6 +20,9 @@ Updated: 2026-10-22
   `7B65C9ACA58FC8C5C4EDB13B98DF198E032A575B491FA7112AD7033926FB1F31`.
   Baseline: `local/screen-off-baseline/`; checks: `local/screen-off-verification/`;
   lifecycle: `local/control-lifecycle/20261022T192816883327Z/result.json`.
+- Implementation: `a5e4cb4`. The candidate is open with --mute; startup confirms
+  discovery, listener and muted=1. Previous 8972816... candidate preserved in
+  `work/pre-screen-off-candidate/`; both original FDK fallbacks retain their hashes.
 - Physical lock/unlock and final desktop appearance on this build are pending.
   Next: connect from silent Settings, lock/wake/unlock twice. Verify black while
   suspended and fresh picture on resume. Independent Photos output without a
