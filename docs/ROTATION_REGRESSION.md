@@ -272,3 +272,27 @@ sequence. Empty replies with and without Content-Length are covered; explicit
 wrong, malformed and duplicate sequences remain rejected for both protocols.
 103 Rust tests and strict Clippy pass. Physical repeated-photo acceptance remains
 pending. Prior log/manifest: `local/photos-rtsp-ack-failure/`.
+
+## Remaining open-photo orientation boundary
+
+On the muted audio-fixed build 897281..., the user confirms that the iPhone's
+Photos interface changes orientation while the PC receives only the photo. Live
+configuration/ACK logs verify landscape 2160x994 and portrait 994x2160 updates,
+then fixed dimensions and transform zero during the reported unchanged photo
+view. There is no new advertised angle for the receiver to apply in that view.
+Evidence: `local/photos-external-feed-confirmed/`.
+
+This matches Photos' separate external-content path. Apple's
+[external-display documentation](https://developer.apple.com/documentation/uikit/uiscreen/mirrored)
+describes apps replacing mirroring with independent content. Inspection of the
+pinned sender found that transform changes produce type-1 configuration records;
+type-5 APStats carries performance/system statistics, not a justified orientation
+signal. The optional 25,000-byte stats trailer is generated random data in that
+sender version. No payload was recorded or imported for this investigation.
+
+The inspected Photos debug setting for ignoring mirrored/recording screens is
+an on-device setting, with its recording-screen default gated by internal UI;
+it is not a discovered receiver wire option. No speculative feature flag,
+image-based rotation guess or source crop is added. A manual portrait/landscape
+canvas control could offer a receiver-side workaround, but automatic physical
+rotation while this independent photo view remains open is not resolved.

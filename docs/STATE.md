@@ -27,9 +27,13 @@ Updated: 2026-10-22
   upright. User reports
   no error; the log confirms 604,169 submitted frames while muted, native queue
   peak 30/32 and two acknowledged display updates. No audible sync/quality claim.
-  Rotation while the photo stays open remains stuck; clarification about the
-  iPhone's own interface rotation and whether the PC shows a separate photo feed
-  is pending. Do not guess an angle from image contents or performance packets.
+  Rotation while the photo stays open remains stuck. User now confirms the
+  iPhone interface rotates while the PC displays only the photo. The latest log
+  shows valid landscape/portrait acknowledgments but no changing transform or
+  dimensions during the remaining photo view. This is consistent with Photos'
+  independent external-display content; no reliable receiver-side physical-angle
+  input was found. Evidence: `local/photos-external-feed-confirmed/`. Automatic
+  in-photo orientation remains unresolved. Do not infer it from pixels/APStats.
 - Implementation committed as `11a3185`. This exact candidate is open with
   --mute; its live startup stats confirm muted=1 and audio_samples=0. Launch and
   copied checks: `local/photos-audio-burst-fix/`. Verified source-included ZIP:
