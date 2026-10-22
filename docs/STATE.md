@@ -19,6 +19,12 @@ Updated: 2026-10-22
 - Candidate SHA `F3B058A6E3D5732703661FDFE6CDB5FC067C31AC60D2BE81D4C38F5AF02CC9E9`.
   Details, commands and evidence: PERFORMANCE_FOLLOWUP.md. Physical quiet
   first-picture follow-up remains pending; no sound or Computer Use.
+- Implementation committed as `77717dc`; the candidate is open with verified
+  listener/discovery readiness. Launch and copied validation evidence are under
+  `local/connection-performance-phone-test/`. The prior candidate is preserved in
+  `work/pre-connection-optimization-candidate/` and both FDK fallbacks are unchanged.
+  Updated source-included ZIP passes full CRC/SHA and source checks:
+  `dist/AirMirrorLite-Windows-x64-connection-fix-2026-10-22.zip`.
 
 ## Windows network profile restriction removed
 - At the user's request, startup no longer queries Network List Manager or
