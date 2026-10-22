@@ -10,14 +10,15 @@
 struct LanCandidate {
     std::array<uint8_t,4> address{};
     uint32_t index=0,prefix=0;
-    bool up=false,ethernet_or_wifi=false,gateway=false,private_profile=false;
+    // Windows Public/Private/Domain labels are not adapter eligibility inputs.
+    bool up=false,ethernet_or_wifi=false,gateway=false;
 };
 static bool select_lan_candidate(const std::vector<LanCandidate>& candidates,
                                  const uint8_t* requested,LanCandidate& result) {
     for(const auto& candidate:candidates){
         const auto& b=candidate.address;
         const bool private_address=b[0]==10||(b[0]==172&&b[1]>=16&&b[1]<=31)||(b[0]==192&&b[1]==168);
-        if(!candidate.up||!candidate.ethernet_or_wifi||!candidate.gateway||!candidate.private_profile
+        if(!candidate.up||!candidate.ethernet_or_wifi||!candidate.gateway
             ||!candidate.index||candidate.prefix<1||candidate.prefix>32||!private_address)continue;
         if(requested&&!std::equal(b.begin(),b.end(),requested))continue;
         result=candidate;return true;
@@ -84,16 +85,29 @@ static HRESULT worker_executable_access(std::wstring& path,PSID sid,bool provisi
 
 static HRESULT probe_platform_contracts() {
     std::vector<LanCandidate> candidates{
-        {{{192,168,1,2}},7,24,true,true,true,true},
-        {{{10,2,3,4}},9,16,true,true,true,true},
-        {{{8,8,8,8}},11,24,true,true,true,true}};
+        {{{192,168,1,2}},7,24,true,true,true},
+        {{{10,2,3,4}},9,16,true,true,true},
+        {{{8,8,8,8}},11,24,true,true,true}};
     LanCandidate chosen;const uint8_t second[]={10,2,3,4},public_ip[]={8,8,8,8};
     if(!select_lan_candidate(candidates,nullptr,chosen)||chosen.index!=7)return E_FAIL;
     if(!select_lan_candidate(candidates,second,chosen)||chosen.index!=9||chosen.prefix!=16)return E_FAIL;
     if(select_lan_candidate(candidates,public_ip,chosen))return E_FAIL;
-    candidates[1].private_profile=false;if(select_lan_candidate(candidates,second,chosen))return E_FAIL;
-    candidates[1].private_profile=true;candidates[1].gateway=false;
+    // Keep real LAN eligibility and explicit-address selection independent of
+    // Windows profile classification, including when Network List Manager is absent.
+    const auto valid=candidates[1];
+    candidates[1].up=false;if(select_lan_candidate(candidates,second,chosen))return E_FAIL;
+    if(!select_lan_candidate(candidates,nullptr,chosen)||chosen.index!=7)return E_FAIL;
+    candidates[1]=valid;candidates[1].ethernet_or_wifi=false;
     if(select_lan_candidate(candidates,second,chosen))return E_FAIL;
+    candidates[1]=valid;candidates[1].gateway=false;
+    if(select_lan_candidate(candidates,second,chosen))return E_FAIL;
+    candidates[1]=valid;candidates[1].prefix=0;
+    if(select_lan_candidate(candidates,second,chosen))return E_FAIL;
+    candidates[1]=valid;candidates[1].index=0;
+    if(select_lan_candidate(candidates,second,chosen))return E_FAIL;
+    candidates[1]=valid;
+    if(!select_lan_candidate(candidates,second,chosen)||chosen.index!=9)return E_FAIL;
+    if(select_lan_candidate({},nullptr,chosen))return E_FAIL;
     PSID sid=nullptr;HRESULT hr=DeriveAppContainerSidFromAppContainerName(L"AirMirrorLite.Codec",&sid);
     if(FAILED(hr))return hr;
     struct SidGuard { PSID value;~SidGuard(){FreeSid(value);} } sid_guard{sid};

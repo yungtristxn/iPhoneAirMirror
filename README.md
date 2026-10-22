@@ -15,7 +15,7 @@ Physical A/V acceptance of this candidate is still outstanding. Do not run both
 receivers at once. Adding the `decoder-lab` build feature disables reception.
 
 For the separately authorized friend-test archive, use
-`python -B scripts/Package-Share.py --output dist/AirMirrorLite-Windows-x64-test-2026-10-22.zip`.
+`python -B scripts/Package-Share.py --output dist/AirMirrorLite-Windows-x64-network-fix-2026-10-22.zip`.
 This preserves the tested FFmpeg/rotation candidate, verifies its hash against a
 fresh offline build, and includes matching source/dependencies and GPLv3 notices.
 It excludes pairing identities and logs. Extract the ZIP and use
@@ -69,8 +69,10 @@ unrestricted worker if permission is missing.
 - The receiver has no PIN/admission whitelist: any reachable permitted LAN peer
   can request the single available session. Pair-verify proves key possession;
   it is not an allowlist of trusted people.
-- Firewall access should be limited to this exact executable, **Private** profile
-  and **LocalSubnet**. Do not allow public-network access or disable protection.
+- Windows may ask to allow this exact executable through the firewall on the
+  active network profile. The app accepts Public, Private and Domain profiles;
+  changing the network's classification is not required. It binds to one local
+  LAN address. Scope manually managed rules to that executable and LocalSubnet.
 - `--ui-test` runs **silent** native controls, embedded-icon, synthetic
   H.264/HEVC hardware-video and isolated codec/IPC checks. AAC test data is
   decoded in memory only; it is never sent to an audio endpoint.
@@ -96,8 +98,9 @@ synchronization in a configured audio session. The hint is not measured
 phone-to-screen latency.
 Hosts without native HEVC support default to
 1080; explicitly selecting a higher mode requires native HEVC and GPU support.
-`--bind` can select any eligible private Ethernet/Wi-Fi IPv4 adapter, including
-one that is not enumerated first; discovery uses the same selected interface.
+`--bind` can select any active Ethernet/Wi-Fi adapter with an RFC1918 IPv4 address
+and a gateway, including one that is not enumerated first; discovery uses the
+same selected interface. Windows network profile labels are not consulted.
 
 To keep Photos proportional to the phone, the local data directory can contain
 `display-aspect.txt` with a reference width and height, for example `994 2160`.

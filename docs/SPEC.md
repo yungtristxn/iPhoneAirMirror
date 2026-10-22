@@ -4,6 +4,9 @@ Confirmed 2026-10-21: the user wants their own minimal, efficient Windows AirPla
 
 ## Scope
 - Native iPhone Control Center > Screen Mirroring over the same local network.
+- Windows Public/Private/Domain classification must not block startup. Select one
+  active Ethernet/Wi-Fi RFC1918 IPv4 interface with a gateway; bind discovery and
+  reception to that interface. No automatic network-profile or firewall changes.
 - H.264 SDR compatibility plus capability-gated HEVC Main/8-bit 4:2:0 SDR
   mirroring. Default request 3840x2160/up-to-60 when native HEVC/GPU support exists;
   optional 1440/up-to-60 and H.264 1080/60. Sender chooses actual picture dimensions.

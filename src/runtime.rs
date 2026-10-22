@@ -555,7 +555,7 @@ impl ReceiverApp {
         let bind = if let Some((address, _, _)) = lan {
             ensure!(
                 bind.is_unspecified() || bind == IpAddr::V4(address),
-                "advertised bind must be the selected private LAN"
+                "advertised bind must be the selected LAN address"
             );
             IpAddr::V4(address)
         } else {
@@ -688,7 +688,7 @@ impl ReceiverApp {
             )?);
         }
         shared.log(&format!(
-            "listening address={bind} port={port} discovery={advertise}; no PIN; one private-network peer"
+            "listening address={bind} port={port} discovery={advertise}; no PIN; one LAN peer"
         ));
         let server_shared = shared.clone();
         let server = std::thread::spawn(move || server_loop(listener, server_shared));

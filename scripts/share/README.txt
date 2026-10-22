@@ -8,8 +8,9 @@ AirMirrorLite - private Windows x64 test build
    This is needed after extraction because ZIP files do not preserve that grant.
 3. Put the PC and iPhone on the same trusted private Wi-Fi/LAN. On the iPhone,
    open Control Center > Screen Mirroring > AirMirrorLite.
-   If Windows asks for firewall access, allow Private networks only. Guest Wi-Fi
-   or client isolation can prevent discovery. Run only one receiver at a time.
+   The Windows network profile can stay Public, Private or Domain. If Windows
+   asks for firewall access, allow AirMirrorLite on the connected network.
+   Guest Wi-Fi or client isolation can prevent discovery. Run one receiver at a time.
 4. Close the phone-shaped window to exit. The bottom-right grip resizes it;
    the side controls adjust volume, restore size, enter fullscreen and close.
    M mutes, 0 restores size, F11 toggles fullscreen and D disconnects the phone.

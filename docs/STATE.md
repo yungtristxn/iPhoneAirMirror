@@ -2,7 +2,27 @@
 
 Updated: 2026-10-22
 
-## Friend-test ZIP
+## Windows network profile restriction removed
+- At the user's request, startup no longer queries Network List Manager or
+  requires a Private profile. Public, Private and Domain labels have no effect
+  on adapter selection. Still selects one active Ethernet/Wi-Fi RFC1918 IPv4
+  interface with a gateway; explicit --bind and same-interface discovery remain.
+- Missing-network guidance now describes the actual LAN requirement. User-facing
+  docs no longer instruct changing Windows' network classification. No Windows
+  profile, firewall or Defender settings were modified.
+- 95 Rust tests, strict Clippy and release build pass. Silent native tests include
+  adapter-selection rejection/selection cases, 160 GPU surfaces and 480 AAC
+  fixture frames; zero audio submitted. Three loopback ownership/lifecycle cycles
+  pass. Evidence: `local/media-test/result.json` and
+  `local/control-lifecycle/20261022T171747212972Z/result.json`.
+- Updated candidate SHA-256:
+  `32AFE7CFF278F8CC33235DEB142DCA0DD89258EFDCF9DEEFA4333E704BC2C02B`.
+  Updated share archive:
+  `dist/AirMirrorLite-Windows-x64-network-fix-2026-10-22.zip`.
+  Actual reception on the friend's Public-profile PC remains unverified; no
+  physical phone/audio acceptance is inferred from the silent tests.
+
+## Initial friend-test ZIP (superseded by network fix above)
 - User authorized a local ZIP to share with a friend. Original project source
   and artwork are now GPL-3.0-only (LICENSE.md / NOTICE.md); imported notices stay.
 - `scripts/Package-Share.py` packages only exact FFmpeg/rotation candidate

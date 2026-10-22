@@ -2,7 +2,6 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <iphlpapi.h>
-#include <netlistmgr.h>
 #include <wrl/client.h>
 #include <mfapi.h>
 #include <mfidl.h>
@@ -688,29 +687,20 @@ int am_lan_ipv4(const uint8_t* requested,uint8_t* address, uint32_t* index, uint
     ULONG status=GetAdaptersAddresses(AF_INET,GAA_FLAG_INCLUDE_GATEWAYS,nullptr,adapters,&bytes);
     if(status==ERROR_BUFFER_OVERFLOW && bytes<=1024*1024){storage.resize(bytes);adapters=reinterpret_cast<IP_ADAPTER_ADDRESSES*>(storage.data());status=GetAdaptersAddresses(AF_INET,GAA_FLAG_INCLUDE_GATEWAYS,nullptr,adapters,&bytes);}
     if(status!=NO_ERROR){error_hr("LAN adapter query",HRESULT_FROM_WIN32(status));return 0;}
-    ComPtr<INetworkListManager> networks;HRESULT hr=CoCreateInstance(CLSID_NetworkListManager,nullptr,CLSCTX_ALL,IID_PPV_ARGS(&networks));
-    if(FAILED(hr)){error_hr("network profile query",hr);return 0;}
     std::vector<LanCandidate> candidates;
     for(auto a=adapters;a;a=a->Next){
         if(a->OperStatus!=IfOperStatusUp || (a->IfType!=IF_TYPE_ETHERNET_CSMACD && a->IfType!=IF_TYPE_IEEE80211) || !a->FirstGatewayAddress)continue;
-        auto name=wide(a->AdapterName);GUID adapter_id{};if(FAILED(CLSIDFromString(name.c_str(),&adapter_id)))continue;
-        ComPtr<IEnumNetworkConnections> connections;if(FAILED(networks->GetNetworkConnections(&connections)))continue;
-        bool private_profile=false;for(;;){ComPtr<INetworkConnection> c;ULONG fetched=0;if(connections->Next(1,&c,&fetched)!=S_OK)break;
-            GUID id{};if(FAILED(c->GetAdapterId(&id)) || id!=adapter_id)continue;ComPtr<INetwork> network;NLM_NETWORK_CATEGORY category;
-            if(SUCCEEDED(c->GetNetwork(&network)) && SUCCEEDED(network->GetCategory(&category)) && category==NLM_NETWORK_CATEGORY_PRIVATE)private_profile=true;
-        }
-        if(!private_profile)continue;
         for(auto u=a->FirstUnicastAddress;u;u=u->Next){if(!u->Address.lpSockaddr||u->Address.iSockaddrLength<static_cast<int>(sizeof(sockaddr_in))||u->Address.lpSockaddr->sa_family!=AF_INET)continue;
             auto ip=reinterpret_cast<sockaddr_in*>(u->Address.lpSockaddr);auto b=reinterpret_cast<uint8_t*>(&ip->sin_addr);
             LanCandidate candidate;std::copy_n(b,4,candidate.address.begin());candidate.index=a->IfIndex;candidate.prefix=u->OnLinkPrefixLength;
-            candidate.up=true;candidate.ethernet_or_wifi=true;candidate.gateway=true;candidate.private_profile=true;
+            candidate.up=true;candidate.ethernet_or_wifi=true;candidate.gateway=true;
             candidates.push_back(candidate);
         }
     }
     LanCandidate chosen;if(select_lan_candidate(candidates,requested,chosen)){
         std::copy(chosen.address.begin(),chosen.address.end(),address);*index=chosen.index;*prefix=chosen.prefix;return 1;
     }
-    error_hr(requested?"Requested address is not on an active private Ethernet/Wi-Fi LAN with a gateway":"No active private Ethernet/Wi-Fi IPv4 LAN with a gateway",E_FAIL);return 0;
+    error_hr(requested?"Requested address is not on an active Wi-Fi or Ethernet LAN with a local IPv4 address and gateway":"No active Wi-Fi or Ethernet LAN with a local IPv4 address and gateway. Connect this PC and iPhone to the same router",E_FAIL);return 0;
 }
 void am_show_error(const char* message) { auto s=wide(message);MessageBoxW(nullptr,s.c_str(),L"AirMirrorLite error",MB_OK|MB_ICONERROR); }
 double am_now() { return now_seconds(); }
