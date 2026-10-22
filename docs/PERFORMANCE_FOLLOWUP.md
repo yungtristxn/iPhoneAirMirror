@@ -96,3 +96,72 @@ python -B scripts/Measure-Startup.py --exe <receiver.exe> --label <new-label>
 ```
 Both use hidden loopback receivers without discovery. The connection benchmark
 checks receiver signatures, CSeq, framing, clean teardown and zero audio output.
+
+## Remaining five-second selection delay (later 2026-10-22 check)
+
+The user reports about five seconds after selecting the receiver. Rechecked the
+accepted F928294B01BB7F27ECC1571E4B8F4B301DF153081A696980FE5F7822C7BBDA40 build,
+source 55ed35a. No runtime change was justified or shipped by this investigation.
+
+Latest actual iPhone log on that build:
+- Application listener readiness: 281.2 ms; DNS-SD registration then completed in
+  805.8 ms, approximately 28.7 seconds before the control connection arrived.
+- Control TCP accepted at 36668.553; first picture at 36668.761: **208 ms**.
+  Pair verification began at 36668.567; claim-to-picture was 193.8 ms.
+- First configuration arrived 104.7 ms after video TCP acceptance; decoder
+  preparation took 1.2 ms; initial clock wait was zero. There is no five-second
+  delay in that measured receiver path. The phone tap itself was not instrumented.
+
+New silent measurements (three fresh processes, three authenticated synthetic
+sessions per process) retain the earlier improvements:
+
+| Metric | Result |
+|---|---:|
+| First-session claim through video SETUP reply, median | 6.700 ms |
+| First-session encrypted SETUP round trip, median | 3.331 ms |
+| All-session claim through video SETUP reply, median | 35.348 ms |
+| Video transport-ready through TCP acceptance, median | below 1 ms log resolution |
+| Three fresh-process listener-ready observations | 374.4 / 373.1 / 358.6 ms |
+
+These are loopback/receiver measurements, include Python sender work, use existing
+OS caches and send no media or sound. They are not phone tap-to-picture timings.
+Commands:
+```
+python -B scripts/Measure-Connection.py --exe work/ffmpeg-receiver-target/release/airmirror-lite.exe --label startup-followup-20261022 --trials 3 --sessions 3
+python -B scripts/Measure-Startup.py --exe work/ffmpeg-receiver-target/release/airmirror-lite.exe --label startup-followup-20261022
+```
+Results: local/connection-startup-followup-20261022/result.json and
+local/startup-startup-followup-20261022/result.json. Phone evidence remains under
+local/photo-handoff-verification/physical-check-log.txt. No Computer Use, phone
+capture, audible tests, Windows network changes or dependency imports occurred.
+
+### Likely cause and retained pairing boundary
+
+UxPlay documents the same approximately five-second delay before control traffic
+when feature bit 27 (SupportsLegacyPairing) is advertised. Its fast path clears
+that bit, then permits a sender to omit pairing/shared ECDH and uses the FairPlay
+key without mixing in the verified ECDH secret:
+- [Pinned README explanation](https://github.com/FDH2/UxPlay/blob/0477d471cc5899ea13382b5871cf70dbfe050ebd/README.md#L2184-L2194)
+- [Pinned key-handling consequence](https://github.com/FDH2/UxPlay/blob/0477d471cc5899ea13382b5871cf70dbfe050ebd/lib/raop_handlers.h#L827-L860)
+- [Original pre-connection-delay observation](https://github.com/FDH2/UxPlay/issues/176#issuecomment-1566701351)
+
+This is a strong explanation consistent with the user report and our short
+accepted-connection path; its causality on this exact iPhone has not been proven
+by a capability-switch test. AirMirrorLite already allows direct pair-verify
+without pair-setup, but requires both proof stages before exposing the shared
+secret and before FairPlay/encrypted SETUP. Simply clearing bit 27 would invite
+an unsupported unpaired flow; enabling that flow would change the security
+contract, not just optimize startup. No such fallback was added.
+
+Read-only Rust and native reviews found no unconditional five-second wait or
+concrete DNS fault. Partial-request deadlines fail stalled inputs rather than
+delaying valid input; TCP_NODELAY is enabled; socket waits wake on readiness;
+clock synchronization accepts its first valid response. DNS-SD advertises one
+IPv4 address on the chosen interface, with no IPv6 address supplied. The separate
+VM/VPN adapters are not evidence of a competing advertised destination.
+
+Recommendation: retain the accepted build and verified legacy pairing. A newer
+verified pairing mode is a possible future protocol project requiring separate
+research, implementation and physical validation; it is not an established
+small toggle or a guaranteed fix. Extra decoder prewarming or weaker timeout
+checks would not account for the observed seconds before connection establishment.

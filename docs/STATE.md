@@ -2,6 +2,20 @@
 
 Updated: 2026-10-22
 
+## Remaining startup delay investigated
+- User reports approximately five seconds after selection. Latest actual iPhone
+  log shows 208 ms from accepted TCP to picture, decoder preparation 1.2 ms;
+  discovery finished well before selection. Nine fresh silent loopback sessions
+  confirm first-session negotiation median 6.700 ms. Three process launches reach
+  the listener in 358.6-374.4 ms with existing OS caches.
+- UxPlay ties a matching pre-connection delay to legacy pairing bit27. Its shortcut
+  omits verified ECDH pairing and changes the media-key path. No smaller verified
+  workaround was found; keep the accepted runtime/advertisements unchanged.
+  PERFORMANCE_FOLLOWUP.md has sources, commands, evidence and the distinction
+  between a likely sender-side cause and unmeasured phone tap timing.
+- No new phone action, sound test, Computer Use or Windows setting change. A newer
+  verified pairing implementation would be a separate protocol effort.
+
 ## Current candidate: smoother Photos handoff and screen-off blackout
 - Branch codex/ffmpeg-aac-experiment; implementation 55ed35a. Executable:
   `dist/AirMirrorLite-ffmpeg-candidate/AirMirrorLite.exe`, features
