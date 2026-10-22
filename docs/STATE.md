@@ -26,6 +26,10 @@ Updated: 2026-10-22
 - Next physical check: reconnect to the muted build, open one still photo and
   keep it open while turning sideways and upright; inspect configuration/angle
   diagnostics and confirm the audio error stays absent. No sound playback needed.
+- Implementation committed as `11a3185`. This exact candidate is open with
+  --mute; its live startup stats confirm muted=1 and audio_samples=0. Launch and
+  copied checks: `local/photos-audio-burst-fix/`. Verified source-included ZIP:
+  `dist/AirMirrorLite-Windows-x64-audio-burst-fix-2026-10-22.zip`.
 
 ## Evidence and source checkpoints
 - Latest native: local/media-test/result.json; mute: local/muted-startup-check/.
