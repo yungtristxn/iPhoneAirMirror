@@ -2,6 +2,24 @@
 
 Updated: 2026-10-22
 
+## Connection performance follow-up
+- User clarified the delay is after selecting AirMirrorLite, before first picture.
+  Replaced 20 ms control/video accept sleeps with bounded readiness waits. Retain
+  exactly one pristine preflight worker for the first valid encrypted SETUP;
+  consume and destroy it, with fresh workers for later sessions.
+- Fixed Windows log truncation so the 1 MiB cap works. Added scalar first-picture
+  stage timings. No video-quality or audio-buffer changes.
+- Five-process synthetic authenticated comparison: first claim-to-video-SETUP
+  median 45.497 -> 6.909 ms; encrypted SETUP 23.379 -> 3.722 ms; video-ready to
+  accepted TCP 21 ms -> below 1 ms log resolution. These include local synthetic
+  sender work, not iPhone tap-to-picture. Later-session setup is broadly unchanged.
+- 98 tests pass, strict Clippy/formatting and silent native/GPU/codec checks pass;
+  three control lifecycle cycles and three video profiles pass. Zero audio output.
+  Prepared worker costs about 4.9 MiB while waiting for the first connection.
+- Candidate SHA `F3B058A6E3D5732703661FDFE6CDB5FC067C31AC60D2BE81D4C38F5AF02CC9E9`.
+  Details, commands and evidence: PERFORMANCE_FOLLOWUP.md. Physical quiet
+  first-picture follow-up remains pending; no sound or Computer Use.
+
 ## Windows network profile restriction removed
 - At the user's request, startup no longer queries Network List Manager or
   requires a Private profile. Public, Private and Domain labels have no effect

@@ -183,7 +183,7 @@ fn run() -> Result<()> {
         println!("Synthetic UI preview complete: {}", app.stats());
         return Ok(());
     }
-    if !silent_probe {
+    if probe && !silent_probe {
         let mut worker = native::Worker::start().context("isolated native codec startup")?;
         anyhow::ensure!(worker.call(4, &[])? == [1], "worker probe");
         worker.configure(8)?;

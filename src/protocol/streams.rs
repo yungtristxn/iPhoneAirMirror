@@ -13,6 +13,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     io::Read,
     net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket},
+    os::windows::io::AsRawSocket,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -391,12 +392,18 @@ fn video_loop(
         match listener.accept() {
             Ok((s, a)) if a.ip() == peer => break s,
             Ok(_) => {}
-            Err(e) if timed_out(&e) => thread::sleep(Duration::from_millis(20)),
+            Err(e) if timed_out(&e) => {
+                native::wait_socket_readable(listener.as_raw_socket() as usize, 100)?;
+            }
             Err(e) => return Err(e.into()),
         }
     };
     super::framing::configure_accepted_stream(&s)?;
-    shared.log("video TCP connected");
+    let connected_at = native::now();
+    shared.log(&format!(
+        "video TCP connected accept_wait_ms={:.1}",
+        start.elapsed().as_secs_f64() * 1000.0
+    ));
     let mut cipher = video_cipher(&key, id);
     let mut config = Vec::new();
     let mut codec = None;
@@ -404,6 +411,8 @@ fn video_loop(
     let mut hevc_sequence = None;
     let mut rotation_cw_degrees = 0;
     let mut frame_options = None;
+    let mut first_frame = true;
+    let mut first_config = true;
     while !stop.load(Ordering::Acquire) {
         let mut header = [0; 128];
         let mut record_started = None;
@@ -488,6 +497,15 @@ fn video_loop(
                     (pts - native::now()).abs() < 2.0,
                     "video timestamp outside clock window"
                 );
+                if first_frame {
+                    shared.log(&format!(
+                        "first video payload receive_since_tcp_ms={:.1} validate_ms={:.1} clock_wait_ms={:.1}",
+                        (payload_received_at - connected_at) * 1000.0,
+                        (ready_at - payload_received_at) * 1000.0,
+                        (native::now() - ready_at) * 1000.0
+                    ));
+                    first_frame = false;
+                }
                 shared.send_video(Media::Video {
                     epoch,
                     codec: active_codec,
@@ -501,6 +519,13 @@ fn video_loop(
                 })?;
             }
             1 => {
+                if first_config {
+                    shared.log(&format!(
+                        "first video configuration receive_since_tcp_ms={:.1}",
+                        (payload_received_at - connected_at) * 1000.0
+                    ));
+                    first_config = false;
+                }
                 let next_rotation =
                     super::orientation::configuration_rotation(&header, super::ROTATABLE_DISPLAY)?;
                 let next = if payload.get(4..8) == Some(b"hvc1") {

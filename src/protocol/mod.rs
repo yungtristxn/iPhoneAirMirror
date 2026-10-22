@@ -7,10 +7,7 @@ pub mod orientation;
 pub mod pairing;
 pub mod plist;
 mod streams;
-use crate::{
-    native,
-    runtime::{ReceiverStatus, Shared},
-};
+use crate::runtime::{ReceiverStatus, Shared};
 use ::plist::Value;
 use anyhow::{Result, bail, ensure};
 use plist::{bytes, dict, get, num, number};
@@ -144,14 +141,28 @@ impl Session {
                 );
             }
             let timing = u16::try_from(num(&value, "timingPort")?)?;
-            let mut worker = native::Worker::start()?;
-            let key = worker.decrypt_key(self.fp.message()?, &encrypted)?;
+            ensure!(timing > 0, "NTP timing port required");
+            // Complete pairing/FairPlay and encrypted-field checks before taking
+            // the pristine startup worker reserved for the first session.
+            let fairplay = self.fp.message()?;
+            let worker_started = Instant::now();
+            let (mut worker, prepared) = self.shared.take_key_worker()?;
+            let worker_acquire_ms = worker_started.elapsed().as_secs_f64() * 1000.0;
+            let decrypt_started = Instant::now();
+            let key = worker.decrypt_key(fairplay, &encrypted)?;
+            let decrypt_ms = decrypt_started.elapsed().as_secs_f64() * 1000.0;
             let key = pairing::hash16(&key, &shared_key);
             let streams =
                 streams::Streams::new(peer, local, timing, key, iv, self.shared.clone(), self.id)?;
             response.insert("timingPort".into(), number(streams.timing_port.into()));
             response.insert("eventPort".into(), number(streams.event_port.into()));
             self.streams = Some(streams);
+            let shutdown_started = Instant::now();
+            drop(worker);
+            self.shared.log(&format!(
+                "SETUP key worker prepared={prepared} acquire_ms={worker_acquire_ms:.1} decrypt_ms={decrypt_ms:.1} shutdown_ms={:.1}",
+                shutdown_started.elapsed().as_secs_f64() * 1000.0
+            ));
         }
 
         if let Ok(requested) = get(&value, "streams") {

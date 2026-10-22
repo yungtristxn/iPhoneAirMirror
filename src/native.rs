@@ -14,6 +14,7 @@ unsafe extern "C" {
     ) -> i32;
     fn am_show_error(message: *const c_char);
     fn am_now() -> f64;
+    fn am_wait_socket_readable(socket: usize, timeout_ms: u32) -> i32;
     fn am_open(hidden: i32) -> *mut c_void;
     fn am_video_probe(app: *mut c_void, validate: extern "C" fn(*const u8, u32, u32) -> i32)
     -> i32;
@@ -103,6 +104,20 @@ pub fn show_error(message: &str) {
 }
 pub fn now() -> f64 {
     unsafe { am_now() }
+}
+
+/// Wait without taking ownership; the caller must keep the socket open and
+/// check its cancellation flag between waits. Readiness may be EOF or accept.
+pub fn wait_socket_readable(socket: usize, timeout_ms: u32) -> Result<bool> {
+    ensure!(
+        timeout_ms <= 1000,
+        "socket readiness timeout exceeds 1000 ms"
+    );
+    match unsafe { am_wait_socket_readable(socket, timeout_ms) } {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(error()),
+    }
 }
 
 // Test-only route: native encoders produce synthetic Annex-B pictures in memory.
@@ -419,6 +434,11 @@ pub struct Worker {
     generation: u64,
     samples_per_frame: usize,
 }
+// SAFETY: the native object owns only movable Win32 process/job/pipe/event
+// handles, with no COM apartment or thread-bound state. Each call completes or
+// cancels and joins its overlapped I/O before returning. Calls require &mut self,
+// and the reply buffer moves with its sole owner. This does not implement Sync.
+unsafe impl Send for Worker {}
 pub struct DecodedAudio {
     pub pcm: Vec<i16>,
     pub additional_delay_samples: u32,
@@ -890,7 +910,44 @@ pub fn codec_probe(app: &App) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decoded_reply, validate_probe_packet};
+    use super::{decoded_reply, validate_probe_packet, wait_socket_readable};
+
+    #[test]
+    fn socket_wait_handles_timeout_accept_data_eof_and_bounds() {
+        use std::{
+            io::{Read, Write},
+            net::{TcpListener, TcpStream},
+            os::windows::io::AsRawSocket,
+            time::{Duration, Instant},
+        };
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let socket = listener.as_raw_socket() as usize;
+        assert!(!wait_socket_readable(socket, 0).unwrap());
+        let began = Instant::now();
+        assert!(!wait_socket_readable(socket, 25).unwrap());
+        assert!(began.elapsed() >= Duration::from_millis(10));
+
+        let address = listener.local_addr().unwrap();
+        let connecting = std::thread::spawn(move || TcpStream::connect(address).unwrap());
+        assert!(wait_socket_readable(socket, 1000).unwrap());
+        let (mut server, _) = listener.accept().unwrap();
+        let mut client = connecting.join().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let connected = server.as_raw_socket() as usize;
+        assert!(!wait_socket_readable(connected, 0).unwrap());
+        client.write_all(b"x").unwrap();
+        assert!(wait_socket_readable(connected, 1000).unwrap());
+        let mut byte = [0];
+        assert_eq!(server.read(&mut byte).unwrap(), 1);
+        assert_eq!(byte, *b"x");
+        drop(client);
+        assert!(wait_socket_readable(connected, 1000).unwrap());
+        assert_eq!(server.read(&mut byte).unwrap(), 0);
+        assert!(wait_socket_readable(socket, 1001).is_err());
+        assert_eq!(unsafe { super::am_wait_socket_readable(socket, 1001) }, -1);
+        assert!(wait_socket_readable(usize::MAX, 0).is_err());
+    }
 
     #[test]
     fn synthetic_decoder_probe_uses_production_video_admission() {

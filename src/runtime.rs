@@ -4,8 +4,9 @@ use ed25519_dalek::SigningKey;
 use rand::{RngCore, rngs::OsRng};
 use std::{
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{self, Seek, SeekFrom, Write},
     net::{IpAddr, TcpListener, TcpStream},
+    os::windows::io::AsRawSocket,
     path::Path,
     sync::{
         Arc, Condvar, Mutex,
@@ -244,6 +245,9 @@ pub struct Shared {
     pub device: String,
     pub pi: String,
     pub video_profile: protocol::VideoProfile,
+    // Consume this pristine, preflighted worker once; never reuse a worker that
+    // has processed another session's key material or untrusted codec input.
+    key_worker: Mutex<Option<native::Worker>>,
     display_updates: Mutex<Option<(u64, Arc<protocol::events::DisplayUpdates>)>>,
     video: SyncSender<Media>,
     audio: SyncSender<Media>,
@@ -418,6 +422,17 @@ impl Shared {
         }
         self.wait_applied(revision)
     }
+    pub fn take_key_worker(&self) -> Result<(native::Worker, bool)> {
+        let prepared = self
+            .key_worker
+            .lock()
+            .map_err(|_| anyhow::anyhow!("prepared key-worker state unavailable"))?
+            .take();
+        match prepared {
+            Some(worker) => Ok((worker, true)),
+            None => Ok((native::Worker::start()?, false)),
+        }
+    }
     pub fn log(&self, text: &str) {
         let text: String = text
             .chars()
@@ -426,12 +441,7 @@ impl Shared {
             .collect();
         let line = format!("{:.3} {text}\n", native::now());
         if let Ok(mut log) = self.log.lock() {
-            if log.1 + line.len() as u64 > 1024 * 1024 {
-                let _ = log.0.set_len(0);
-                log.1 = 0;
-            }
-            let _ = log.0.write_all(line.as_bytes());
-            log.1 += line.len() as u64;
+            let _ = append_log_line(&mut log, line.as_bytes());
         }
     }
     pub fn status(&self, status: ReceiverStatus) {
@@ -502,6 +512,30 @@ impl Shared {
         self.wake.signal();
         Ok(())
     }
+}
+const MAX_LOG_BYTES: u64 = 1024 * 1024;
+fn append_log_line(log: &mut (File, u64), line: &[u8]) -> io::Result<()> {
+    if line.len() as u64 > MAX_LOG_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "log line exceeds file budget",
+        ));
+    }
+    if log.1 > MAX_LOG_BYTES - line.len() as u64 {
+        log.0.set_len(0)?;
+        log.0.seek(SeekFrom::Start(0))?;
+        log.1 = 0;
+    }
+    // Reserve the full line before writing so even a partial write cannot cause
+    // the next append to underestimate file usage. Refresh the count on failure.
+    log.1 += line.len() as u64;
+    if let Err(error) = log.0.write_all(line) {
+        if let Ok(metadata) = log.0.metadata() {
+            log.1 = metadata.len();
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 fn identity(path: &Path) -> Result<[u8; 32]> {
     use zeroize::Zeroize;
@@ -584,11 +618,20 @@ impl ReceiverApp {
             &hex[16..20],
             &hex[20..32]
         );
-        let log = OpenOptions::new()
+        // FILE_APPEND_DATA-only handles cannot truncate on Windows. One mutex
+        // owns this writable handle and its cursor, preserving serialized append.
+        let mut log = OpenOptions::new()
             .create(true)
-            .append(true)
+            .write(true)
+            .truncate(false)
             .open(data.join("receiver.log"))?;
-        let size = log.metadata()?.len();
+        let size = log.seek(SeekFrom::End(0))?;
+        let worker_started = Instant::now();
+        let mut key_worker = native::Worker::start()?;
+        ensure!(key_worker.call(4, &[])? == [1], "worker probe");
+        key_worker.configure(8)?;
+        key_worker.configure(4)?;
+        let worker_preflight_ms = worker_started.elapsed().as_secs_f64() * 1000.0;
         let (vtx, video) = sync_channel(8);
         let (atx, audio) = sync_channel(32);
         let shared = Arc::new(Shared {
@@ -606,6 +649,7 @@ impl ReceiverApp {
             connections: AtomicUsize::new(0),
             identity,
             video_profile,
+            key_worker: Mutex::new(Some(key_worker)),
             display_updates: Mutex::new(None),
             device: device.clone(),
             pi: pi.clone(),
@@ -623,6 +667,9 @@ impl ReceiverApp {
             video_profile.fps,
             video_profile.hevc,
             playout_ms
+        ));
+        shared.log(&format!(
+            "key worker preflight ready elapsed_ms={worker_preflight_ms:.1}"
         ));
         let listener = TcpListener::bind((bind, port))?;
         listener.set_nonblocking(true)?;
@@ -1032,7 +1079,14 @@ fn server_loop(listener: TcpListener, shared: Arc<Shared>) {
                 threads.push(std::thread::spawn(move || connection(stream, shared)));
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(20))
+                if let Err(error) =
+                    native::wait_socket_readable(listener.as_raw_socket() as usize, 100)
+                {
+                    shared.unavailable(&format!(
+                        "Receiver listener stopped. Restart AirMirrorLite. {error}"
+                    ));
+                    break;
+                }
             }
             Err(e) => {
                 shared.unavailable(&format!(
@@ -1057,6 +1111,60 @@ fn connection(stream: TcpStream, shared: Arc<Shared>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct TestLogPath(std::path::PathBuf);
+    impl TestLogPath {
+        fn new() -> Self {
+            Self(std::env::temp_dir().join(format!(
+                "airmirror-bounded-log-{}-{:016x}.tmp",
+                std::process::id(),
+                rand::random::<u64>()
+            )))
+        }
+    }
+    impl Drop for TestLogPath {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    #[test]
+    fn log_rotation_reclaims_oversized_file_and_rewinds_the_cursor() {
+        let path = TestLogPath::new();
+        fs::write(&path.0, vec![b'x'; MAX_LOG_BYTES as usize + 27]).unwrap();
+        let mut file = OpenOptions::new().write(true).open(&path.0).unwrap();
+        let size = file.seek(SeekFrom::End(0)).unwrap();
+        let mut log = (file, size);
+        append_log_line(&mut log, b"first\n").unwrap();
+        assert_eq!(fs::read(&path.0).unwrap(), b"first\n");
+        assert_eq!(log.1, 6);
+        append_log_line(&mut log, b"second\n").unwrap();
+        assert_eq!(fs::read(&path.0).unwrap(), b"first\nsecond\n");
+        assert_eq!(log.1, 13);
+        // Existing content also survives a normal reopen/append below the cap.
+        drop(log);
+        let mut file = OpenOptions::new().write(true).open(&path.0).unwrap();
+        let size = file.seek(SeekFrom::End(0)).unwrap();
+        let mut log = (file, size);
+        append_log_line(&mut log, b"third\n").unwrap();
+        assert_eq!(fs::read(&path.0).unwrap(), b"first\nsecond\nthird\n");
+        append_log_line(&mut log, &vec![b'z'; MAX_LOG_BYTES as usize]).unwrap();
+        assert_eq!(log.1, MAX_LOG_BYTES);
+        assert_eq!(log.0.metadata().unwrap().len(), MAX_LOG_BYTES);
+        append_log_line(&mut log, b"reset\n").unwrap();
+        assert_eq!(fs::read(&path.0).unwrap(), b"reset\n");
+    }
+    #[test]
+    fn failed_log_truncation_keeps_the_count_and_existing_file() {
+        let path = TestLogPath::new();
+        fs::write(&path.0, vec![b'x'; MAX_LOG_BYTES as usize]).unwrap();
+        // Reproduce a handle without truncation rights without modifying ACLs.
+        let file = File::open(&path.0).unwrap();
+        let mut log = (file, MAX_LOG_BYTES);
+        assert!(append_log_line(&mut log, b"not appended\n").is_err());
+        assert_eq!(log.1, MAX_LOG_BYTES);
+        assert_eq!(log.0.metadata().unwrap().len(), MAX_LOG_BYTES);
+        assert!(append_log_line(&mut log, &vec![b'z'; MAX_LOG_BYTES as usize + 1]).is_err());
+        assert_eq!(log.1, MAX_LOG_BYTES);
+    }
     #[test]
     fn display_updates_follow_only_the_established_hint_shape() {
         let profile = protocol::VideoProfile::new(2160, true)

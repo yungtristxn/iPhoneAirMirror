@@ -680,6 +680,25 @@ static bool worker_pipe(const std::wstring& name,bool parent_writes,Handle& pare
 }
 extern "C" {
 const char* am_error() { return last_error.c_str(); }
+int am_wait_socket_readable(uintptr_t raw_socket,unsigned timeout_ms){
+    if(timeout_ms>1000){error_hr("socket readiness timeout exceeds 1000 ms",E_INVALIDARG);return -1;}
+    const SOCKET native_socket=static_cast<SOCKET>(raw_socket);
+    if(native_socket==INVALID_SOCKET){error_hr("socket readiness invalid socket",HRESULT_FROM_WIN32(WSAENOTSOCK));return -1;}
+    // The caller keeps ownership and checks cancellation between bounded waits.
+    // Readability includes a pending accept and, for connected sockets, EOF.
+    WSAPOLLFD poll{};poll.fd=native_socket;poll.events=POLLRDNORM;
+    const int ready=WSAPoll(&poll,1,static_cast<int>(timeout_ms));
+    if(ready==SOCKET_ERROR){error_hr("WSAPoll socket readiness",HRESULT_FROM_WIN32(WSAGetLastError()));return -1;}
+    if(!ready)return 0;
+    if(poll.revents&POLLNVAL){error_hr("socket readiness invalid socket",HRESULT_FROM_WIN32(WSAENOTSOCK));return -1;}
+    if(poll.revents&POLLERR){
+        int error=0,length=sizeof(error);
+        if(getsockopt(native_socket,SOL_SOCKET,SO_ERROR,reinterpret_cast<char*>(&error),&length)==SOCKET_ERROR)error=WSAGetLastError();
+        error_hr("socket readiness connection error",HRESULT_FROM_WIN32(error?error:WSAECONNABORTED));return -1;
+    }
+    if(poll.revents&(POLLRDNORM|POLLHUP))return 1;
+    error_hr("socket readiness unexpected events",E_UNEXPECTED);return -1;
+}
 int am_lan_ipv4(const uint8_t* requested,uint8_t* address, uint32_t* index, uint32_t* prefix) {
     if(!address||!index||!prefix){error_hr("LAN adapter output",E_POINTER);return 0;}
     ULONG bytes=16384;std::vector<uint8_t> storage(bytes);
