@@ -27,6 +27,10 @@ Updated: 2026-10-22
   `1FD89573D59425C39267AF93BEBEE0D9EE6DEFB91B20C555AD19C2657D456E94`.
   Latest native evidence: `local/media-test/result.json`; lifecycle:
   `local/control-lifecycle/20261022T182030147988Z/result.json`.
+- Fix committed as `2ba01a1`; corrected receiver is open with verified discovery.
+  Launch and copied checks: `local/photos-event-fix/`; the prior candidate remains
+  under `work/pre-event-response-fix-candidate/`. Updated source-included archive:
+  `dist/AirMirrorLite-Windows-x64-photos-event-fix-2026-10-22.zip`.
 
 ## Connection performance follow-up
 - User clarified the delay is after selecting AirMirrorLite, before first picture.
