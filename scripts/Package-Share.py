@@ -55,7 +55,8 @@ def included_source(name):
                     "README.md", ".gitattributes", ".gitignore", "vendor/PATCHES.md",
                     "vendor/SHA256SUMS", "docs/THIRD_PARTY.md", "docs/DECODER_EXPERIMENT.md",
                     "docs/ROTATION_REGRESSION.md", "docs/PERFORMANCE_FOLLOWUP.md",
-                    "docs/AUDIO_BACKPRESSURE.md", "docs/SCREEN_OFF.md"} or name.startswith(
+                    "docs/AUDIO_BACKPRESSURE.md", "docs/SCREEN_OFF.md",
+                    "docs/PHOTOS_TRANSITION.md"} or name.startswith(
                         ("src/", "native/", "assets/", "scripts/", "tests/", "vendor/playfair/"))
 
 

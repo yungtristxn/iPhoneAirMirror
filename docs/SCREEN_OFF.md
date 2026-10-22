@@ -36,10 +36,15 @@ Validated 2026-10-22:
   7B65C9ACA58FC8C5C4EDB13B98DF198E032A575B491FA7112AD7033926FB1F31.
   Saved build/test evidence: local/screen-off-verification/.
 
-Physical lock/unlock on this build remains pending. Next check: connect from a
-silent Settings screen, lock the phone, wake/unlock it, then repeat once. Confirm
-black while suspended and fresh picture on resume, with the window shape intact.
-No phone capture, Computer Use or audible testing is needed.
+Physical check on this exact build: the user confirms "Black on lock; picture
+restores." The scalar log records suspension at 35840.734 (generation 1), resume
+at 35841.444 (generation 2), and successful generation-2 presentation afterward.
+The receiver stayed muted. Evidence: physical-check-log.txt and validation.json
+under local/screen-off-verification/. The app was closed afterward and all session
+threads joined. A configuration racing that normal shutdown produced a spurious
+teardown error. The Photos handoff follow-up now distinguishes normal cancellation
+from live-owner failures, with a focused regression and clean lifecycle checks.
+No audible A/V or end-to-end lock latency claim is made.
 
 Timing boundary: priority blanking starts after the suspension configuration is
 parsed. Existing bounded video-reader backpressure or clock waits can delay

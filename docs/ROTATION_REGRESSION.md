@@ -170,8 +170,9 @@ The opt-in `display-update-experiment` adds the legacy eventPort listener and
 implies rotation advertisement. A full `updateDisplayInfo` dictionary changes
 width/height and widthPixels/heightPixels together while preserving UUID, refresh
 rate and other capabilities. Only successfully presented frames matching the
-established phone aspect can request a swap. Requests coalesce for 500 ms with
-one outstanding reply, bounded framing, deadlines and a session/peer fence.
+established phone aspect can request a swap. The initial 500 ms coalescing period
+is now 100 ms, with a separate 500 ms minimum send interval (PHOTOS_TRANSITION.md).
+One outstanding reply, bounded framing, deadlines and a session/peer fence remain.
 Unsupported commands disable updates while retaining the connection. There is
 no HAP downgrade, baseline command, pixel heuristic or image crop. Normal
 packaging leaves these experiments disabled until physical acceptance.

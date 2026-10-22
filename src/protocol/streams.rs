@@ -555,7 +555,10 @@ fn video_loop(
                 // Priority state is independent of the bounded compressed-video
                 // queue. It reaches presentation even while that queue is full.
                 if let Some(suspended) = suspended {
-                    visibility_serial = shared.publish_screen_state(epoch, suspended)?;
+                    let Some(serial) = shared.publish_screen_state(epoch, suspended)? else {
+                        break; // Shutdown or replaced owner: quiet stream cancellation.
+                    };
+                    visibility_serial = serial;
                 }
                 shared.log(&format!("H.{next} configuration accepted"));
                 shared.log(&format!(

@@ -2,7 +2,33 @@
 
 Updated: 2026-10-22
 
-## Screen-off blackout: automated checks passed
+## Photos handoff: automated checks passed
+- User requests a smoother transition when opening photos and explicitly prefers
+  to retain the photo-only PC view, without the phone toolbar/thumbnail strip.
+- Latest scalar log shows 994x2160/CW270 -> 2160x994/CW0 with unchanged effective
+  display size. That handoff does not resize the phone shell. Native MF format
+  changes now preserve the displayed private frame and its metadata until a fresh
+  successful presentation. Compatible GPU processors stay reusable; the private
+  texture count remains bounded to two.
+- Display changes settle for 100 ms instead of 500 ms, while preserving 500 ms
+  send spacing and one outstanding reply. New scalar send timing distinguishes
+  that receiver wait from sender/ACK delays. Normal shutdown or stale-owner
+  publication now cancels quietly; live-owner invariant errors still fail.
+- 114 Rust tests pass on FFmpeg/default backends, strict Clippy/formatting and
+  release build pass. Silent GPU tests pass four actual HEVC format handoffs,
+  delayed/busy replacement and lock/unlock fences: 190 GPU surfaces, zero audio
+  samples. Three control lifecycle cycles pass. Independent read-only review found
+  no concrete regression. No Computer Use or audible testing.
+- Tested EXE SHA-256:
+  `F928294B01BB7F27ECC1571E4B8F4B301DF153081A696980FE5F7822C7BBDA40`.
+  Evidence: `local/photo-handoff-verification/`; lifecycle:
+  `local/control-lifecycle/20261022T194408294268Z/result.json`.
+  Accepted screen-off build 7B65C9... is retained in `work/pre-photo-handoff-candidate/`.
+- Phone comparison remains pending: open/close photos, rotate once and open another
+  photo, then confirm lock/unlock still works. PHOTOS_TRANSITION.md records the
+  sender-controlled content boundary and measured versus inferred timing.
+
+## Screen-off blackout: phone check passed
 - User accepted the independent Photos-view orientation limitation and declined
   a manual layout control. New request: PC viewport goes black when the iPhone
   screen turns off/locks, then restores on resume. No idle/photo timeout heuristic.
@@ -20,13 +46,13 @@ Updated: 2026-10-22
   `7B65C9ACA58FC8C5C4EDB13B98DF198E032A575B491FA7112AD7033926FB1F31`.
   Baseline: `local/screen-off-baseline/`; checks: `local/screen-off-verification/`;
   lifecycle: `local/control-lifecycle/20261022T192816883327Z/result.json`.
-- Implementation: `a5e4cb4`. The candidate is open with --mute; startup confirms
-  discovery, listener and muted=1. Previous 8972816... candidate preserved in
+- Implementation: `a5e4cb4`. Muted startup confirmed discovery and the listener.
+  The user closed the app after the successful check. Previous 8972816... candidate preserved in
   `work/pre-screen-off-candidate/`; both original FDK fallbacks retain their hashes.
-- Physical lock/unlock and final desktop appearance on this build are pending.
-  Next: connect from silent Settings, lock/wake/unlock twice. Verify black while
-  suspended and fresh picture on resume. Independent Photos output without a
-  suspension signal cannot reveal physical phone power state. SCREEN_OFF.md.
+- User confirms black on lock and picture restored on unlock. The current log
+  confirms suspend generation1, resume generation2, fresh presentation and muted=1.
+  Independent Photos output without a suspension signal cannot reveal physical
+  phone power state. SCREEN_OFF.md records the evidence and remaining boundaries.
 
 ## Verified audio/display fixes
 - RTSP event replies from this iPhone omit CSeq. The receiver now accepts that

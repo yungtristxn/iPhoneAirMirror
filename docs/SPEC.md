@@ -4,6 +4,9 @@ Confirmed 2026-10-21: the user wants their own minimal, efficient Windows AirPla
 
 ## Scope
 - Native iPhone Control Center > Screen Mirroring over the same local network.
+- Preserve the last successfully displayed private GPU frame across ordinary
+  decoder format changes until a fresh replacement presents. Keep Photos' own
+  photo-only feed; no invented toolbar/thumbnail strip, animation or video delay.
 - When the sender explicitly suspends the mirrored screen, show an opaque black
   phone viewport while preserving its size and quick controls. Resume only with
   a fresh frame after a sender resume signal; queued/cached pre-suspension frames

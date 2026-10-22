@@ -1,7 +1,7 @@
 // Diagnostic only: OS H.264 encoder makes synthetic bars in memory.
 // No capture, recording or network traffic. Exercise the actual decoder/render path.
 using ProbeValidator=int(*)(const uint8_t*,unsigned,unsigned);
-struct VideoProbeContext {ProbeValidator validate;unsigned validated=0,dpb16_sps=0;};
+struct VideoProbeContext {ProbeValidator validate;unsigned validated=0,dpb16_sps=0,handoffs=0;};
 // Test-only RBSP edits raise declared capacity, not actual reference usage. The
 // encoded picture data is untouched and is checked by Rust before MF sees it.
 struct ProbeBitEdit {size_t first,last;std::vector<bool> replacement;};
@@ -81,11 +81,30 @@ static HRESULT probe_media_wait(App* app) {
     SetEvent(wake.h);CHECK(app->wait_for_media(1000));if(WaitForSingleObject(wake.h,0)!=WAIT_TIMEOUT)return E_FAIL;
     return S_OK;
 }
-static HRESULT probe_video(App* app,VideoProbeContext& probe, UINT width, UINT height,UINT codec=264,bool continue_stream=false,bool dpb16=false,UINT rotation=0,uint64_t frame_serial=0,bool hidden_output=false) {
+static HRESULT probe_video(App* app,VideoProbeContext& probe, UINT width, UINT height,UINT codec=264,bool continue_stream=false,bool dpb16=false,UINT rotation=0,uint64_t frame_serial=0,bool hidden_output=false,bool verify_handoff=false) {
     // These independent encoder fixtures represent separate phones/sessions.
     if(!continue_stream){app->shell.reset_video();CHECK(app->init_decoder(codec,width,height));}
     else if(!app->decoder_ready||app->codec!=codec)return E_UNEXPECTED;
     const auto pending_before=app->decode_pending.active_count;const auto inputs_before=probe.validated;const auto decoded_before=app->decoded;
+    const VideoFrame previous=verify_handoff?app->last_frame:VideoFrame{};
+    const auto previous_processor=verify_handoff?app->processor:ComPtr<ID3D11VideoProcessor>{};
+    const UINT previous_width=app->width,previous_height=app->height;bool handoff_started=false,handoff_checked=false;
+    const auto handoffs_before=app->preserved_format_handoffs;
+    if(verify_handoff&&(!continue_stream||!previous.sample||!previous_processor))return E_UNEXPECTED;
+    auto previous_retained=[&]{const auto& current=app->last_frame;
+        return current.sample.Get()==previous.sample.Get()&&current.width==previous.width&&current.height==previous.height
+            &&EqualRect(&current.source,&previous.source)&&current.color.matrix==previous.color.matrix&&current.color.range==previous.color.range
+            &&current.rotation==previous.rotation&&current.visibility_serial==previous.visibility_serial;};
+    auto redraw=[&](const VideoFrame& frame,bool busy)->HRESULT{
+        const auto before=app->presented;const ULONGLONG deadline=GetTickCount64()+1000;
+        do {
+            if(!app->video_slot_reserved){DWORD ready=WaitForSingleObject(app->video_event.h,20);if(ready==WAIT_TIMEOUT)continue;if(ready!=WAIT_OBJECT_0)return E_FAIL;app->video_slot_reserved=true;}
+            HRESULT result=app->draw(frame.sample.Get(),frame.width,frame.height,nullptr,&frame.source,&frame.color,busy,frame.rotation,frame.visibility_serial);CHECK(result);
+            if(busy)return result==S_FALSE&&app->presented==before?S_OK:E_FAIL;
+            if(app->presented>before)return S_OK;Sleep(1);
+        }while(GetTickCount64()<deadline);
+        return HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+    };
     if(app->low_latency_attribute!=1||(SUCCEEDED(app->low_latency_get)&&app->low_latency_value!=1)){error_hr("decoder low-latency readback",E_FAIL);return E_FAIL;}
     ComPtr<IMFTransform> enc;if(codec==265){CHECK(create_hevc_transform(true,&enc));}else{CHECK(CoCreateInstance(CLSID_CMSH264EncoderMFT,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&enc)));}
     ComPtr<IMFMediaType> output; CHECK(MFCreateMediaType(&output));
@@ -111,6 +130,21 @@ static HRESULT probe_video(App* app,VideoProbeContext& probe, UINT width, UINT h
             if(SUCCEEDED(hr)&&dpb16&&!probe_dpb16_packet(packet,probe.dpb16_sps)){error_hr("synthetic DPB16 parameter rewrite",E_FAIL);hr=E_FAIL;}
             if(SUCCEEDED(hr)){if(!probe.validate||probe.validate(packet.data(),unsigned(packet.size()),codec)!=1){error_hr("production parser rejected synthetic access unit",E_FAIL);hr=E_FAIL;}else ++probe.validated;}
             if(SUCCEEDED(hr))hr=app->submit(packet.data(),unsigned(packet.size()),pts/1e7,rotation,frame_serial);compressed->Unlock();CHECK(hr);
+            if(verify_handoff&&!handoff_checked&&(app->width!=previous_width||app->height!=previous_height)){
+                if(!handoff_started){
+                    if(!previous_retained()||app->processor.Get()!=previous_processor.Get()||app->preserved_format_handoffs<=handoffs_before){error_hr("MF format change discarded displayed private frame",E_FAIL);return E_FAIL;}
+                    CHECK(redraw(previous,false));if(!previous_retained())return E_FAIL;handoff_started=true;
+                }
+                // Hold the new decoded picture in its normal queue while proving
+                // the previous private picture is still usable. No pixel readback.
+                if(!app->video.empty()){
+                    const auto replacement=app->video.back();const UINT shown_w=app->presented_width,shown_h=app->presented_height;
+                    CHECK(redraw(replacement,true));
+                    if(!previous_retained()||app->presented_width!=shown_w||app->presented_height!=shown_h)return E_FAIL;
+                    CHECK(redraw(previous,false));if(!previous_retained())return E_FAIL;
+                    handoff_checked=true;++probe.handoffs;
+                }
+            }
         }return S_OK;
     };
     double start=now_seconds();
@@ -131,6 +165,8 @@ static HRESULT probe_video(App* app,VideoProbeContext& probe, UINT width, UINT h
     if(outputs>inputs+pending_before||inputs+pending_before-outputs!=pending_after
         ||(continue_stream&&pending_after>pending_before)){error_hr("decoder associations accumulated across format transition",E_FAIL);return E_FAIL;}
     if(hidden_output)return outputs>0&&app->video.empty()&&!app->last_frame.sample&&app->shell.screen_blank&&app->chrome.masked&&!app->chrome.video_attached?S_OK:E_FAIL;
+    if(verify_handoff&&(!handoff_checked||app->last_frame.width!=width||app->last_frame.height!=height
+        ||app->last_frame.rotation!=rotation||app->last_frame.visibility_serial!=frame_serial))return E_FAIL;
     // A paused redraw uses the retained private texture, not a live decoder surface.
     if(!app->last_frame.sample){error_hr("no retained frame after encoder drain",E_FAIL);return E_FAIL;}
     app->video.clear();
@@ -501,13 +537,25 @@ extern "C" int am_video_probe(void* p,ProbeValidator validate) {
         if(SUCCEEDED(hr)&&(app->decoder_surfaces-hevc_before<8||app->width!=3840||app->height!=2160))hr=E_FAIL;
         if(SUCCEEDED(hr)){stage="HEVC portrait";hr=probe_video(app,probe,992,2160,265);}
         if(SUCCEEDED(hr)&&(app->width!=992||app->height!=2160))hr=E_FAIL;
+        if(SUCCEEDED(hr)){
+            // Give the old private image deliberately non-default metadata, so
+            // retaining only its sample pointer cannot pass the handoff test.
+            stage="private frame metadata before format handoff";
+            const auto sample=app->last_frame.sample;const RECT crop{16,8,656,368};const VideoColor color{MFVideoTransferMatrix_BT601,MFNominalRange_0_255};
+            const auto before_present=app->presented;const ULONGLONG deadline=GetTickCount64()+1000;
+            do {
+                if(!app->video_slot_reserved){DWORD ready=WaitForSingleObject(app->video_event.h,20);if(ready==WAIT_TIMEOUT)continue;if(ready!=WAIT_OBJECT_0){hr=E_FAIL;break;}app->video_slot_reserved=true;}
+                hr=app->draw(sample.Get(),640,360,nullptr,&crop,&color,false,90);if(FAILED(hr)||app->presented>before_present)break;Sleep(1);
+            }while(GetTickCount64()<deadline);
+            if(SUCCEEDED(hr)&&app->presented==before_present)hr=HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+        }
         // Retain one decoder and one learned phone aspect while real encoded
         // sequence headers change orientation/resolution. DPB16 is signaled
         // capacity; the OS encoder is not claimed to reference sixteen pictures.
         if(SUCCEEDED(hr))stage="HEVC DPB16 production-parser rotation matrix";
         for(auto shape:{std::pair<UINT,UINT>{496,1080},{1080,496},{2160,992},{992,2160}}){
             if(FAILED(hr))break;const auto surfaces=app->decoder_surfaces;const auto headers=probe.dpb16_sps;
-            hr=probe_video(app,probe,shape.first,shape.second,265,true,true);
+            hr=probe_video(app,probe,shape.first,shape.second,265,true,true,0,0,false,true);
             if(SUCCEEDED(hr)&&(probe.dpb16_sps<=headers||app->decoder_surfaces<=surfaces||app->width!=shape.first||app->height!=shape.second))hr=E_FAIL;
         }
     }
@@ -520,7 +568,7 @@ extern "C" int am_video_probe(void* p,ProbeValidator validate) {
     if(FAILED(hr)){error_hr(stage,hr);return 0;}
     if(app->decoder_surfaces-before<60){error_hr("insufficient hardware decoder surfaces",E_FAIL);return 0;}
     if(probe.validated<60){error_hr("insufficient production-validated synthetic access units",E_FAIL);return 0;}
-    fprintf(stderr,"synthetic parser/GPU coverage: access_units=%u dpb16_sps=%u surfaces=%llu\n",probe.validated,probe.dpb16_sps,static_cast<unsigned long long>(app->decoder_surfaces-before));
+    fprintf(stderr,"synthetic parser/GPU coverage: access_units=%u dpb16_sps=%u surfaces=%llu private_handoffs=%u\n",probe.validated,probe.dpb16_sps,static_cast<unsigned long long>(app->decoder_surfaces-before),probe.handoffs);
     if(!app->input_prepare.count||!std::isfinite(app->input_prepare.average())||app->input_prepare.minimum<0||app->input_prepare.maximum<app->input_prepare.minimum)return 0;
     return 1;
 }

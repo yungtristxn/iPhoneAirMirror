@@ -194,6 +194,7 @@ struct App {
     UINT source_width=0,source_height=0,presented_width=0,presented_height=0,presented_rotation=0;
     bool processor_rotation=false;
     uint64_t source_shape_changes=0,presented_shape_changes=0;
+    uint64_t preserved_format_handoffs=0;
     std::deque<VideoFrame> video; std::deque<AudioFrame> sound;
     VideoFrame last_frame{};
     bool video_slot_reserved=false,video_sync=true;
@@ -380,13 +381,20 @@ struct App {
         decoder_ready=true; return S_OK;
     }
     HRESULT set_output() {
+        struct FailedFormat {
+            App* app;bool committed=false;
+            ~FailedFormat(){if(!committed){app->video.clear();app->last_frame={};app->paused_texture.Reset();app->spare_paused_texture.Reset();app->spare_paused_sample.Reset();app->processor.Reset();app->venum.Reset();}}
+        } failure{this};
         for (DWORD i = 0; i < 32; ++i) {
             ComPtr<IMFMediaType> t; CHECK(decoder->GetOutputAvailableType(0, i, &t));
             GUID sub; CHECK(t->GetGUID(MF_MT_SUBTYPE, &sub));
             if (sub != MFVideoFormat_NV12) continue;
             UINT w = 0, h = 0; MFGetAttributeSize(t.Get(), MF_MT_FRAME_SIZE, &w, &h);
             if (codec==265?(w>3840||h>2176||uint64_t(w)*h>3840ull*2176):(w>1920||h>1920||uint64_t(w)*h>2088960)) return MF_E_INVALIDMEDIATYPE;
-            video.clear();last_frame.sample.Reset();paused_texture.Reset();spare_paused_texture.Reset();spare_paused_sample.Reset();
+            // Release decoder-pool samples before renegotiation, but retain the
+            // independent last-presented copy and its per-frame metadata. It can
+            // redraw safely while the new format's first picture is still pending.
+            video.clear();
             CHECK(decoder->SetOutputType(0, t.Get(), 0)); width = w; height = h;
             output_format=output_format_diagnostics(decoder.Get());
             MFVideoArea aperture{}; UINT32 size=0;
@@ -395,7 +403,13 @@ struct App {
             if(FAILED(area)&&area!=MF_E_ATTRIBUTENOTFOUND)return area;
             CHECK(source_area(w,h,SUCCEEDED(area)?&aperture:nullptr,output_aperture));
             width=output_aperture.right-output_aperture.left;height=output_aperture.bottom-output_aperture.top;CHECK(media_color(t.Get(),output_color));
-            video.clear(); last_frame.sample.Reset(); processor.Reset(); venum.Reset(); return S_OK;
+            // Drop only an incompatible spare; keep at most two private surfaces
+            // during replacement. draw() validates actual coded/viewport sizes
+            // before reusing the processor, including an old paused redraw.
+            if(spare_paused_texture){D3D11_TEXTURE2D_DESC desc{};spare_paused_texture->GetDesc(&desc);
+                if(desc.Width!=w||desc.Height!=h){spare_paused_sample.Reset();spare_paused_texture.Reset();}}
+            if(last_frame.sample&&!screen_suspended&&last_frame.visibility_serial==visibility_serial)++preserved_format_handoffs;
+            failure.committed=true;return S_OK;
         }
         return MF_E_INVALIDMEDIATYPE;
     }
@@ -531,6 +545,7 @@ struct App {
             if(next_paused)next_paused->GetDesc(&cached_desc);
             if(!next_paused || cached_desc.Width!=source_desc.Width || cached_desc.Height!=source_desc.Height) {
                 auto copy_desc=source_desc;copy_desc.ArraySize=1;copy_desc.MipLevels=1;copy_desc.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;copy_desc.MiscFlags=0;
+                spare_paused_sample.Reset();spare_paused_texture.Reset();
                 next_paused.Reset();next_sample.Reset();CHECK(device->CreateTexture2D(&copy_desc,nullptr,&next_paused));
                 ComPtr<IMFMediaBuffer> cached_buffer;CHECK(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D),next_paused.Get(),0,FALSE,&cached_buffer));
                 CHECK(MFCreateSample(&next_sample));CHECK(next_sample->AddBuffer(cached_buffer.Get()));
@@ -831,6 +846,7 @@ int am_reset(void* p) {
     if(a->chrome.composition){HRESULT hr=a->chrome.set_screen_visibility(false,false);if(FAILED(hr)){error_hr("reset screen visibility",hr);return 0;}}
     a->reset_video_decoder();a->output_ahead={};a->presentation_late={};a->decoder_residence={};
     a->source_width=a->source_height=a->presented_width=a->presented_height=0;a->source_shape_changes=a->presented_shape_changes=0;
+    a->preserved_format_handoffs=0;
     a->presented_rotation=0;
     a->video_sync=true;a->interactive_skips=0;
     if(a->audio_pending&&a->audio_retries>=3){a->audio_retries=0;a->audio_retry_at=now_seconds();}
@@ -846,6 +862,7 @@ const char* am_stats(void* p) {
         + " source_shape="+std::to_string(a->source_width)+"x"+std::to_string(a->source_height)+" source_changes="+std::to_string(a->source_shape_changes)
         + " presented_shape="+std::to_string(a->presented_width)+"x"+std::to_string(a->presented_height)+" presented_changes="+std::to_string(a->presented_shape_changes)
         + " presented_rotation_cw="+std::to_string(a->presented_rotation)
+        + " preserved_format_handoffs="+std::to_string(a->preserved_format_handoffs)
         + " visibility_serial="+std::to_string(a->visibility_serial)+" suspended="+std::to_string(a->screen_suspended)+" screen_blank="+std::to_string(a->shell.screen_blank.load())
         + " client_shape="+std::to_string(client.right-client.left)+"x"+std::to_string(client.bottom-client.top)
         + a->output_format

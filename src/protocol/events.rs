@@ -109,6 +109,7 @@ struct Policy {
     connect_timeout: Duration,
     command_timeout: Duration,
     quiet: Duration,
+    min_send_interval: Duration,
     poll: Duration,
 }
 impl Default for Policy {
@@ -116,7 +117,8 @@ impl Default for Policy {
         Self {
             connect_timeout: Duration::from_secs(10),
             command_timeout: Duration::from_secs(2),
-            quiet: Duration::from_millis(500),
+            quiet: Duration::from_millis(100),
+            min_send_interval: Duration::from_millis(500),
             poll: Duration::from_millis(50),
         }
     }
@@ -127,13 +129,19 @@ struct Schedule {
     sent_at: Option<Instant>,
 }
 impl Schedule {
-    fn ready(&self, update: Update, now: Instant, quiet: Duration) -> bool {
+    fn ready(
+        &self,
+        update: Update,
+        now: Instant,
+        quiet: Duration,
+        min_send_interval: Duration,
+    ) -> bool {
         update.revision != 0
             && self.applied != (update.width, update.height)
             && now.saturating_duration_since(update.changed_at) >= quiet
             && self
                 .sent_at
-                .is_none_or(|sent| now.saturating_duration_since(sent) >= quiet)
+                .is_none_or(|sent| now.saturating_duration_since(sent) >= min_send_interval)
     }
 }
 
@@ -256,7 +264,7 @@ fn run_updates(
     while !stop.load(Ordering::Acquire) {
         let update = updates.snapshot()?;
         let now = Instant::now();
-        if !schedule.ready(update, now, policy.quiet) {
+        if !schedule.ready(update, now, policy.quiet, policy.min_send_interval) {
             thread::sleep(policy.poll);
             continue;
         }
@@ -264,8 +272,19 @@ fn run_updates(
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("event CSeq exhausted"))?;
         let command = command(base_display, update, cseq)?;
-        let deadline = now + policy.command_timeout;
-        schedule.sent_at = Some(now);
+        let sending_at = Instant::now();
+        let deadline = sending_at + policy.command_timeout;
+        schedule.sent_at = Some(sending_at);
+        log(&format!(
+            "display update sending revision={} geometry={}x{} queued_ms={:.1}",
+            update.revision,
+            update.width,
+            update.height,
+            sending_at
+                .saturating_duration_since(update.changed_at)
+                .as_secs_f64()
+                * 1000.0
+        ));
         if !write_command(stream, &command, stop, deadline)? {
             return Ok(());
         }
@@ -612,6 +631,7 @@ mod tests {
                         connect_timeout: Duration::from_secs(1),
                         command_timeout,
                         quiet: Duration::from_millis(20),
+                        min_send_interval: Duration::from_millis(20),
                         poll: Duration::from_millis(5),
                     },
                 )
@@ -697,37 +717,147 @@ mod tests {
     }
 
     #[test]
-    fn coalescing_duplicates_quiet_period_and_rate_limit_are_deterministic() {
+    fn first_display_update_waits_100ms_and_duplicates_do_not_extend_quiet() {
         let updates = DisplayUpdates::new(994, 2160).unwrap();
         let start = Instant::now();
+        let schedule = Schedule {
+            applied: updates.initial,
+            sent_at: None,
+        };
+        let policy = Policy::default();
+        assert_eq!(policy.quiet, Duration::from_millis(100));
+        assert_eq!(policy.min_send_interval, Duration::from_millis(500));
+        assert_eq!(policy.poll, Duration::from_millis(50));
+        assert!(!schedule.ready(
+            updates.snapshot().unwrap(),
+            start + Duration::from_secs(1),
+            policy.quiet,
+            policy.min_send_interval
+        ));
+        assert!(!updates.request_at(994, 2160, start).unwrap());
+        assert!(updates.request_at(2160, 994, start).unwrap());
+        assert!(
+            !updates
+                .request_at(2160, 994, start + Duration::from_millis(99))
+                .unwrap()
+        );
+        let first = updates.snapshot().unwrap();
+        assert_eq!(first.revision, 1);
+        assert_eq!(first.changed_at, start);
+        assert!(!schedule.ready(
+            first,
+            start + Duration::from_millis(99),
+            policy.quiet,
+            policy.min_send_interval
+        ));
+        assert!(schedule.ready(
+            first,
+            start + Duration::from_millis(100),
+            policy.quiet,
+            policy.min_send_interval
+        ));
+    }
+
+    #[test]
+    fn rapid_display_flips_coalesce_to_latest_settled_geometry() {
+        let updates = DisplayUpdates::new(994, 2160).unwrap();
+        let start = Instant::now();
+        let schedule = Schedule {
+            applied: updates.initial,
+            sent_at: None,
+        };
+        let policy = Policy::default();
+        updates.request_at(2160, 994, start).unwrap();
+        updates
+            .request_at(994, 2160, start + Duration::from_millis(40))
+            .unwrap();
+        assert!(!schedule.ready(
+            updates.snapshot().unwrap(),
+            start + Duration::from_millis(200),
+            policy.quiet,
+            policy.min_send_interval
+        ));
+        updates
+            .request_at(2160, 994, start + Duration::from_millis(80))
+            .unwrap();
+        assert!(
+            !updates
+                .request_at(2160, 994, start + Duration::from_millis(170))
+                .unwrap()
+        );
+        let newest = updates.snapshot().unwrap();
+        assert_eq!(
+            (newest.revision, newest.width, newest.height),
+            (3, 2160, 994)
+        );
+        assert!(!schedule.ready(
+            newest,
+            start + Duration::from_millis(179),
+            policy.quiet,
+            policy.min_send_interval
+        ));
+        assert!(schedule.ready(
+            newest,
+            start + Duration::from_millis(180),
+            policy.quiet,
+            policy.min_send_interval
+        ));
+    }
+
+    #[test]
+    fn settled_display_updates_still_observe_500ms_minimum_send_interval() {
+        let updates = DisplayUpdates::new(994, 2160).unwrap();
+        let start = Instant::now();
+        let policy = Policy::default();
         let mut schedule = Schedule {
             applied: updates.initial,
             sent_at: None,
         };
-        let quiet = Duration::from_millis(500);
-        assert!(!schedule.ready(updates.snapshot().unwrap(), start + quiet, quiet));
-        assert!(!updates.request_at(994, 2160, start).unwrap());
-        assert!(updates.request_at(2160, 994, start).unwrap());
-        assert!(!updates.request_at(2160, 994, start + quiet).unwrap());
-        let first = updates.snapshot().unwrap();
-        assert_eq!(first.revision, 1);
-        assert!(!schedule.ready(first, start + Duration::from_millis(499), quiet));
-        assert!(schedule.ready(first, start + quiet, quiet));
-        schedule.sent_at = Some(start + quiet);
-        schedule.applied = (first.width, first.height);
-        updates.request_at(1440, 664, start + quiet).unwrap();
+        updates.request_at(2160, 994, start).unwrap();
+        assert!(schedule.ready(
+            updates.snapshot().unwrap(),
+            start + Duration::from_millis(100),
+            policy.quiet,
+            policy.min_send_interval
+        ));
+        schedule.sent_at = Some(start + Duration::from_millis(100));
+        schedule.applied = (2160, 994);
         updates
-            .request_at(994, 2160, start + Duration::from_millis(600))
+            .request_at(994, 2160, start + Duration::from_millis(150))
             .unwrap();
-        let newest = updates.snapshot().unwrap();
-        assert_eq!(
-            (newest.revision, newest.width, newest.height),
-            (3, 994, 2160)
-        );
-        assert!(!schedule.ready(newest, start + Duration::from_millis(999), quiet));
-        assert!(schedule.ready(newest, start + Duration::from_millis(1100), quiet));
-        schedule.sent_at = Some(start + Duration::from_millis(1000));
-        assert!(!schedule.ready(newest, start + Duration::from_millis(1100), quiet));
+        for now in [250, 599] {
+            assert!(!schedule.ready(
+                updates.snapshot().unwrap(),
+                start + Duration::from_millis(now),
+                policy.quiet,
+                policy.min_send_interval
+            ));
+        }
+        assert!(schedule.ready(
+            updates.snapshot().unwrap(),
+            start + Duration::from_millis(600),
+            policy.quiet,
+            policy.min_send_interval
+        ));
+        schedule.sent_at = Some(start + Duration::from_millis(600));
+        schedule.applied = (994, 2160);
+        updates
+            .request_at(2160, 994, start + Duration::from_millis(620))
+            .unwrap();
+        for now in [720, 1099] {
+            assert!(!schedule.ready(
+                updates.snapshot().unwrap(),
+                start + Duration::from_millis(now),
+                policy.quiet,
+                policy.min_send_interval
+            ));
+        }
+        assert!(schedule.ready(
+            updates.snapshot().unwrap(),
+            start + Duration::from_millis(1100),
+            policy.quiet,
+            policy.min_send_interval
+        ));
     }
 
     #[test]

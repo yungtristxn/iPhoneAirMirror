@@ -246,6 +246,24 @@ impl MediaTransitions {
         self.revision = revision;
         Ok((serial, true))
     }
+    fn publish_screen_if_current(
+        &mut self,
+        shutting_down: bool,
+        owner: u64,
+        epoch: u64,
+        suspended: bool,
+    ) -> Result<Option<(u64, bool)>> {
+        ensure!(
+            epoch != 0,
+            "screen-state publication requires an active epoch"
+        );
+        if shutting_down || owner != epoch {
+            return Ok(None);
+        }
+        // A live owner's inconsistent state or exhausted serial is still an
+        // invariant failure. Only ordinary lifetime cancellation returns None.
+        self.publish_screen(owner, epoch, suspended).map(Some)
+    }
     fn screen_for(&self, owner: u64, epoch: u64) -> Option<ScreenVisibility> {
         (epoch != 0 && owner == epoch && self.screen.epoch == epoch).then_some(self.screen)
     }
@@ -459,14 +477,17 @@ impl Shared {
     pub fn flush_snapshot(&self) -> AudioFlush {
         self.transitions.lock().unwrap().flush
     }
-    pub fn publish_screen_state(&self, epoch: u64, suspended: bool) -> Result<u64> {
+    pub fn publish_screen_state(&self, epoch: u64, suspended: bool) -> Result<Option<u64>> {
         let mut transition = self.transitions.lock().unwrap();
-        ensure!(
-            !self.shutdown.load(Ordering::Acquire),
-            "receiver is shutting down"
-        );
-        let (serial, changed) =
-            transition.publish_screen(self.owner.load(Ordering::Acquire), epoch, suspended)?;
+        let Some((serial, changed)) = transition.publish_screen_if_current(
+            self.shutdown.load(Ordering::Acquire),
+            self.owner.load(Ordering::Acquire),
+            epoch,
+            suspended,
+        )?
+        else {
+            return Ok(None);
+        };
         drop(transition);
         if changed {
             self.wake.signal();
@@ -474,7 +495,7 @@ impl Shared {
                 "phone screen suspended={suspended} epoch={epoch} visibility_serial={serial}"
             ));
         }
-        Ok(serial)
+        Ok(Some(serial))
     }
     pub fn request_flush(&self, epoch: u64, cutoff: protocol::AudioCutoff) -> Result<()> {
         let mut transition = self.transitions.lock().unwrap();
@@ -1235,7 +1256,12 @@ fn display_target(profile: protocol::VideoProfile, size: (u32, u32)) -> Option<(
 }
 impl Drop for ReceiverApp {
     fn drop(&mut self) {
-        self.shared.shutdown.store(true, Ordering::Release);
+        {
+            // Linearize shutdown with screen-state publication: an in-flight
+            // update finishes before shutdown, or observes cancellation unchanged.
+            let _transition = self.shared.transitions.lock().unwrap();
+            self.shared.shutdown.store(true, Ordering::Release);
+        }
         self.discovery.clear();
         if let Some(t) = self.server.take() {
             let _ = t.join();
@@ -1591,6 +1617,66 @@ mod tests {
         assert_eq!(transition.screen.serial, u64::MAX);
         assert!(!transition.screen.suspended);
         assert_eq!(transition.revision, revision);
+    }
+    #[test]
+    fn screen_publication_cancels_shutdown_and_replaced_owner_without_mutation() {
+        let mut transition = MediaTransitions::default();
+        transition.reset_screen(7);
+        transition.publish_screen(7, 7, true).unwrap();
+        let before = (transition.screen, transition.revision, transition.applied);
+        // The valid resume record raced with normal shutdown while epoch7 was
+        // still live. No new publication, revision, wake or failure is needed.
+        assert_eq!(
+            transition
+                .publish_screen_if_current(true, 7, 7, false)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            (transition.screen, transition.revision, transition.applied),
+            before
+        );
+        transition.reset_screen(8);
+        let before = (transition.screen, transition.revision, transition.applied);
+        assert_eq!(
+            transition
+                .publish_screen_if_current(false, 8, 7, true)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            (transition.screen, transition.revision, transition.applied),
+            before
+        );
+        assert_eq!(
+            transition
+                .publish_screen_if_current(false, 0, 7, true)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            (transition.screen, transition.revision, transition.applied),
+            before
+        );
+        // Cancellation must not turn genuine live-owner invariants into success.
+        assert!(
+            transition
+                .publish_screen_if_current(false, 7, 7, true)
+                .is_err()
+        );
+        assert!(
+            transition
+                .publish_screen_if_current(false, 0, 0, true)
+                .is_err()
+        );
+        transition.screen.serial = u64::MAX;
+        assert!(
+            transition
+                .publish_screen_if_current(false, 8, 8, true)
+                .is_err()
+        );
+        assert_eq!(transition.revision, before.1);
+        assert!(!transition.screen.suspended);
     }
     #[test]
     fn priority_screen_state_bypasses_full_video_queue_without_losing_decode_references() {
