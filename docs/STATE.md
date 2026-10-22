@@ -2,7 +2,27 @@
 
 Updated: 2026-10-22
 
-## Photos rotation event-channel correction awaiting phone check
+## Repeated Photos updates: observed RTSP acknowledgment compatibility
+- The user confirms 1FD895... remains connected through rotation, but clarifies
+  that opening a photo still fails to update orientation. New live diagnostics
+  prove `RTSP/1.0 status=200 cseq_present=false body_bytes=0`; the previous
+  HTTP-only exception retained the connection but disabled subsequent updates.
+- Accept omitted CSeq for this serialized legacy event exchange for RTSP too.
+  Supplied sequences still must match; malformed/duplicate sequences remain
+  errors. RTSP without Content-Length has an empty body; HTTP still requires
+  explicit length. One outstanding request, no retries after ambiguity, all
+  budgets and retained-socket failure handling stay in force.
+- 103 Rust tests, strict Clippy and release build pass, including four alternating
+  display updates acknowledged without RTSP CSeq and with/without empty-body
+  length. Three control lifecycle cycles also pass. Later real photo/rotation
+  geometry remains pending verification. Corrected EXE SHA:
+  `3A2CDD80199E5FF40426D7D61BCA3371FBB877793D3ACA58F76FE605D966A718`.
+  Lifecycle evidence: `local/control-lifecycle/20261022T183043035095Z/result.json`.
+- Prior live scalar log and manifest: `local/photos-rtsp-ack-failure/`. The phone
+  session included audio packets on its own; no audible sync/quality result is
+  claimed. All automated checks remain silent.
+
+## Prior Photos event-channel disconnect correction
 - User confirms the optimized build's first picture appears sooner, then reports
   a critical mirroring failure while rotating in Photos. Exact F3B058... log shows
   first picture 294.7 ms after claim, transform 7/CW270 at 31056.241, then

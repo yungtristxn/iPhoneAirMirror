@@ -15,7 +15,7 @@ Physical A/V acceptance of this candidate is still outstanding. Do not run both
 receivers at once. Adding the `decoder-lab` build feature disables reception.
 
 For the separately authorized friend-test archive, use
-`python -B scripts/Package-Share.py --output dist/AirMirrorLite-Windows-x64-photos-event-fix-2026-10-22.zip`.
+`python -B scripts/Package-Share.py --output dist/AirMirrorLite-Windows-x64-photos-rotation-fix-2026-10-22.zip`.
 This preserves the tested FFmpeg/rotation candidate, verifies its hash against a
 fresh offline build, and includes matching source/dependencies and GPLv3 notices.
 It excludes pairing identities and logs. Extract the ZIP and use

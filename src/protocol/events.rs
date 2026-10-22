@@ -461,8 +461,9 @@ fn response_header(header: &[u8], expected_cseq: u32, log: &impl Fn(&str)) -> Re
     };
     ensure!(length <= MAX_REPLY_BODY, "event response body budget");
     log(&format!(
-        "event response protocol={protocol} status={code} cseq_present={} body_bytes={length}",
-        headers.contains_key("cseq")
+        "event response protocol={protocol} status={code} cseq_present={} body_bytes={length} length_present={}",
+        headers.contains_key("cseq"),
+        headers.contains_key("content-length")
     ));
     match headers.get("cseq") {
         Some(cseq) => ensure!(
@@ -470,12 +471,13 @@ fn response_header(header: &[u8], expected_cseq: u32, log: &impl Fn(&str)) -> Re
             "event response CSeq mismatch"
         ),
         None => {
-            // Apple's generic HTTP event response does not copy the RTSP CSeq.
-            // This is safe only with one outstanding request, a definite body
-            // length and no retries after any timeout or ambiguous transaction.
-            ensure!(protocol == "HTTP/1.1", "missing event response CSeq");
+            // Observed iPhone event replies use RTSP/1.0 200 without CSeq.
+            // Correlate only this serialized event exchange: one outstanding
+            // command, no pipeline, no retry after an ambiguous transaction.
+            // RTSP without Content-Length has no body (RFC 2326 sections 4.4,
+            // 12.14); HTTP still needs explicit framing on this connection.
             ensure!(
-                headers.contains_key("content-length"),
+                protocol == "RTSP/1.0" || headers.contains_key("content-length"),
                 "unframed HTTP event response"
             );
         }
@@ -824,9 +826,48 @@ mod tests {
     }
 
     #[test]
-    fn missing_rtsp_cseq_and_explicit_bad_http_cseq_keep_channel_but_disable_updates() {
+    fn observed_rtsp_reply_without_cseq_allows_repeated_display_updates() {
+        let session = Session::start("127.0.0.1".parse().unwrap(), Duration::from_secs(2));
+        let mut peer = session.connect();
+        for (index, (width, height)) in [(2160, 994), (994, 2160), (2160, 994), (994, 2160)]
+            .into_iter()
+            .enumerate()
+        {
+            assert!(session.updates.request(width, height).unwrap());
+            let packet = request(&mut peer);
+            assert_eq!(packet.headers["cseq"], (index + 1).to_string());
+            let body = super::super::plist::decode(&packet.body).unwrap();
+            let displays = body.as_dictionary().unwrap()["displays"]
+                .as_array()
+                .unwrap();
+            let display = displays[0].as_dictionary().unwrap();
+            assert_eq!(display["width"].as_unsigned_integer(), Some(width.into()));
+            assert_eq!(display["height"].as_unsigned_integer(), Some(height.into()));
+            // Both spellings delimit an empty RTSP reply, without an echoed CSeq.
+            let reply = if index % 2 == 0 {
+                b"RTSP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n".as_slice()
+            } else {
+                b"RTSP/1.0 200 OK\r\n\r\n".as_slice()
+            };
+            peer.write_all(reply).unwrap();
+            session.wait_for_log(&format!("acknowledged revision={}", index + 1));
+        }
+        let logs = session.logs.lock().unwrap();
+        assert_eq!(
+            logs.iter()
+                .filter(|s| s.contains("display update acknowledged"))
+                .count(),
+            4
+        );
+        assert!(!logs.iter().any(|s| s.contains("disabled")));
+    }
+
+    #[test]
+    fn explicit_bad_cseq_keeps_channel_but_disables_updates() {
         for reply in [
-            b"RTSP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            b"RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            b"RTSP/1.0 200 OK\r\nCSeq: invalid\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            b"RTSP/1.0 200 OK\r\nCSeq: 1\r\ncseq: 1\r\nContent-Length: 0\r\n\r\n".as_slice(),
             b"HTTP/1.1 200 OK\r\nCSeq: 2\r\nContent-Length: 0\r\n\r\n".as_slice(),
             b"HTTP/1.1 200 OK\r\nCSeq: invalid\r\nContent-Length: 0\r\n\r\n".as_slice(),
             b"HTTP/1.1 200 OK\r\nCSeq: 1\r\ncseq: 1\r\nContent-Length: 0\r\n\r\n".as_slice(),
@@ -981,13 +1022,13 @@ mod tests {
         assert!(
             response_header(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", 1, &|_| {}).is_ok()
         );
+        assert!(response_header(b"RTSP/1.0 200 OK\r\n\r\n", 1, &|_| {}).is_ok());
         for length in 0..valid.len() {
             assert!(response_header(&valid[..length], 1, &|_| {}).is_err());
         }
         for bad in [
             "HTTP/1.1 200 OK\r\n\r\n",
             "RTSP/1.0 302 Redirect\r\nCSeq: 1\r\n\r\n",
-            "RTSP/1.0 200 OK\r\n\r\n",
             "RTSP/1.0 200 OK\r\nCSeq: 2\r\n\r\n",
             "RTSP/1.0 200 OK\r\nCSeq: 1\r\ncseq: 1\r\n\r\n",
             "RTSP/1.0 200 OK\r\nCSeq: 1\r\nContent-Length: -1\r\n\r\n",

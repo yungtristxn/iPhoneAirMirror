@@ -246,3 +246,29 @@ three control lifecycle cycles also pass with zero audio submitted. Corrected
 EXE: `1FD89573D59425C39267AF93BEBEE0D9EE6DEFB91B20C555AD19C2657D456E94`.
 Original evidence: `local/photos-event-failure/`; new physical rotation acceptance
 is pending.
+
+## Observed RTSP acknowledgment follow-up
+
+The next phone check confirmed that socket retention prevents the disconnect.
+It also supplied the missing protocol evidence: `RTSP/1.0 status=200`, no CSeq,
+zero response body. The HTTP-only compatibility exception therefore still
+disabled later display commands, explaining why subsequent photo opening could
+keep the wrong display geometry. The user's initial correctly-sized report was
+later narrowed to connection stability; photo-opening orientation remains open.
+
+The compatibility exception now covers missing CSeq on this one serialized
+legacy event connection for RTSP as well. This is an observed AirPlay deviation
+from normal RTSP sequencing, not a general relaxation of RTSP control parsing.
+Any supplied CSeq still must match exactly. There is one outstanding command,
+no pipelining, no retry after a timeout, and no continuation after an ambiguous
+reply. RTSP's absent Content-Length means an empty body under
+[RFC 2326 sections 4.4 and 12.14](https://www.rfc-editor.org/rfc/rfc2326.html#section-4.4);
+HTTP still requires explicit bounded length. New diagnostics distinguish an
+omitted Content-Length from an explicitly empty response.
+
+A real loopback regression alternates four portrait/landscape display commands
+with omitted-CSeq RTSP acknowledgments and verifies every geometry and command
+sequence. Empty replies with and without Content-Length are covered; explicit
+wrong, malformed and duplicate sequences remain rejected for both protocols.
+103 Rust tests and strict Clippy pass. Physical repeated-photo acceptance remains
+pending. Prior log/manifest: `local/photos-rtsp-ack-failure/`.
