@@ -25,9 +25,17 @@ Generated startup-size/portrait/landscape/compact/narrow and 100/125/200% contro
 renders were inspected against the user-supplied image.
 Evidence: local/researched-ui/, local/researched-ui-{rust,clippy,artwork.stdout}.
 
-A separately packaged researched candidate is pending; previous interface,
-visual, release and original working fallback executables remain preserved.
-Normal receiver launch needs the user's audio output to be available again.
+Packaged from clean source 10754c9; the exact packaged EXE passes the isolated
+artwork/control checks and all 17 generated PNGs match the inspected build.
+Candidate: dist/AirMirrorLite-researched-ui-candidate/AirMirrorLite.exe
+SHA256: 4920568F2BEC1D597C2046BBC507874D4F0BEB0534C6848DAC9FF6619CF24955.
+Source-complete ZIP: dist/AirMirrorLite-Windows-x64-researched-ui-2026-10-23.zip
+SHA256: 104CC25F8C6EB9BDD635C27EFEA5CFBC701DD3FC2211E9BA2239AB53E313ED3B.
+All 4096 ZIP entries verified; source provenance is in BUILD.json. Eight previous
+interface/release/working fallback EXEs retain their hashes. Receipt:
+local/researched-ui/result.json; renders: local/researched-ui/packaged/.
+No receiver is running. Next: when an output device is available, run silent
+media validation and reopen muted. No new physical iPhone/audio evidence claimed.
 
 ## Release-preparation review
 
