@@ -7,14 +7,23 @@ Updated: 2026-10-23. Branch: codex/verified-pairing.
 After the muted beta launch, the user reported "works great" and explicitly
 requested repository creation, source push and publication. This is a positive
 user report, not a measured audio/sync or sustained acceptance result.
-Target: yungtristxn/iPhoneAirMirror; both exact-name searches and the account's
+Created yungtristxn/iPhoneAirMirror after exact-name searches and the account's
 repository API found no existing match. The README is now user-facing and short,
 with generated native waiting-window/control images and installation/use steps.
 Build instructions remain in VALIDATION.md. No phone content is published.
 
-The tested installer/portable hashes below are retained. The release tag targets
-their build source 45b397a; main also includes the later documentation updates.
-Publication verification is pending. No runnable code or release bytes changed.
+Published:
+- Repository: https://github.com/yungtristxn/iPhoneAirMirror
+- Beta: https://github.com/yungtristxn/iPhoneAirMirror/releases/tag/v0.1.0-beta.1
+
+The tested installer/portable hashes below are retained. Tag v0.1.0-beta.1 points
+to build source 45b397a; main includes the later documentation updates. GitHub's
+asset digests and anonymous downloads of all three release assets match local
+hashes. The public README and both image files match; GitHub Markdown renders
+both image elements. The release is published (not draft) and marked prerelease.
+No runnable code or release bytes changed. Targeted HEAD-history checks found no
+private runtime paths or high-confidence credential patterns in 824 blobs.
+Receipt: local/github-publication/published-verification.json.
 
 ## GitHub beta preparation
 
@@ -62,8 +71,8 @@ Final receipt: local/release-branding/final-result.json. Installer evidence:
 local/installer-final-lifecycle-evidence-20261023/result.json and the missing-
 runtime/post-copy-failure/negative fixture folders. Native/control evidence:
 local/release-branding/final-{native-result.json,media.log,control.log,worker.log}.
-No GitHub remote exists and nothing was uploaded. Next: select the target repo
-and review the local beta assets/notes before any GitHub draft or publication.
+The subsequent publication is recorded above. Physical A/V and normal production
+installation acceptance remain separate from this beta's completed checks.
 
 ## Neutral phone interior
 
