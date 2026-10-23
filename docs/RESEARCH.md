@@ -122,11 +122,16 @@ Wire facts only; no proprietary implementation imported:
 Physical picture pixels and logical DPI-scaled UI geometry are separate.
 DirectComposition clips and a narrow gradient bezel frame the video. Direct2D
 paths draw the control icons, while DirectWrite handles labels; icon-font lookup
-is no longer required. The light rail is shoulder-docked with a connected hide
-tab, 44-DIP action targets and unchanged keyboard/accessibility semantics. The shell
+is no longer required. The light rail is shoulder-docked with the collapse tab
+aligned to its first row. A shared control_layout.h grid supplies action centers,
+hit targets, tooltip regions and UIA bounds. Reset and fullscreen have distinct
+silhouettes; 44-DIP action targets and keyboard behavior remain. The shell
 fits monitor work areas and keeps the rail accessible. A software status panel
 survives D3D failure. UIA exposes names, roles, focus, invoke/toggle and volume
-through bounded cross-thread requests with safe detach.
+through bounded cross-thread requests with safe detach. Idle artwork is isolated
+in idle_artwork.h, adapts to portrait/landscape/compact widths, and is skipped
+for video, screen suspension and error cards. Its gradients and device diagram
+are static native vectors: no new idle timer, bitmap or runtime dependency.
 
 [Composition swap chain](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/nf-dxgi1_2-idxgifactory2-createswapchainforcomposition),
 [DPI](https://learn.microsoft.com/en-us/windows/win32/direct2d/direct2d-and-high-dpi),

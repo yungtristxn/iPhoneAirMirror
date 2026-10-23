@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cwchar>
 #include <initializer_list>
+#include "control_layout.h"
 using Microsoft::WRL::ComPtr;
 
 struct ControlArtwork {
@@ -31,7 +32,7 @@ class ControlPainter {
     static constexpr UINT INK=0x303640,SECONDARY=0x626b78,ACCENT=0x2868d8,SURFACE=0xf6f7f9;
 
     void color(UINT rgb,float alpha=1) { brush->SetColor(D2D1::ColorF(rgb,alpha)); }
-    HRESULT line(std::initializer_list<D2D1_POINT_2F> points,bool closed=false,float width=1.7f) {
+    HRESULT line(std::initializer_list<D2D1_POINT_2F> points,bool closed=false,float width=control_layout::icon_stroke) {
         ComPtr<ID2D1PathGeometry> geometry;
         HRESULT hr=factory->CreatePathGeometry(&geometry);if(FAILED(hr))return hr;
         ComPtr<ID2D1GeometrySink> sink;hr=geometry->Open(&sink);if(FAILED(hr))return hr;
@@ -49,7 +50,7 @@ class ControlPainter {
         sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(x+depth,y-height*.55f),
             D2D1::Point2F(x+depth,y+height*.55f),D2D1::Point2F(x,y+height)));
         sink->EndFigure(D2D1_FIGURE_END_OPEN);hr=sink->Close();if(FAILED(hr))return hr;
-        canvas->DrawGeometry(geometry.Get(),brush.Get(),1.7f,stroke.Get());return S_OK;
+        canvas->DrawGeometry(geometry.Get(),brush.Get(),control_layout::icon_stroke,stroke.Get());return S_OK;
     }
     void panel(D2D1_RECT_F rect,float radius,float scale) {
         for(int i=4;i>0;--i){
@@ -68,24 +69,31 @@ class ControlPainter {
     HRESULT icon(int index,float x,float y,bool muted,bool fullscreen) {
         HRESULT hr=S_OK;
         if(index==0){
-            hr=line({{x-9,y-3},{x-5,y-3},{x,y-7},{x,y+7},{x-5,y+3},{x-9,y+3}},true);
+            hr=line({{x-9,y-3.5f},{x-5,y-3.5f},{x,y-8},{x,y+8},{x-5,y+3.5f},{x-9,y+3.5f}},true);
             if(FAILED(hr))return hr;
             if(muted){
-                hr=line({{x+5,y-3},{x+11,y+3}});if(FAILED(hr))return hr;
-                return line({{x+11,y-3},{x+5,y+3}});
+                hr=line({{x+4,y-4},{x+11,y+4}});if(FAILED(hr))return hr;
+                return line({{x+11,y-4},{x+4,y+4}});
             }
             hr=wave(x+4,y,3.5f,3);if(FAILED(hr))return hr;
             return wave(x+7,y,6.5f,5);
         }
         if(index==3){
-            hr=line({{x-6,y-6},{x+6,y+6}});if(FAILED(hr))return hr;
-            return line({{x+6,y-6},{x-6,y+6}});
+            hr=line({{x-7,y-7},{x+7,y+7}});if(FAILED(hr))return hr;
+            return line({{x+7,y-7},{x-7,y+7}});
         }
         if(index==1){
-            canvas->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x-3.5f,y-6,x+3.5f,y+6),1.4f,1.4f),
-                brush.Get(),1.6f,stroke.Get());
+            // Reset and fullscreen have distinct silhouettes at small sizes.
+            ComPtr<ID2D1PathGeometry> geometry;hr=factory->CreatePathGeometry(&geometry);if(FAILED(hr))return hr;
+            ComPtr<ID2D1GeometrySink> sink;hr=geometry->Open(&sink);if(FAILED(hr))return hr;
+            sink->BeginFigure(D2D1::Point2F(x-7,y-5),D2D1_FIGURE_BEGIN_HOLLOW);
+            sink->AddBezier(D2D1::BezierSegment({x-1,y-12},{x+9,y-7},{x+9,y+1}));
+            sink->AddBezier(D2D1::BezierSegment({x+9,y+10},{x-5,y+13},{x-9,y+4}));
+            sink->EndFigure(D2D1_FIGURE_END_OPEN);hr=sink->Close();if(FAILED(hr))return hr;
+            canvas->DrawGeometry(geometry.Get(),brush.Get(),control_layout::icon_stroke,stroke.Get());
+            return line({{x-7,y-10},{x-7,y-5},{x-2,y-5}});
         }
-        const float extent=index==1?9.0f:8.0f,length=index==1?3.0f:5.0f;
+        const float extent=9.0f,length=5.0f;
         for(float sx:{-1.0f,1.0f})for(float sy:{-1.0f,1.0f}){
             const float cx=x+sx*extent,cy=y+sy*extent;
             if(index==2&&fullscreen)
@@ -126,14 +134,9 @@ public:
             // Invisible hover target is retained after the rail collapses.
             color(0,1.0f/255);canvas->FillRectangle(D2D1::RectF(a.arrow_x-12,10,a.arrow_x+12,206),brush.Get());
         }else{
-            if(!a.fullscreen){
-                color(0xc6cbd2);
-                const float left=a.rail_x+(a.arrow_left?0:56);
-                canvas->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(left,89,left+20,127),7,7),brush.Get());
-            }
             if(a.popup){
                 color(0,1.0f/255);
-                canvas->FillRectangle(D2D1::RectF(std::min(a.rail_x+38,a.flyout_x+106),18,std::max(a.rail_x+38,a.flyout_x+106),76),brush.Get());
+                canvas->FillRectangle(D2D1::RectF(std::min(a.rail_x+control_layout::row_x,a.flyout_x+106),18,std::max(a.rail_x+control_layout::row_x,a.flyout_x+106),76),brush.Get());
                 panel(D2D1::RectF(a.flyout_x,10,a.flyout_x+212,86),16,a.scale);
             }
         }
@@ -141,21 +144,21 @@ public:
         if(show_arrow){
             const float left=a.collapsed?a.arrow_x-12:a.arrow_x-(a.arrow_left?22:9);
             const float right=a.collapsed?a.arrow_x+12:a.arrow_x+(a.arrow_left?9:22);
-            panel(D2D1::RectF(left,90,right,126),11,a.scale);
+            panel(D2D1::RectF(left,float(control_layout::arrow_top),right,float(control_layout::arrow_bottom)),11,a.scale);
         }
         if(!a.collapsed){
             panel(D2D1::RectF(a.rail_x+10,10,a.rail_x+66,206),18,a.scale);
             for(int i=0;i<4&&SUCCEEDED(artwork);++i){
-                const float y=40.0f+i*44;
+                const float y=float(control_layout::row_center(i));
                 const bool selected=i==0&&(a.popup||a.muted||a.volume<=0);
-                const auto cell=D2D1::RoundedRect(D2D1::RectF(a.rail_x+16,y-20,a.rail_x+60,y+20),12,12);
+                const auto cell=D2D1::RoundedRect(D2D1::RectF(a.rail_x+control_layout::button_left,y-20,a.rail_x+control_layout::button_right,y+20),12,12);
                 if(a.hot==i||a.pressed==i||a.focus==i||selected){
                     color(i==3?0xfbe5e7:selected?0xe3ecfc:a.pressed==i?0xdce1e9:0xe9edf2);
                     canvas->FillRoundedRectangle(cell,brush.Get());
                 }
                 if(a.focus==i){color(ACCENT);canvas->DrawRoundedRectangle(cell,brush.Get(),1.5f);}
                 color(i==3&&(a.hot==3||a.focus==3)?0xb82d40:selected?ACCENT:INK);
-                artwork=icon(i,a.rail_x+38,y,a.muted||a.volume<=0,a.fullscreen);
+                artwork=icon(i,a.rail_x+control_layout::row_x,y,a.muted||a.volume<=0,a.fullscreen);
             }
             color(0xd8dde5);canvas->DrawLine(D2D1::Point2F(a.rail_x+24,150.5f),D2D1::Point2F(a.rail_x+52,150.5f),brush.Get(),1/a.scale);
             if(a.popup){
@@ -175,10 +178,11 @@ public:
             }
         }
         if(show_arrow&&SUCCEEDED(artwork)){
-            if(a.focus==4){color(ACCENT);canvas->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(a.arrow_x-10,92,a.arrow_x+10,124),9,9),brush.Get(),1.5f);}
+            const float y=float(control_layout::arrow_y);
+            if(a.focus==4){color(ACCENT);canvas->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(a.arrow_x-10,y-16,a.arrow_x+10,y+16),9,9),brush.Get(),1.5f);}
             color(a.hot==4||a.focus==4?ACCENT:SECONDARY);
             const float direction=a.arrow_left?-1.0f:1.0f;
-            artwork=line({{a.arrow_x-direction*2,104},{a.arrow_x+direction*2,108},{a.arrow_x-direction*2,112}},false,1.6f);
+            artwork=line({{a.arrow_x-direction*2,y-4},{a.arrow_x+direction*2,y},{a.arrow_x-direction*2,y+4}},false,1.6f);
         }
         HRESULT result=canvas->EndDraw();
         if(result==D2DERR_RECREATE_TARGET){brush.Reset();canvas.Reset();}

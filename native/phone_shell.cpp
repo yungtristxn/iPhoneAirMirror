@@ -13,7 +13,7 @@
 using namespace Gdiplus;
 namespace {
 constexpr DWORD WINDOW_STYLE=WS_POPUP|WS_THICKFRAME|WS_SYSMENU|WS_MINIMIZEBOX;
-constexpr int PALETTE_WIDTH=96, BODY_HEIGHT=196, BUTTON_STEP=44, FLYOUT_WIDTH=212, FLYOUT_SPACE=224;
+constexpr int PALETTE_WIDTH=control_layout::rail_width, BODY_HEIGHT=control_layout::height-20, FLYOUT_WIDTH=212, FLYOUT_SPACE=224;
 constexpr UINT_PTR HIDE_VOLUME=1;
 constexpr int RAIL_GAP=0,WORK_MARGIN=12;
 int rail_clearance(float s){return int(std::ceil((PALETTE_WIDTH+RAIL_GAP+WORK_MARGIN)*s));}
@@ -49,7 +49,7 @@ PalettePlacement palette_placement(RECT phone,RECT work,float s,bool collapsed,b
     // Only the neither-side-fits fallback may move the rail when opening a flyout.
     return {panel_x,y,width,height,offset+(right?0:20),offset+(collapsed?18:right?84:12),extend_right?PALETTE_WIDTH+2:10,right,popup};
 }
-constexpr wchar_t const* labels[]={L"Mute / unmute (M) — hover for volume",L"Fit at source resolution (0)",L"Fullscreen (F11)",L"Close AirMirrorLite (Alt+F4)",L"Hide controls (C)"};
+constexpr wchar_t const* labels[]={L"Mute / unmute (M) — hover for volume",L"Restore default size (0)",L"Fullscreen (F11)",L"Close AirMirrorLite (Alt+F4)",L"Hide controls (C)"};
 RECT work_area(HWND hwnd){MONITORINFO mi{sizeof(mi)};GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&mi);return mi.rcWork;}
 }
 // One bounded backing bitmap, owned and released on the UI thread. Moving the
@@ -291,9 +291,9 @@ void PhoneShell::paint_status_panel(){
 int PhoneShell::button_at(POINT p) const {
     float s=dpi_scale(),x=p.x/s-rail_x_,y=p.y/s;
     float ax=p.x/s-arrow_x_;
-    if(std::abs(ax)<=12 && (controls_collapsed_?(y>=10&&y<=206):(y>=90&&y<=126)))return 4;
-    if(controls_collapsed_||x<16||x>60)return -1;
-    for(int i=0;i<4;++i)if(y>=18+i*BUTTON_STEP&&y<62+i*BUTTON_STEP)return i;
+    if(std::abs(ax)<=control_layout::arrow_half_width && (controls_collapsed_?(y>=control_layout::panel_top&&y<=control_layout::panel_bottom):(y>=control_layout::arrow_top&&y<=control_layout::arrow_bottom)))return 4;
+    if(controls_collapsed_||x<control_layout::button_left||x>control_layout::button_right)return -1;
+    for(int i=0;i<4;++i)if(y>=control_layout::row_top(i)&&y<control_layout::row_bottom(i))return i;
     return -1;
 }
 bool PhoneShell::volume_zone(POINT p) const {
@@ -310,10 +310,10 @@ void PhoneShell::pointer_volume(int x){
 void PhoneShell::update_tooltips(){
     if(!tooltip_)return;float s=dpi_scale();
     for(UINT_PTR i=0;i<4;++i){TOOLINFOW t{sizeof(t)};t.hwnd=palette_;t.uId=i+1;
-        if(!controls_collapsed_)t.rect={int((rail_x_+16)*s),int((18+i*BUTTON_STEP)*s),int((rail_x_+60)*s),int((62+i*BUTTON_STEP)*s)};
+        if(!controls_collapsed_)t.rect={int((rail_x_+control_layout::button_left)*s),int(control_layout::row_top(int(i))*s),int((rail_x_+control_layout::button_right)*s),int(control_layout::row_bottom(int(i))*s)};
         SendMessageW(tooltip_,TTM_NEWTOOLRECTW,0,reinterpret_cast<LPARAM>(&t));}
     TOOLINFOW arrow{sizeof(arrow)};arrow.hwnd=palette_;arrow.uId=5;
-    arrow.rect={int((arrow_x_-12)*s),int((controls_collapsed_?10:90)*s),int((arrow_x_+12)*s),int((controls_collapsed_?206:126)*s)};
+    arrow.rect={int((arrow_x_-control_layout::arrow_half_width)*s),int((controls_collapsed_?control_layout::panel_top:control_layout::arrow_top)*s),int((arrow_x_+control_layout::arrow_half_width)*s),int((controls_collapsed_?control_layout::panel_bottom:control_layout::arrow_bottom)*s)};
     SendMessageW(tooltip_,TTM_NEWTOOLRECTW,0,reinterpret_cast<LPARAM>(&arrow));
     arrow.lpszText=const_cast<LPWSTR>(controls_collapsed_?L"Show controls (C)":L"Hide controls (C)");SendMessageW(tooltip_,TTM_UPDATETIPTEXTW,0,reinterpret_cast<LPARAM>(&arrow));
     SendMessageW(tooltip_,TTM_ACTIVATE,popup_||hover_pending_?FALSE:TRUE,0);
@@ -350,8 +350,8 @@ LRESULT PhoneShell::accessibility_request(AccessibilityRequest& request){
         s.focus=keyboard_focus_>=0?keyboard_focus_+1:0;s.window_focused=GetFocus()==window;s.status=status;s.reason=status_message();
         GetWindowRect(window,&s.bounds[0]);RECT palette{};if(palette_)GetWindowRect(palette_,&palette);const float scale=dpi_scale();
         const bool shown=!hidden_&&IsWindowVisible(window)&&!IsIconic(window);s.visible[0]=shown;s.bounds[8]=palette;s.visible[8]=shown;
-        for(int id=1;id<=4;++id){s.bounds[id]={palette.left+int((rail_x_+16)*scale),palette.top+int((18+(id-1)*BUTTON_STEP)*scale),palette.left+int((rail_x_+60)*scale),palette.top+int((62+(id-1)*BUTTON_STEP)*scale)};s.visible[id]=shown&&!controls_collapsed_;}
-        s.bounds[5]={palette.left+int((arrow_x_-12)*scale),palette.top+int(90*scale),palette.left+int((arrow_x_+12)*scale),palette.top+int(126*scale)};s.visible[5]=shown;
+        for(int id=1;id<=4;++id){s.bounds[id]={palette.left+int((rail_x_+control_layout::button_left)*scale),palette.top+int(control_layout::row_top(id-1)*scale),palette.left+int((rail_x_+control_layout::button_right)*scale),palette.top+int(control_layout::row_bottom(id-1)*scale)};s.visible[id]=shown&&!controls_collapsed_;}
+        s.bounds[5]={palette.left+int((arrow_x_-control_layout::arrow_half_width)*scale),palette.top+int(control_layout::arrow_top*scale),palette.left+int((arrow_x_+control_layout::arrow_half_width)*scale),palette.top+int(control_layout::arrow_bottom*scale)};s.visible[5]=shown;
         s.bounds[6]={palette.left+int((flyout_x_+12)*scale),palette.top+int(42*scale),palette.left+int((flyout_x_+200)*scale),palette.top+int(74*scale)};s.visible[6]=shown&&popup_&&!controls_collapsed_;
         if(status_panel_)GetWindowRect(status_panel_,&s.bounds[7]);s.visible[7]=shown&&s.status>=3;
         if(shown)UnionRect(&s.bounds[0],&s.bounds[0],&palette);if(s.visible[7])UnionRect(&s.bounds[0],&s.bounds[0],&s.bounds[7]);

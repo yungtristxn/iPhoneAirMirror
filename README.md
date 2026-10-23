@@ -70,8 +70,10 @@ once. Normal launches only check the grant and never use an unrestricted fallbac
 
 A rounded titanium edge and inset glass lip frame the picture. The light control
 rail docks near the phone's upper edge (centered on short landscape windows),
-with consistent vector icons, a connected collapse tab and a hover volume card.
-Artwork follows monitor DPI; fullscreen removes the bezel.
+with evenly sized vector icons, a collapse tab aligned to the sound button and
+a hover volume card. Reset uses a circular arrow; fullscreen uses corner marks.
+Artwork follows monitor DPI; fullscreen removes the bezel. The idle view shows
+a status header and two connection steps, with simpler compact-window layouts.
 
 - Drag the picture to move; bottom-right grip resizes. Double-click/F11 toggles
   fullscreen; `0` restores default size.

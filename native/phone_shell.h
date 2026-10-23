@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <memory>
 #include <mutex>
+#include "control_layout.h"
 class ControlPainter;
 class PaletteSurface;
 class PhoneAccessibility;

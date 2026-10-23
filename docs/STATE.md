@@ -2,33 +2,29 @@
 
 Updated: 2026-10-23. Branch: codex/verified-pairing.
 
-## Native visual polish
+## Native interface refinement
 
-The supplied ApowerMirror image informed a restrained titanium bezel, deeper
-rounded corners, an inset black glass lip and a more visible corner resize grip.
-A light shoulder-docked rail uses consistent native vector icons, a connected
-collapse tab, blue volume state and a matching hover flyout. Existing controls,
-keyboard/UIA behavior and native GPU video path are retained; fullscreen has no
-bezel. No extra media features or bitmap/UI framework dependencies were added.
+The supplied screenshot showed a tab between rows and icons with differing
+optical sizes. The tab now aligns with sound; the gray connector is removed;
+reset uses a circular arrow distinct from fullscreen. Shared native layout
+metrics keep painting, mouse hit testing, tooltips and UIA rectangles aligned.
+Idle content now includes a status header, device illustration, two connection
+steps and responsive portrait/landscape/compact layouts. No animation timer,
+new dependency or change to the GPU media path. Video/suspension/error states
+still suppress idle artwork.
 
-Silent native validation passes 190 GPU surfaces/192 parser-validated units,
-four format handoffs and 480 isolated AAC fixture decodes with zero audio output.
-Intrinsic checks cover resize/rotation/fullscreen, collapse/expand, hover/drag/
-cancel/mute, keyboard/UIA, monitor edges and no idle repaint/allocation churn.
-Generated artwork at 100/125/200% DPI and portrait/landscape/compact sizes was
-visually inspected. These are idle/control renders, not desktop or phone capture.
-Evidence: local/visual-polish/final/ and local/visual-polish-native-final.log.
+Silent native checks pass 190 GPU surfaces/192 parser-validated units, four
+format handoffs and 480 isolated AAC fixture frames, with zero audio output.
+New checks verify UIA and pointer targets agree and the former middle tab area
+is inactive. Existing hover/drag/cancel, keyboard, collapse, resize, rotation,
+fullscreen, screen-off and no-idle-repaint checks pass. Generated startup-size,
+portrait, landscape, narrow/compact and connecting images were inspected;
+control renders include 100/125/200% DPI. No desktop or phone capture.
+Evidence: local/visual-refinement/final/ and local/visual-refinement-native-final.log.
 
-Source f330741 is packaged at dist/AirMirrorLite-visual-candidate/ and
-in dist/AirMirrorLite-Windows-x64-visual-2026-10-23.zip, including matching sources.
-EXE SHA256: FEC663A88B178D708EC7CC6F4703A2C2EF2A188674F86B82C9EBB262460F363F.
-ZIP SHA256: 20EBA383CD43AD15B78809184413512853687A55F6B1A2FAEBC30AB8757EC0A4.
-All 4093 archive entries pass CRC/SHA256 checks. The exact packaged executable
-also passes silent native and loopback control checks. It is open with --mute;
-listener and discovery are ready. Evidence: local/visual-polish/result.json and
-local/visual-polish-packaged-{native,control}.log.
-The prior release candidate and fallback hashes match. No phone/sound acceptance
-is claimed for this visual change. No Computer Use was used.
+A new interface candidate will be packaged separately. Earlier visual
+FEC663A8... and release 5A11F441... builds remain preserved. Physical phone/audio
+acceptance is unchanged; tests remain silent and no Computer Use is used.
 
 ## Release-preparation review
 

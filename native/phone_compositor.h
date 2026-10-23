@@ -4,6 +4,7 @@
 #include <dwrite.h>
 #include <wincodec.h>
 #include "phone_shell.h"
+#include "idle_artwork.h"
 
 // Two small flip chains: GPU video and an infrequently redrawn native frame.
 // No CPU readback of decoded pixels and no animation timer while idle.
@@ -125,6 +126,7 @@ struct PhoneCompositor {
         ComPtr<ID2D1LinearGradientBrush> metal;
         CHECK(canvas->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(
             D2D1::Point2F(0,0),D2D1::Point2F(float(w),float(h))),metal_colors.Get(),&metal));
+        HRESULT idle_result=S_OK;
         canvas->BeginDraw();canvas->Clear(D2D1::ColorF(0,0));
         auto outer=D2D1::RoundedRect(D2D1::RectF(.5f,.5f,float(w)-.5f,float(h)-.5f),radius,radius);
         // A narrow titanium edge and an inset glass lip add depth outside the
@@ -147,39 +149,14 @@ struct PhoneCompositor {
             }
         }
         if(!shell.has_video){
-            // Roomy typography adapts to both portrait and landscape idle windows.
-            float scale=std::min(s,float(w)/300.0f),cx=w*.5f,cy=h*.5f;
             brush->SetColor(D2D1::ColorF(0x111318));
-            auto screen=D2D1::RoundedRect(D2D1::RectF(rim,rim,float(w)-rim,float(h)-rim),cr,cr);canvas->FillRoundedRectangle(screen,brush.Get());
-            // Error/recovery text belongs solely to the graphics-independent
-            // status card. Idle labels must not bleed out from underneath it.
-            if(shell.idle_artwork_visible()){
-            const bool compact=h<340*s;
-            if(!compact){
-                auto tile=D2D1::RoundedRect(D2D1::RectF(cx-34*scale,cy-126*scale,cx+34*scale,cy-58*scale),19*scale,19*scale);
-                brush->SetColor(D2D1::ColorF(0x1c2a3f));canvas->FillRoundedRectangle(tile,brush.Get());
-                brush->SetColor(D2D1::ColorF(0x4d709f,.4f));canvas->DrawRoundedRectangle(tile,brush.Get(),scale);
-                brush->SetColor(D2D1::ColorF(0x8ebaff));
-                canvas->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(cx-1*scale,cy-108*scale,cx+20*scale,cy-78*scale),4*scale,4*scale),brush.Get(),1.8f*scale);
-                auto phone=D2D1::RoundedRect(D2D1::RectF(cx-19*scale,cy-114*scale,cx+3*scale,cy-70*scale),6*scale,6*scale);
-                brush->SetColor(D2D1::ColorF(0x1c2a3f));canvas->FillRoundedRectangle(phone,brush.Get());
-                brush->SetColor(D2D1::ColorF(0xe8f0ff));canvas->DrawRoundedRectangle(phone,brush.Get(),1.8f*scale);
-                canvas->DrawLine(D2D1::Point2F(cx-12*scale,cy-76*scale),D2D1::Point2F(cx-4*scale,cy-76*scale),brush.Get(),1.5f*scale);
-            }
-            auto label=[&](const wchar_t* text,float font,float y,float box_h,UINT color,DWRITE_FONT_WEIGHT weight){
-                ComPtr<IDWriteTextFormat> format;
-                if(FAILED(writing->CreateTextFormat(L"Segoe UI",nullptr,weight,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,font*scale,L"en-us",&format)))return;
-                format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                brush->SetColor(D2D1::ColorF(color));canvas->DrawText(text,UINT32(wcslen(text)),format.Get(),D2D1::RectF(18*scale,y,float(w)-18*scale,y+box_h*scale),brush.Get());
-            };
-            label(L"AirMirrorLite",12,cy-(compact?63:35)*scale,24,0xa8b2c1,DWRITE_FONT_WEIGHT_MEDIUM);
-            const int state=shell.status;
-            label(state==1?L"Connecting…":L"Ready to mirror",24,cy-(compact?35:2)*scale,35,0xf5f7fb,DWRITE_FONT_WEIGHT_SEMI_BOLD);
-            label(state==1?L"Your screen will appear here":L"Open Screen Mirroring\non your iPhone",13,cy+(compact?8:44)*scale,44,0x9aa6b7,DWRITE_FONT_WEIGHT_NORMAL);
-            if(!compact)label(L"Drag to move  ·  Corner to resize",11,float(h)-66*scale,24,0x7e8999,DWRITE_FONT_WEIGHT_NORMAL);
-            }
+            auto screen=D2D1::RoundedRect(D2D1::RectF(rim,rim,float(w)-rim,float(h)-rim),cr,cr);
+            canvas->FillRoundedRectangle(screen,brush.Get());
+            // The graphics-independent error card owns recovery/failure text.
+            if(shell.idle_artwork_visible())
+                idle_result=draw_idle_artwork(canvas.Get(),writing.Get(),screen.rect,cr,s,shell.status);
         }
-        CHECK(canvas->EndDraw());if(diagnostic_path){CHECK(save_idle_artwork(surface.Get(),diagnostic_path));}
+        CHECK(canvas->EndDraw());CHECK(idle_result);if(diagnostic_path){CHECK(save_idle_artwork(surface.Get(),diagnostic_path));}
         if(idle_readback){
             // Private intrinsic-test target, restricted above to idle artwork.
             // Copy before flip; holding buffer0 across Present is not a snapshot.

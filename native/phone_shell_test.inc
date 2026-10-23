@@ -4,7 +4,7 @@ HRESULT PhoneShell::test_on_ui_thread(const wchar_t* directory){
     if(!hidden_)return E_ACCESSDENIED;
 #define UI_REQUIRE(test) do{if(!(test))return MAKE_HRESULT(SEVERITY_ERROR,FACILITY_ITF,__LINE__);}while(0)
     auto key=[&](WPARAM k){main_proc(window,WM_KEYDOWN,k,0);};
-    auto point=[&](int button){return MAKELPARAM(int((button==4?arrow_x_:rail_x_+38)*dpi_scale()),int((button==4?108:40+button*BUTTON_STEP)*dpi_scale()));};
+    auto point=[&](int button){return MAKELPARAM(int((button==4?arrow_x_:rail_x_+38)*dpi_scale()),int((button==4?control_layout::arrow_y:control_layout::row_center(button))*dpi_scale()));};
     auto click=[&](int button){LPARAM p=point(button);palette_proc(palette_,WM_LBUTTONDOWN,MK_LBUTTON,p);palette_proc(palette_,WM_LBUTTONUP,0,p);};
     auto hover=[&](){palette_proc(palette_,WM_MOUSEMOVE,0,point(0));palette_proc(palette_,WM_MOUSEHOVER,0,point(0));};
     auto save=[&](const wchar_t* name,float scale=0){return directory&&*directory?paint_palette((std::wstring(directory)+L"/"+name).c_str(),scale):S_OK;};
@@ -96,6 +96,14 @@ HRESULT PhoneShell::test_on_ui_thread(const wchar_t* directory){
     UI_REQUIRE(SUCCEEDED(save(L"controls.png")));UI_REQUIRE(SUCCEEDED(save(L"controls-125.png",1.25f)));UI_REQUIRE(SUCCEEDED(save(L"controls-200.png",2)));
     hot_=3;UI_REQUIRE(SUCCEEDED(save(L"close-hover.png")));
     hot_=-1;keyboard_focus_=2;UI_REQUIRE(SUCCEEDED(save(L"keyboard-focus.png")));keyboard_focus_=-1;
+    // Accessibility and mouse input agree after the side tab moved to row one.
+    AccessibilityRequest control_snapshot;accessibility_request(control_snapshot);
+    UI_REQUIRE(SUCCEEDED(control_snapshot.result));RECT rail_bounds;GetWindowRect(palette_,&rail_bounds);
+    for(int id=1;id<=5;++id){const RECT b=control_snapshot.snapshot.bounds[id];
+        POINT center{(b.left+b.right)/2-rail_bounds.left,(b.top+b.bottom)/2-rail_bounds.top};
+        UI_REQUIRE(button_at(center)==id-1);
+    }
+    UI_REQUIRE(button_at({int(arrow_x_*dpi_scale()),int(108*dpi_scale())})==-1);
     click(4);UI_REQUIRE(controls_collapsed_&&!popup_);UI_REQUIRE(SUCCEEDED(save(L"collapsed-idle.png")));
     palette_proc(palette_,WM_MOUSEMOVE,0,point(4));UI_REQUIRE(hot_==4&&!hover_pending_);UI_REQUIRE(SUCCEEDED(save(L"collapsed-hover.png")));
     key(VK_TAB);UI_REQUIRE(keyboard_focus_==4);key(VK_RETURN);UI_REQUIRE(!controls_collapsed_);keyboard_focus_=-1;

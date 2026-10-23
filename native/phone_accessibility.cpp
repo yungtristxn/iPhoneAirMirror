@@ -80,7 +80,7 @@ public:
         case UIA_IsEnabledPropertyId:boolean(true);break;
         case UIA_IsControlElementPropertyId:case UIA_IsContentElementPropertyId:boolean(true);break;
         case UIA_IsOffscreenPropertyId:boolean(!s.visible[id_]);break;
-        case UIA_HelpTextPropertyId:return text(id_==1?L"Toggle local playback mute. Arrow keys adjust volume.":id_==6?L"Local playback volume, from 0 to 100 percent.":L"");
+        case UIA_HelpTextPropertyId:return text(id_==0?L"On your iPhone, open Control Center, choose Screen Mirroring, then select AirMirrorLite. Both devices must be on the same local network.":id_==1?L"Toggle local playback mute. Arrow keys adjust volume.":id_==2?L"Restore the default window size. Keyboard shortcut: 0.":id_==6?L"Local playback volume, from 0 to 100 percent.":L"");
         case UIA_LiveSettingPropertyId:if(id_==7)integer(Polite);break;
         }return S_OK;
     }

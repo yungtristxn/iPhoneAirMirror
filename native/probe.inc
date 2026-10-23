@@ -770,6 +770,10 @@ extern "C" int am_ui_probe(void* p,const char* directory) {
         app->shell.set_status(1,L"");file=path+L"/connecting.png";hr=app->chrome.layout(app->shell,file.c_str());
         if(FAILED(hr))return 0;
         app->shell.set_status(0,L"");
+        SetWindowPos(app->window,nullptr,0,0,364,774,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+        file=path+L"/startup-idle.png";hr=app->chrome.layout(app->shell,file.c_str());if(FAILED(hr))return 0;
+        SetWindowPos(app->window,nullptr,0,0,176,360,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+        file=path+L"/narrow-idle.png";hr=app->chrome.layout(app->shell,file.c_str());if(FAILED(hr))return 0;
         SendMessageW(app->window,PhoneShell::WM_FORMAT,1920,1080);
         SendMessageW(app->window,WM_KEYDOWN,'0',0);
         file=path+L"/landscape-idle.png";hr=app->chrome.layout(app->shell,file.c_str());if(FAILED(hr))return 0;
