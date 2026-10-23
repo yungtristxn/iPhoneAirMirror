@@ -73,3 +73,58 @@ This removes one dispatch gap, not a demonstrated five-second delay. A successfu
 is also distinct from physical display completion. No new speedup claim or
 speculative pairing/DNS downgrade is made. The larger reported delay remains
 unresolved; actual HAP audio and audible A/V sync are still unverified.
+
+## Further research, 2026-10-23
+
+No demonstrated small runtime fix was found. Keep both current candidates and
+the fallback unchanged. The five-second estimate is not an established Apple
+minimum, and the existing trace still does not locate the complete tap-to-visible
+interval. Re-read the saved analysis and scalar log; no new capture or phone
+interaction was needed.
+
+The new lead is **persistent HAP pairing**, with a one-time code and remembered
+controller keys. [shairplay-rust PR30](https://github.com/metaneutrons/shairplay-rust/pull/30)
+reports iOS 26 buffered-audio startup improving from 5-11 seconds to about 0.5s
+after several changes together: PTP reception, pairing-state flags, persistent
+pairing and session handoff. Its merged implementation is
+229c1beac8be1c990dae94960bae5ca465faf05b. This does not isolate the benefit of
+pairing alone or prove a screen-mirroring improvement. Its
+[status report](https://github.com/metaneutrons/shairplay-rust/blob/2fb72b30b658b33f106165a5b6fbd941919bdbe5/AP2-STATUS.md#L74-L167)
+describes a different, unpaired legacy video path and unwired mirroring audio.
+
+Applicability checked against current AirMirrorLite source:
+
+| Lead | Finding / decision |
+|---|---|
+| Persistent HAP pairing | Plausible separate experiment. Current transient authentication is valid but does not remember trusted controller identities. Its observed exchange already takes 39-139 ms; any larger benefit would have to change sender behavior outside that exchange. |
+| PTP port-unreachable delay | The other implementation uses PTP/buffered audio. We require NTP and do not advertise that mode. Adding a dummy PTP listener is not justified. |
+| Pairing flags | Our HAP 0x004 agrees with their transient profile. Copying paired-device flags without the corresponding protocol/store would misrepresent support. |
+| Stable identity and event endpoint | Already present: persisted receiver key, stable pi/deviceID, matching info fields and authenticated event connections in all five traced sessions. This is separate from persistent controller trust. |
+| Previous-session overlap | Our session ownership and teardown already serialize active media. The trace supplies no corresponding startup failure. |
+
+[UxPlay's documented shortcut](https://github.com/FDH2/UxPlay/blob/0477d471cc5899ea13382b5871cf70dbfe050ebd/README.md#L2184-L2194)
+skips legacy pairing. Our HAP candidate already clears bit 27 while retaining
+verified authentication, without a reported speedup. No authentication bypass or
+unsupported capability change is warranted. The same
+[README](https://github.com/FDH2/UxPlay/blob/0477d471cc5899ea13382b5871cf70dbfe050ebd/README.md#L2209-L2214)
+reports operation with two advertised AppleTV versions, without establishing a
+startup advantage from changing model/sourceVersion.
+
+[Apple's deployment guide](https://support.apple.com/en-ae/guide/deployment/dep9151c4ace/web)
+describes multiple discovery paths and preference for responsive/recently used
+connections. It does not specify a mandatory five-second startup delay. Sender
+path selection remains a hypothesis, not a diagnosis from our IPv4-only trace.
+There is still no evidence justifying a Windows DNS replacement or a network
+settings change.
+
+Recommendation: retain the current behavior. If startup becomes a priority again,
+evaluate persistent HAP pairing as a separate candidate, including real
+pair-setup/pair-verify and protected, removable controller credentials. Compare
+repeat tap-to-visible timings, not just handshake duration, before claiming a
+benefit. Do not expand into BLE, PTP or remote control for this hypothesis.
+
+Validation of this research checkpoint: source/primary-reference comparison,
+saved-trace review, git diff --check and SHA256 comparison of the C10FEA... HAP,
+2FF3927... phone-checked HAP, and both F92829... legacy copies. All executable
+hashes remain as recorded above/in STATE.md. No implementation change, new build,
+runtime test, sound output, Computer Use or system setting change.

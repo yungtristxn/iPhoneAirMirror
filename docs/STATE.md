@@ -1,6 +1,21 @@
 # Current state
 
-Updated: 2026-10-22
+Updated: 2026-10-23
+
+## Further startup research: retain current builds
+- Rechecked primary Apple/UxPlay documentation, shairplay-rust's merged fast-connect
+  change, our protocol and the saved five-session trace. No proven small fix or
+  documented mandatory Apple five-second minimum. STARTUP_TRACE.md records sources
+  and applicability; no runtime change is justified by this evidence.
+- Persistent one-time HAP pairing is the remaining plausible experiment. The new
+  upstream speedup report concerns buffered audio and combines several changes;
+  it does not prove the same benefit for our screen-mirroring path. Our NTP mode,
+  stable identity, event connection and single-session ownership already differ.
+- Candidate/fallback SHA256 values verified unchanged; git diff --check passes.
+  No new build, phone request, sound test, capture, Computer Use or Windows change.
+  Next step only if startup merits another experiment: persistent verified pairing
+  with measured tap-to-visible comparison. Current HAP remains experimental;
+  actual HAP audio/A/V evidence is still outstanding.
 
 ## Verified HAP screen works; startup improvement remains unproven
 - User authorized a separate modern verified-pairing candidate. Active branch is
