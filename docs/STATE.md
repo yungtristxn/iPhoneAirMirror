@@ -19,10 +19,16 @@ Generated artwork at 100/125/200% DPI and portrait/landscape/compact sizes was
 visually inspected. These are idle/control renders, not desktop or phone capture.
 Evidence: local/visual-polish/final/ and local/visual-polish-native-final.log.
 
-A new visual candidate will be packaged separately; the previous release
-candidate and all existing fallback executables remain preserved. No phone or
-sound acceptance is claimed for this visual change. Tests remain silent and no
-Computer Use is used.
+Source f330741 is packaged at dist/AirMirrorLite-visual-candidate/ and
+in dist/AirMirrorLite-Windows-x64-visual-2026-10-23.zip, including matching sources.
+EXE SHA256: FEC663A88B178D708EC7CC6F4703A2C2EF2A188674F86B82C9EBB262460F363F.
+ZIP SHA256: 20EBA383CD43AD15B78809184413512853687A55F6B1A2FAEBC30AB8757EC0A4.
+All 4093 archive entries pass CRC/SHA256 checks. The exact packaged executable
+also passes silent native and loopback control checks. It is open with --mute;
+listener and discovery are ready. Evidence: local/visual-polish/result.json and
+local/visual-polish-packaged-{native,control}.log.
+The prior release candidate and fallback hashes match. No phone/sound acceptance
+is claimed for this visual change. No Computer Use was used.
 
 ## Release-preparation review
 
