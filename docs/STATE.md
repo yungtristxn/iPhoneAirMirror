@@ -22,9 +22,17 @@ portrait, landscape, narrow/compact and connecting images were inspected;
 control renders include 100/125/200% DPI. No desktop or phone capture.
 Evidence: local/visual-refinement/final/ and local/visual-refinement-native-final.log.
 
-A new interface candidate will be packaged separately. Earlier visual
-FEC663A8... and release 5A11F441... builds remain preserved. Physical phone/audio
-acceptance is unchanged; tests remain silent and no Computer Use is used.
+Source d9e0ec6 is packaged separately at dist/AirMirrorLite-interface-candidate/
+and dist/AirMirrorLite-Windows-x64-interface-2026-10-23.zip with matching source.
+EXE SHA256: F081E412632DB0B92CA42E06F0CDD3FA994BF0543DF20C2CC412E0C8C998C7D4.
+ZIP SHA256: 3B909FF7A4B20E2276726EAA44ADCD492F3D690F83363554A95126143C954656.
+All 4095 ZIP entries pass CRC/SHA256 validation. The exact packaged EXE passes
+the silent native suite; current generated renders are in
+local/visual-refinement/packaged/. The previous visual receiver was closed
+gracefully, and this candidate is open muted with listener/discovery ready.
+Evidence: local/visual-refinement/result.json and packaged-native log.
+Earlier visual FEC663A8..., release 5A11F441... and FFmpeg F928294B... hashes match.
+Physical phone/audio acceptance is unchanged; no Computer Use was used.
 
 ## Release-preparation review
 
