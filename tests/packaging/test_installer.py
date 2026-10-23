@@ -128,7 +128,7 @@ class InstallerPolicy(unittest.TestCase):
         source = (ROOT / "scripts/installer/iPhoneAirMirror.iss").read_text(encoding="utf-8")
         for section in ("[Run]", "[UninstallRun]", "[InstallDelete]", "[UninstallDelete]", "[Registry]"):
             self.assertNotIn("\n" + section + "\n", source)
-        for setting in ("PrivilegesRequired=lowest", "CloseApplications=no", "RestartApplications=no",
+        for setting in ("PrivilegesRequired=lowest", "MinVersion=10.0.15063", "CloseApplications=no", "RestartApplications=no",
                         "CreateUninstallRegKey=no", 'Parameters: "--data-dir ""{localappdata}\\iPhone Air Mirror"""',
                         "SetErrorMode($8003)", "TestInstallDirectoryPascal", "SafeAncestors", "DLLGetLastError"):
             self.assertIn(setting, source)
