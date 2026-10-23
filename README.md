@@ -79,7 +79,7 @@ Run the extracted launcher, then select **iPhone Air Mirror** in iPhone Control
 Center → Screen Mirroring. Keep both devices on the same trusted LAN; run only
 one receiver at a time.
 
-Runtime requires Windows 10/11 x64, Microsoft Visual C++ x64 runtime, Media
+Runtime requires Windows 10 version 1703 or later / Windows 11, x64, Microsoft Visual C++ x64 runtime, Media
 Foundation, hardware D3D11 H.264 decoding/video processing and a default audio
 endpoint. Higher resolutions need native HEVC support, normally the installed
 Windows HEVC Video Extension plus a compatible GPU. The app does not install

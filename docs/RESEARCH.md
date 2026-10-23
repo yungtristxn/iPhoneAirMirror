@@ -137,6 +137,11 @@ skipped during video, suspension and error display. It has no animation timer.
 Implementation/source checks do not establish physical screen-reader behavior,
 device-loss recovery, sustained performance or end-to-end latency.
 
+The installer/API floor is Windows 10 1703 (build 15063): the native shell directly
+imports [SetProcessDpiAwarenessContext](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setprocessdpiawarenesscontext).
+This version gate prevents loader failure on earlier Windows 10 builds; it is
+not physical validation across every Windows version admitted by the installer.
+
 ## UI correction researched before implementation (2026-10-23)
 
 The user's supplied screenshot is evidence for this bounded visual review, not a

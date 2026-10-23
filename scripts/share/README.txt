@@ -18,7 +18,7 @@ iPhone Air Mirror - Windows x64 release candidate
    with a fresh frame when it resumes. Still photos have no inactivity timeout.
 
 Requirements
-- Windows 10/11 x64, a D3D11-capable GPU/driver with native H.264 decoding,
+- Windows 10 version 1703 or later / Windows 11, x64, a D3D11-capable GPU/driver with native H.264 decoding,
   Media Foundation, and an enabled default Windows audio output device.
 - Current Microsoft Visual C++ v14 Redistributable, x64. Missing MSVCP140.dll,
   VCRUNTIME140.dll or VCRUNTIME140_1.dll indicates this prerequisite is absent.

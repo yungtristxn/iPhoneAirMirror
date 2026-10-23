@@ -18,7 +18,8 @@ README. The portable launcher is omitted here because installed shortcuts use a
 separate data directory. Complete corresponding source and license notices are
 included under source and licenses.
 
-Requirements: Windows 10/11 x64, the Microsoft Visual C++ v14 x64 runtime,
+Requirements: Windows 10 version 1703 (build 15063) or later / Windows 11 x64,
+the Microsoft Visual C++ v14 x64 runtime,
 Media Foundation, compatible D3D11 hardware and an enabled audio output device.
 The runtime can be obtained from Microsoft's official download:
 https://aka.ms/vc14/vc_redist.x64.exe
