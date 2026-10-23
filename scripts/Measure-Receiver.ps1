@@ -11,7 +11,7 @@ $previous=@{}
 while($true){
     $main=Get-Process -Id $ReceiverId -ErrorAction SilentlyContinue
     if(-not $main -or $main.StartTime.ToUniversalTime().Ticks -ne $receiverStartTicks){break}
-    $pids=@($ReceiverId)+@(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ReceiverId" | Where-Object { $_.Name -ieq 'AirMirrorLite.exe' -or $_.Name -ieq 'airmirror-lite.exe' } | ForEach-Object { [int]$_.ProcessId })
+    $pids=@($ReceiverId)+@(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ReceiverId" | Where-Object { $_.Name -ieq 'iPhoneAirMirror.exe' -or $_.Name -ieq 'AirMirrorLite.exe' -or $_.Name -ieq 'airmirror-lite.exe' } | ForEach-Object { [int]$_.ProcessId })
     $rows=@();$current=@{}
     foreach($taskId in $pids){
         $p=Get-Process -Id $taskId -ErrorAction SilentlyContinue;if(-not $p){continue}

@@ -307,7 +307,7 @@ impl ReceiverStatus {
     }
     fn native(&self) -> (u32, &str) {
         match self {
-            Self::Ready => (0, "Ready — select AirMirrorLite on iPhone"),
+            Self::Ready => (0, "Ready — select iPhone Air Mirror on iPhone"),
             Self::Connecting(text) => (1, text),
             Self::Streaming => (2, "Mirroring"),
             Self::Error(text) => (4, text),
@@ -1301,14 +1301,14 @@ fn server_loop(listener: TcpListener, shared: Arc<Shared>) {
                     native::wait_socket_readable(listener.as_raw_socket() as usize, 100)
                 {
                     shared.unavailable(&format!(
-                        "Receiver listener stopped. Restart AirMirrorLite. {error}"
+                        "Receiver listener stopped. Restart iPhone Air Mirror. {error}"
                     ));
                     break;
                 }
             }
             Err(e) => {
                 shared.unavailable(&format!(
-                    "Receiver listener stopped. Restart AirMirrorLite. {e}"
+                    "Receiver listener stopped. Restart iPhone Air Mirror. {e}"
                 ));
                 break;
             }

@@ -760,7 +760,7 @@ int am_lan_ipv4(const uint8_t* requested,uint8_t* address, uint32_t* index, uint
     }
     error_hr(requested?"Requested address is not on an active Wi-Fi or Ethernet LAN with a local IPv4 address and gateway":"No active Wi-Fi or Ethernet LAN with a local IPv4 address and gateway. Connect this PC and iPhone to the same router",E_FAIL);return 0;
 }
-void am_show_error(const char* message) { auto s=wide(message);MessageBoxW(nullptr,s.c_str(),L"AirMirrorLite error",MB_OK|MB_ICONERROR); }
+void am_show_error(const char* message) { auto s=wide(message);MessageBoxW(nullptr,s.c_str(),L"iPhone Air Mirror error",MB_OK|MB_ICONERROR); }
 double am_now() { return now_seconds(); }
 void* am_open(int hidden) { auto a = std::make_unique<App>(); HRESULT hr = a->init(hidden != 0); if (FAILED(hr)) { error_hr("Windows initialization", hr); return nullptr; } return a.release(); }
 void am_close(void* p) { delete static_cast<App*>(p); }

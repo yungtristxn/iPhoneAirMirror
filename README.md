@@ -1,8 +1,11 @@
-# AirMirrorLite
+# iPhone Air Mirror
 
-A minimal Windows receiver for iPhone AirPlay screen mirroring and synchronized
-phone audio. Native Win32 controls, Media Foundation/D3D11 video, WASAPI audio and
-an isolated FFmpeg AAC worker. No account, recording, service or cloud.
+<img src="assets/app-icon.png" width="80" height="80" alt="">
+
+An independent, open-source Windows receiver for iPhone AirPlay screen mirroring
+and synchronized phone audio. Formerly AirMirrorLite; not affiliated with Apple.
+Native Win32 controls, Media Foundation/D3D11 video, WASAPI audio and an isolated
+FFmpeg AAC worker. No account, recording, service or cloud.
 
 **Release candidate, not a qualified stable release.** Earlier builds have real
 iPhone HEVC picture, Photos, rotation, reconnect and lock/unlock evidence.
@@ -10,6 +13,28 @@ Current FFmpeg audio timing passes silent fixtures; physical sound quality and
 A/V sync remain separate acceptance checks. The older five-minute synchronized
 test used FDK and does not qualify FFmpeg or HAP. See [state](docs/STATE.md) and
 [validation](docs/VALIDATION.md).
+
+## Windows downloads
+
+The first release is **0.1.0-beta.1**, Windows x64. Choose one distribution:
+
+| Download | Use |
+|---|---|
+| `iPhoneAirMirror-0.1.0-beta.1-windows-x64-setup.exe` | Per-user installer, Start menu shortcut and uninstaller. Recommended for regular use. |
+| `iPhoneAirMirror-0.1.0-beta.1-windows-x64-portable.zip` | Extract the whole folder and run `Start-iPhoneAirMirror.cmd`. No app installation. |
+
+Both contain the same receiver executable and corresponding source/notices.
+The installer prepares the restricted worker and keeps settings under
+`%LOCALAPPDATA%/iPhone Air Mirror`, separate from program files. Upgrades and
+uninstall preserve that data. Setup does not start the receiver, add autostart,
+or change network/firewall settings. The Visual C++ runtime remains a prerequisite;
+setup reports a missing prerequisite rather than downloading or installing it.
+Portable data stays beside the app when writable. Its protected identity is
+specific to the Windows user/machine; do not share a used data folder.
+
+These beta binaries are unsigned. Check published SHA256 hashes and the documented
+requirements; do not disable Windows security protections. Physical FFmpeg audio
+and A/V acceptance remains pending as described above.
 
 ## Build and package
 
@@ -24,28 +49,33 @@ SDK, PowerShell 7 and Python 3. FFmpeg uses additional pinned local tools; see
 ```
 
 Default: **FFmpeg AAC, legacy verified pairing and display updates**.
-Packaging creates a source-complete `dist/AirMirrorLite-release-candidate`
+Packaging creates a source-complete `dist/iPhoneAirMirror-release-candidate`
 directory without replacing preserved fallback folders. Every output must be
 new. For a local ZIP:
 
 ```powershell
-python -B scripts/Package-Share.py --output dist/AirMirrorLite-Windows-x64-candidate.zip
+python -B scripts/Package-Share.py --output dist/iPhoneAirMirror-Windows-x64-portable.zip
 ```
 
+The installer wraps a verified source-complete portable directory, without
+rebuilding or changing its receiver. See `scripts/Package-Installer.py --help`
+for the Inno Setup build and isolated test options. Use fresh output paths;
+previous versions and working fallbacks are preserved.
+
 The archive includes matching application/dependency source, build instructions
-and notices. Extract it and run `Start-AirMirrorLite.cmd`; retain the source and
+and notices. Extract it and run `Start-iPhoneAirMirror.cmd`; retain the source and
 license materials when sharing. Nothing is published automatically.
 [Component provenance](docs/THIRD_PARTY.md).
 
 HAP is separately experimental: `./scripts/Build.ps1 -Profile Hap -Test` and
-`./scripts/Package.ps1 -Profile hap`. It advertises **AirMirrorLite HAP**; faster
+`./scripts/Package.ps1 -Profile hap`. It advertises **iPhone Air Mirror HAP**; faster
 startup and physical encrypted-audio/A/V acceptance are unproven.
 [HAP details](docs/VERIFIED_PAIRING.md).
 `-Profile FdkReference` is local reference testing only, never release packaging.
 
 ## Run
 
-Run the extracted launcher, then select **AirMirrorLite** in iPhone Control
+Run the extracted launcher, then select **iPhone Air Mirror** in iPhone Control
 Center → Screen Mirroring. Keep both devices on the same trusted LAN; run only
 one receiver at a time.
 
@@ -63,7 +93,7 @@ or firewall rule is changed automatically; manually managed rules should be
 scoped to the executable and local subnet.
 
 The launcher provisions restricted-worker read/execute access on that exact
-executable. Manual deployment requires `AirMirrorLite.exe --provision-worker`
+executable. Manual deployment requires `iPhoneAirMirror.exe --provision-worker`
 once. Normal launches only check the grant and never use an unrestricted fallback.
 
 ## Controls and picture
@@ -107,7 +137,7 @@ actual dimensions (994×2160 observed). Otherwise default is H.264/1080. Reconne
 after changing requests.
 
 Data defaults to `local/` beside a writable executable, otherwise
-`%LOCALAPPDATA%/AirMirrorLite`. Identity is random and DPAPI-protected.
+`%LOCALAPPDATA%/iPhone Air Mirror`. Identity is random and DPAPI-protected.
 The 1 MiB bounded log excludes media, keys and raw negotiation bodies.
 Optional `display-aspect.txt` holds two dimensions, e.g. `994 2160`; it is an
 advisory canvas ratio, not a crop or orientation sensor. There is no user
@@ -128,7 +158,7 @@ art only; it cannot export phone frames. The comparison harness is compiled only
 with `decoder-lab`, whose executable cannot start a receiver.
 
 For visual work without an audio output device, use
-`AirMirrorLite.exe --ui-artwork <output-directory>`. This creates a fresh hidden
+`iPhoneAirMirror.exe --ui-artwork <output-directory>`. This creates a fresh hidden
 scene, checks native controls and exports generated artwork only. It opens no
 receiver, audio endpoint or media session and is not a substitute for the full
 silent media test. Normal receiver startup still requires an audio output.

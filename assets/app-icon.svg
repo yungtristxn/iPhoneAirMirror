@@ -1,10 +1,24 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-  <defs><linearGradient id="blue" x2="0.7" y2="1">
-    <stop stop-color="#218fea"/><stop offset="1" stop-color="#263da4"/>
-  </linearGradient></defs>
-  <rect x="16" y="16" width="224" height="224" rx="52" fill="url(#blue)"/>
-  <rect x="16.5" y="16.5" width="223" height="223" rx="51.5" fill="none" stroke="#fff" stroke-opacity=".18"/>
-  <rect x="120" y="72" width="88" height="116" rx="16" fill="#204b91" stroke="#a4d8ff" stroke-width="9"/>
-  <rect x="66" y="46" width="82" height="164" rx="20" fill="#152e58" stroke="#f7fbff" stroke-width="11"/>
-  <path d="M95 191h24" stroke="#b3d6ff" stroke-width="5" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">iPhone Air Mirror</title>
+  <defs>
+    <linearGradient id="charcoal" gradientUnits="userSpaceOnUse" x1="0" y1="14" x2="0" y2="236">
+      <stop stop-color="#292e36"/>
+      <stop offset="1" stop-color="#0d1117"/>
+    </linearGradient>
+    <linearGradient id="edge" gradientUnits="userSpaceOnUse" x1="0" y1="14" x2="0" y2="236">
+      <stop stop-color="#394049"/>
+      <stop offset="1" stop-color="#1a2028"/>
+    </linearGradient>
+    <linearGradient id="teal" gradientUnits="userSpaceOnUse" x1="0" y1="70.5" x2="0" y2="155.5">
+      <stop stop-color="#7fccce"/>
+      <stop offset="1" stop-color="#6fbdbf"/>
+    </linearGradient>
+    <linearGradient id="ivory" gradientUnits="userSpaceOnUse" x1="0" y1="97.5" x2="0" y2="182.5">
+      <stop stop-color="#f6f3ec"/>
+      <stop offset="1" stop-color="#eeebe5"/>
+    </linearGradient>
+  </defs>
+  <rect x="14" y="15" width="223" height="220" rx="54" fill="url(#charcoal)" stroke="url(#edge)" stroke-width="2"/>
+  <rect x="95" y="76" width="106" height="74" rx="12.5" fill="url(#charcoal)" stroke="url(#teal)" stroke-width="11"/>
+  <rect x="50" y="103" width="118" height="74" rx="12.5" fill="url(#charcoal)" stroke="url(#ivory)" stroke-width="11"/>
 </svg>

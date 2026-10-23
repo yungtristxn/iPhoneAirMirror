@@ -94,7 +94,7 @@ class MetadataTests(unittest.TestCase):
 
     def test_cli_scope_and_capture_command_are_explicit_and_bounded(self):
         settings = scope(False)
-        self.assertEqual((settings.seconds, settings.packets, settings.service_name), (90, 300, "AirMirrorLite HAP"))
+        self.assertEqual((settings.seconds, settings.packets, settings.service_name), (90, 300, "iPhone Air Mirror"))
         command = trace.tshark_command(settings)
         self.assertIn("-n", command)
         self.assertIn("-p", command)

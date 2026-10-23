@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use std::{net::IpAddr, path::PathBuf};
 fn main() {
     if let Err(e) = run() {
-        eprintln!("AirMirrorLite: {e:#}");
+        eprintln!("iPhone Air Mirror: {e:#}");
         if !std::env::args().any(|a| {
             matches!(
                 a.as_str(),
@@ -53,12 +53,12 @@ fn run() -> Result<()> {
     if args.iter().any(|s| s == "--help") {
         if cfg!(feature = "decoder-lab") {
             println!(
-                "AirMirrorLite decoder experiment\n  --provision-worker\n  --decoder-experiment --experiment-out <new directory under local/> --experiment-sessions <1..50>\nDecode-only synthetic tests; this build does not advertise or receive mirroring."
+                "iPhone Air Mirror decoder experiment\n  --provision-worker\n  --decoder-experiment --experiment-out <new directory under local/> --experiment-sessions <1..50>\nDecode-only synthetic tests; this build does not advertise or receive mirroring."
             );
             return Ok(());
         }
         println!(
-            "AirMirrorLite\n  --provision-worker provision restricted worker access for this EXE, then exit\n  --ui-test           silent native UI and GPU tests\n  --ui-artwork PATH   export generated UI only; no audio endpoint or receiver\n  --self-test         full media tests, including an audible test tone\n  --ui-test-dir PATH  with --ui-test or --self-test, render idle/control artwork diagnostics\n  --ui-preview        synthetic video preview; no discovery or network\n  --no-discovery      run without DNS-SD (local integration tests)\n  --fps N            request 30 or 60 fps (default: 60)\n  --latency-ms N     advertised output latency, 60..250 ms (default: 80)\n  --resolution N     request 1080, 1440 or 2160 lines (default: highest native support)\n  --display-width N  display width hint override, even pixels\n  --bind IP           bind a specific local IPv4 address (default: 0.0.0.0)\n  --port PORT         control port (default: 7000)\n  --seconds N         stop after N seconds (validation)\n  --data-dir PATH     receiver data (default: writable EXE/local, otherwise LOCALAPPDATA/AirMirrorLite)\n  --mute              start receiver muted (M or speaker toggles sound)\n  --hidden            hide window during automated validation\n\nWindow: drag to move; bottom-right resize; 0 default size; C hide/show controls; M mute; Up/Down volume; F11 fullscreen; D disconnect; Escape leaves fullscreen/disconnects; close exits."
+            "iPhone Air Mirror\n  --provision-worker provision restricted worker access for this EXE, then exit\n  --ui-test           silent native UI and GPU tests\n  --ui-artwork PATH   export generated UI only; no audio endpoint or receiver\n  --self-test         full media tests, including an audible test tone\n  --ui-test-dir PATH  with --ui-test or --self-test, render idle/control artwork diagnostics\n  --ui-preview        synthetic video preview; no discovery or network\n  --no-discovery      run without DNS-SD (local integration tests)\n  --fps N            request 30 or 60 fps (default: 60)\n  --latency-ms N     advertised output latency, 60..250 ms (default: 80)\n  --resolution N     request 1080, 1440 or 2160 lines (default: highest native support)\n  --display-width N  display width hint override, even pixels\n  --bind IP           bind a specific local IPv4 address (default: 0.0.0.0)\n  --port PORT         control port (default: 7000)\n  --seconds N         stop after N seconds (validation)\n  --data-dir PATH     receiver data (default: writable EXE/local, otherwise LOCALAPPDATA/iPhone Air Mirror)\n  --mute              start receiver muted (M or speaker toggles sound)\n  --hidden            hide window during automated validation\n\nWindow: drag to move; bottom-right resize; 0 default size; C hide/show controls; M mute; Up/Down volume; F11 fullscreen; D disconnect; Escape leaves fullscreen/disconnects; close exits."
         );
         return Ok(());
     }
@@ -190,7 +190,7 @@ fn run() -> Result<()> {
     let app = native::App::open(hidden || probe).context("native video/audio startup")?;
     let native_ms = startup.elapsed().as_secs_f64() * 1000.0;
     if preview {
-        app.title("AirMirrorLite — synthetic UI preview (no network)");
+        app.title("iPhone Air Mirror — synthetic UI preview (no network)");
         app.video_probe()?;
         let deadline = native::now() + seconds.unwrap_or(600) as f64;
         while native::now() < deadline {
@@ -247,10 +247,10 @@ fn run() -> Result<()> {
         data = PathBuf::from(std::env::var_os("LOCALAPPDATA").context(
             "LOCALAPPDATA is required when the executable directory is read-only; use --data-dir",
         )?)
-        .join("AirMirrorLite");
+        .join("iPhone Air Mirror");
         anyhow::ensure!(
             writable_directory(&data),
-            "AirMirrorLite data directory is not writable; choose --data-dir"
+            "iPhone Air Mirror data directory is not writable; choose --data-dir"
         );
     }
     if let Some(width) = display_width {
@@ -272,7 +272,7 @@ fn run() -> Result<()> {
         startup.elapsed().as_secs_f64() * 1000.0
     ));
     println!(
-        "AirMirrorLite ready. Select it in iPhone Control Center > Screen Mirroring.\nLog: {}",
+        "iPhone Air Mirror ready. Select it in iPhone Control Center > Screen Mirroring.\nLog: {}",
         data.join("receiver.log").display()
     );
     receiver.run(&app, seconds)
@@ -280,7 +280,7 @@ fn run() -> Result<()> {
 fn ensure_experimental_launch_allowed() -> Result<()> {
     anyhow::ensure!(
         !cfg!(feature = "decoder-lab"),
-        "This build is a decode-only experiment. Use --decoder-experiment, or run the preserved working AirMirrorLite receiver."
+        "This build is a decode-only experiment. Use --decoder-experiment, or run the preserved working iPhone Air Mirror receiver."
     );
     Ok(())
 }

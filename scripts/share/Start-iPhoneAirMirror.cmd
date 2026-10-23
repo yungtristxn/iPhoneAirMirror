@@ -8,20 +8,20 @@ if /i "%~1"=="--prepare-only" set "prepare_only=1"
 if not defined prepare_only goto usage
 
 :prepare
-if not exist "%~dp0AirMirrorLite.exe" goto missing
-echo Preparing this copy of AirMirrorLite for its restricted codec worker...
+if not exist "%~dp0iPhoneAirMirror.exe" goto missing
+echo Preparing this copy of iPhone Air Mirror for its restricted codec worker...
 rem Explicit owner preparation: existing correct permission is left unchanged.
 rem CMD waits for the GUI-subsystem executable when invoked from a batch file.
-"%~dp0AirMirrorLite.exe" --provision-worker
+"%~dp0iPhoneAirMirror.exe" --provision-worker
 set "prepare_exit=%errorlevel%"
 if not "%prepare_exit%"=="0" goto prepare_failed
 if defined prepare_only exit /b 0
-start "" /D "%~dp0" "%~dp0AirMirrorLite.exe"
+start "" /D "%~dp0" "%~dp0iPhoneAirMirror.exe"
 if errorlevel 1 goto launch_failed
 exit /b 0
 
 :missing
-echo AirMirrorLite.exe is missing beside this launcher.
+echo iPhoneAirMirror.exe is missing beside this launcher.
 echo Extract the whole ZIP to a folder you own, then run this launcher there.
 if not defined prepare_only pause
 exit /b 2
@@ -34,16 +34,16 @@ if not defined prepare_only pause
 exit /b 1
 
 :launch_failed
-echo Windows could not launch AirMirrorLite. Read README.txt for requirements.
+echo Windows could not launch iPhone Air Mirror. Read README.txt for requirements.
 pause
 exit /b 1
 
 :usage
-echo Unsupported arguments. Run Start-AirMirrorLite.cmd --help for usage.
+echo Unsupported arguments. Run Start-iPhoneAirMirror.cmd --help for usage.
 exit /b 2
 
 :help
-echo Start-AirMirrorLite.cmd                 Prepare this copy and open the app.
-echo Start-AirMirrorLite.cmd --prepare-only  Prepare the worker, then exit.
+echo Start-iPhoneAirMirror.cmd                 Prepare this copy and open the app.
+echo Start-iPhoneAirMirror.cmd --prepare-only  Prepare the worker, then exit.
 echo This launcher does not install prerequisites or change firewall settings.
 exit /b 0

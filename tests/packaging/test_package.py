@@ -105,7 +105,7 @@ class PackagePolicy(unittest.TestCase):
         self.assertEqual(package.archive_package(stage, archive), 2)
         before = archive.read_bytes()
         with zipfile.ZipFile(archive) as result:
-            self.assertEqual(result.read("AirMirrorLite/source/src/main.rs"), b"source\n")
+            self.assertEqual(result.read("iPhoneAirMirror/source/src/main.rs"), b"source\n")
             self.assertIsNone(result.testzip())
         with self.assertRaisesRegex(RuntimeError, "preserved"):
             package.archive_package(stage, archive)

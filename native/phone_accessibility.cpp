@@ -28,8 +28,8 @@ std::vector<int> children(int parent,const AccessibilitySnapshot& state){
     return {};
 }
 std::wstring name(int id,const AccessibilitySnapshot& s){
-    switch(id){case 0:return L"AirMirrorLite";case 1:return L"Mute audio";case 2:return L"Default size";
-    case 3:return L"Fullscreen";case 4:return L"Close AirMirrorLite";case 5:return s.collapsed?L"Show controls":L"Hide controls";
+    switch(id){case 0:return L"iPhone Air Mirror";case 1:return L"Mute audio";case 2:return L"Default size";
+    case 3:return L"Fullscreen";case 4:return L"Close iPhone Air Mirror";case 5:return s.collapsed?L"Show controls":L"Hide controls";
     case 6:return L"Volume";case 7:return s.reason;case 8:return L"Quick controls";default:return L"";}
 }
 int toggle(int id,const AccessibilitySnapshot& s){return id==1?s.muted:id==3?s.fullscreen:!s.collapsed;}
@@ -80,7 +80,7 @@ public:
         case UIA_IsEnabledPropertyId:boolean(true);break;
         case UIA_IsControlElementPropertyId:case UIA_IsContentElementPropertyId:boolean(true);break;
         case UIA_IsOffscreenPropertyId:boolean(!s.visible[id_]);break;
-        case UIA_HelpTextPropertyId:return text(id_==0?L"On your iPhone, open Control Center, choose Screen Mirroring, then select AirMirrorLite. Both devices must be on the same local network.":id_==1?L"Toggle local playback mute. Arrow keys adjust volume.":id_==2?L"Restore the default window size. Keyboard shortcut: 0.":id_==6?L"Local playback volume, from 0 to 100 percent.":L"");
+        case UIA_HelpTextPropertyId:return text(id_==0?L"On your iPhone, open Control Center, choose Screen Mirroring, then select iPhone Air Mirror. Both devices must be on the same local network.":id_==1?L"Toggle local playback mute. Arrow keys adjust volume.":id_==2?L"Restore the default window size. Keyboard shortcut: 0.":id_==6?L"Local playback volume, from 0 to 100 percent.":L"");
         case UIA_LiveSettingPropertyId:if(id_==7)integer(Polite);break;
         }return S_OK;
     }

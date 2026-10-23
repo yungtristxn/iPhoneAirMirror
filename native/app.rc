@@ -10,12 +10,12 @@ BEGIN
  BEGIN
   BLOCK "040904B0"
   BEGIN
-   VALUE "FileDescription", "AirMirrorLite"
-   VALUE "FileVersion", "0.1.0"
-   VALUE "InternalName", "AirMirrorLite"
-   VALUE "OriginalFilename", "AirMirrorLite.exe"
-   VALUE "ProductName", "AirMirrorLite"
-   VALUE "ProductVersion", "0.1.0"
+   VALUE "FileDescription", "iPhone Air Mirror"
+   VALUE "FileVersion", "0.1.0-beta.1"
+   VALUE "InternalName", "iPhoneAirMirror"
+   VALUE "OriginalFilename", "iPhoneAirMirror.exe"
+   VALUE "ProductName", "iPhone Air Mirror"
+   VALUE "ProductVersion", "0.1.0-beta.1"
   END
  END
  BLOCK "VarFileInfo"

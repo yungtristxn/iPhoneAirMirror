@@ -55,7 +55,7 @@ inline HRESULT draw_idle_artwork(ID2D1RenderTarget* canvas,IDWriteFactory* writi
     hr=label(title,tiny?16.0f:20.0f,28,21,title_top,title_bottom,idle_colors::primary,DWRITE_FONT_WEIGHT_SEMI_BOLD);
     if(FAILED(hr))return hr;
     const wchar_t* hint=connecting?L"Your screen will appear here.":tiny?L"Connect\nfrom iPhone":
-        narrow?L"Screen Mirroring\nAirMirrorLite":L"Open Screen Mirroring\nand choose AirMirrorLite.";
+        narrow?L"Screen Mirroring\niPhone Air Mirror":L"Open Screen Mirroring\nand choose iPhone Air Mirror.";
     const float hint_top=title_bottom+12*scale;
     return label(hint,tiny?12.0f:14.0f,20,15,hint_top,hint_top+44*scale,idle_colors::secondary,DWRITE_FONT_WEIGHT_NORMAL);
 }

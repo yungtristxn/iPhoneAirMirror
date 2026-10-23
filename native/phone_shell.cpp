@@ -49,7 +49,7 @@ PalettePlacement palette_placement(RECT phone,RECT work,float s,bool collapsed,b
     // Only the neither-side-fits fallback may move the rail when opening a flyout.
     return {panel_x,y,width,height,offset+(right?0:PALETTE_WIDTH-76),offset+(collapsed?18:right?84:PALETTE_WIDTH-84),extend_right?PALETTE_WIDTH+2:10,right,popup};
 }
-constexpr wchar_t const* labels[]={L"Mute / unmute (M) — hover for volume",L"Restore default size (0)",L"Fullscreen (F11)",L"Close AirMirrorLite (Alt+F4)",L"Hide controls (C)"};
+constexpr wchar_t const* labels[]={L"Mute / unmute (M) — hover for volume",L"Restore default size (0)",L"Fullscreen (F11)",L"Close iPhone Air Mirror (Alt+F4)",L"Hide controls (C)"};
 RECT work_area(HWND hwnd){MONITORINFO mi{sizeof(mi)};GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&mi);return mi.rcWork;}
 }
 // One bounded backing bitmap, owned and released on the UI thread. Moving the
@@ -104,13 +104,13 @@ HRESULT PhoneShell::create(HANDLE wake,bool hidden){
         WNDCLASSW wc{};wc.lpfnWndProc=main_proc;wc.hInstance=GetModuleHandleW(nullptr);wc.hIcon=LoadIconW(wc.hInstance,MAKEINTRESOURCEW(IDI_AIRMIRRORLITE));wc.style=CS_DBLCLKS;wc.lpszClassName=L"AirMirrorLiteWindow";wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);RegisterClassW(&wc);
         WNDCLASSW pc=wc;pc.lpfnWndProc=palette_proc;pc.lpszClassName=L"AirMirrorLiteControls";RegisterClassW(&pc);
         WNDCLASSW sc=wc;sc.lpfnWndProc=status_proc;sc.lpszClassName=L"AirMirrorLiteStatus";RegisterClassW(&sc);
-        window=CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP,wc.lpszClassName,L"AirMirrorLite",WINDOW_STYLE,0,0,360,760,nullptr,nullptr,wc.hInstance,this);
+        window=CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP,wc.lpszClassName,L"iPhone Air Mirror",WINDOW_STYLE,0,0,360,760,nullptr,nullptr,wc.hInstance,this);
         if(window){
             update_icons();
             BOOL dark=TRUE;DwmSetWindowAttribute(window,DWMWA_USE_IMMERSIVE_DARK_MODE,&dark,sizeof(dark));
             DWORD border=DWMWA_COLOR_NONE;DwmSetWindowAttribute(window,DWMWA_BORDER_COLOR,&border,sizeof(border));
-            palette_=CreateWindowExW(WS_EX_LAYERED|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,pc.lpszClassName,L"AirMirrorLite quick controls",WS_POPUP,0,0,72,220,window,nullptr,wc.hInstance,this);
-            status_panel_=CreateWindowExW(WS_EX_LAYERED|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TRANSPARENT,sc.lpszClassName,L"AirMirrorLite status",WS_POPUP,0,0,320,160,window,nullptr,wc.hInstance,this);
+            palette_=CreateWindowExW(WS_EX_LAYERED|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,pc.lpszClassName,L"iPhone Air Mirror quick controls",WS_POPUP,0,0,72,220,window,nullptr,wc.hInstance,this);
+            status_panel_=CreateWindowExW(WS_EX_LAYERED|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TRANSPARENT,sc.lpszClassName,L"iPhone Air Mirror status",WS_POPUP,0,0,320,160,window,nullptr,wc.hInstance,this);
             accessibility_->attach(window);
             tooltip_=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,palette_,nullptr,wc.hInstance,nullptr);
             SendMessageW(tooltip_,TTM_SETDELAYTIME,TTDT_INITIAL,450);SendMessageW(tooltip_,TTM_SETMAXTIPWIDTH,0,250);
@@ -279,7 +279,7 @@ void PhoneShell::paint_status_panel(){
         };
         label(kind==3?L"Restoring playback":kind==5?L"Receiver unavailable":L"Connection needs attention",18,card.compact?66:48,card.compact?15:17,FW_SEMIBOLD,RGB(244,245,248));
         label(reason.empty()?L"Playback could not continue.":reason,card.compact?76:54,card.compact?176:158,12,FW_NORMAL,RGB(219,223,232));
-        label(kind==3?L"Please wait. Your connection will recover if possible.":kind==5?L"Close and reopen AirMirrorLite to retry.":L"Press Escape to dismiss, then reconnect your iPhone.",card.compact?186:168,card.compact?234:208,11,FW_NORMAL,RGB(161,179,207));
+        label(kind==3?L"Please wait. Your connection will recover if possible.":kind==5?L"Close and reopen iPhone Air Mirror to retry.":L"Press Escape to dismiss, then reconnect your iPhone.",card.compact?186:168,card.compact?234:208,11,FW_NORMAL,RGB(161,179,207));
         auto pixels=static_cast<uint32_t*>(surface.pixels);for(int i=0;i<width*height;++i)pixels[i]|=0xff000000;
         SIZE size{width,height};POINT zero{};BLENDFUNCTION blend{AC_SRC_OVER,0,255,AC_SRC_ALPHA};
         if(UpdateLayeredWindow(status_panel_,nullptr,nullptr,&size,surface.memory,&zero,0,&blend,ULW_ALPHA)){painted_status_=reason;painted_status_kind_=kind;}

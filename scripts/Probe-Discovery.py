@@ -1,7 +1,7 @@
 """Bounded mDNS diagnostic for this receiver; no device pairing or media capture."""
 import socket,struct,time,sys,json
 interface=sys.argv[1]
-name=sys.argv[2] if len(sys.argv)>2 else "AirMirrorLite._airplay._tcp.local"
+name=sys.argv[2] if len(sys.argv)>2 else "iPhone Air Mirror._airplay._tcp.local"
 query=struct.pack("!6H",0,0,1,0,0,0)+b"".join(bytes([len(p)])+p.encode() for p in name.split("."))+b"\0"+struct.pack("!HH",255,0x8001)
 sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM,socket.IPPROTO_UDP)
 sock.bind((interface,0));sock.setsockopt(socket.IPPROTO_IP,socket.IP_MULTICAST_IF,socket.inet_aton(interface));sock.settimeout(.5)

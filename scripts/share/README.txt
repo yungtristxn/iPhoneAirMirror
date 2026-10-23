@@ -1,15 +1,15 @@
-AirMirrorLite - Windows x64 release candidate
+iPhone Air Mirror - Windows x64 release candidate
 
 1. Extract the whole ZIP to a local folder you own, such as Documents.
    Run it from the extracted folder, not from inside the ZIP or a network share.
-2. Double-click Start-AirMirrorLite.cmd. No administrator mode is required.
+2. Double-click Start-iPhoneAirMirror.cmd. No administrator mode is required.
    It grants this executable's restricted codec worker read/execute permission,
    then opens the receiver. Repeating this step leaves a correct grant unchanged.
    This is needed after extraction because ZIP files do not preserve that grant.
 3. Put the PC and iPhone on the same trusted private Wi-Fi/LAN. On the iPhone,
    open Control Center > Screen Mirroring > @SERVICE_NAME@.
    The Windows network profile can stay Public, Private or Domain. If Windows
-   asks for firewall access, allow AirMirrorLite on the connected network.
+   asks for firewall access, allow iPhone Air Mirror on the connected network.
    Guest Wi-Fi or client isolation can prevent discovery. Run one receiver at a time.
 4. Close the phone-shaped window to exit. The bottom-right grip resizes it;
    the side controls adjust volume, restore size, enter fullscreen and close.
@@ -42,12 +42,12 @@ delete that text file for the standard widescreen hint, then restart/reconnect.
 It is an advertised canvas preference, not a guaranteed mirroring resolution.
 
 First launch creates this user's protected identity and bounded diagnostic log
-under local beside the app, or under LOCALAPPDATA/AirMirrorLite if needed. No
+under local beside the app, or under LOCALAPPDATA/iPhone Air Mirror if needed. No
 sender identity, phone screen capture or previous user's logs are included.
 Do not share a used local folder: it contains your receiver identity and logs.
 If startup fails, keep the exact error text and check these prerequisites. Do
 not disable Windows security protections. Included source and component notices
 describe this build and its licenses. No automatic updater or service is added.
 
-Preparation without opening a receiver: Start-AirMirrorLite.cmd --prepare-only
+Preparation without opening a receiver: Start-iPhoneAirMirror.cmd --prepare-only
 This runs no media test, plays no sound and opens no network listener.

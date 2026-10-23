@@ -77,3 +77,6 @@ parser sources are redistributed. The hvc1/hvcC layout was checked against the
 pinned UxPlay interoperability reference above and implemented with explicit
 bounds in Rust. The app icon is original project artwork; its multi-size ICO is
 reproducible using scripts/Generate-Icon.py (Pillow is development-only).
+The release icon implements the user's selected paired-screen concept in original
+SVG/code geometry, with separately rendered 16–256px frames. Its initial concept
+was image-generated; no third-party icon set or brand mark is bundled.

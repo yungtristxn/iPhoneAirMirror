@@ -24,10 +24,10 @@ TARGET = "x86_64-pc-windows-msvc"
 PROFILES = {
     "legacy": {"features": ("ffmpeg-aac", "display-update-experiment"),
                "resolved": {"ffmpeg-aac", "display-update-experiment", "rotation-advertisement-experiment"},
-               "service": "AirMirrorLite", "directory": "AirMirrorLite-release-candidate"},
+               "service": "iPhone Air Mirror", "directory": "iPhoneAirMirror-release-candidate"},
     "hap": {"features": ("ffmpeg-aac", "hap-pairing-experiment"),
             "resolved": {"ffmpeg-aac", "display-update-experiment", "rotation-advertisement-experiment", "hap-pairing-experiment"},
-            "service": "AirMirrorLite HAP", "directory": "AirMirrorLite-hap-release-candidate"},
+            "service": "iPhone Air Mirror HAP", "directory": "iPhoneAirMirror-hap-release-candidate"},
 }
 UPSTREAM_REPLY_SHA = "5a7c123bba599bfca553e815c2ff1fed947636999a1deb44c2fa640e86b2a90a"
 PRIVATE_NAMES = {"identity.dpapi", "identity.key", "receiver.log"}
@@ -255,12 +255,12 @@ def archive_package(package, output):
         # Clamp ZIP metadata only; vendored Cargo source epochs may predate 1980.
         with zipfile.ZipFile(temporary, "x", zipfile.ZIP_DEFLATED, compresslevel=6, strict_timestamps=False) as archive:
             for path in files:
-                archive.write(path, "AirMirrorLite/" + path.relative_to(package).as_posix())
+                archive.write(path, "iPhoneAirMirror/" + path.relative_to(package).as_posix())
         with zipfile.ZipFile(temporary) as archive:
             require(archive.testzip() is None, "Archive CRC verification failed")
             require(len(archive.namelist()) == len(files) == len(set(archive.namelist())), "Duplicate/missing ZIP entry")
             for path in files:
-                with archive.open("AirMirrorLite/" + path.relative_to(package).as_posix()) as stream:
+                with archive.open("iPhoneAirMirror/" + path.relative_to(package).as_posix()) as stream:
                     require(hashlib.file_digest(stream, "sha256").hexdigest() == sha(path), "Archive content mismatch")
         require(not output.exists(), "Output appeared during packaging; existing archives are preserved")
         temporary.rename(output)  # On Windows rename fails if the target exists.
@@ -291,10 +291,10 @@ def main():
     executable_hash = sha(executable)
     scratch = ROOT / "work" / ("release-package-" + uuid.uuid4().hex[:12])
     reject_links(scratch)
-    package = scratch / "AirMirrorLite"
+    package = scratch / "iPhoneAirMirror"
     package.mkdir(parents=True, exist_ok=False)
-    copy(executable, package / "AirMirrorLite.exe")
-    copy(ROOT / "scripts/share/Start-AirMirrorLite.cmd", package / "Start-AirMirrorLite.cmd")
+    copy(executable, package / "iPhoneAirMirror.exe")
+    copy(ROOT / "scripts/share/Start-iPhoneAirMirror.cmd", package / "Start-iPhoneAirMirror.cmd")
     description = ("FFmpeg AAC release candidate with legacy pairing" if args.profile == "legacy"
                    else "Experimental verified HAP pairing candidate; physical HAP audio/A/V is unverified")
     readme = (ROOT / "scripts/share/README.txt").read_text(encoding="utf-8")
@@ -304,8 +304,10 @@ def main():
     add_source(package, before, prefix, native, env, feature_args)
     require(source_snapshot() == before and sha(executable) == executable_hash,
             "Source or built executable changed during packaging")
+    app_metadata = next(p for p in metadata["packages"] if p["id"] == metadata["resolve"]["root"])
     record = {"schemaVersion": 2, "package": description, "profile": args.profile,
-              "sha256": executable_hash, "executable": "AirMirrorLite.exe", "target": TARGET,
+              "displayName": "iPhone Air Mirror", "version": app_metadata["version"], "channel": "beta",
+              "sha256": executable_hash, "executable": "iPhoneAirMirror.exe", "target": TARGET,
               "createdUtc": datetime.now(timezone.utc).isoformat(),
               "features": sorted(settings["resolved"]), "requestedFeatures": list(settings["features"]),
               "sourceBaseCommit": run(["git", "rev-parse", "HEAD"]).strip(),
@@ -323,7 +325,7 @@ def main():
     files = package_files(package)
     write(package / "SHA256SUMS.txt", "".join(f"{sha(path)}  {path.relative_to(package).as_posix()}\n" for path in files))
     # Provision this fresh owned copy only. This mode opens no UI, audio or listener.
-    run([str(package / "AirMirrorLite.exe"), "--provision-worker"], timeout=15)
+    run([str(package / "iPhoneAirMirror.exe"), "--provision-worker"], timeout=15)
     report = {"profile": args.profile, "executableSha256": executable_hash, "stage": str(package),
               "sourceTreeSha256": record["sourceTreeSha256"], "releaseQualified": False,
               "checks": ["fresh locked offline profile build", "x64 PE and FFmpeg provenance",

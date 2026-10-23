@@ -1,12 +1,12 @@
-# AirMirrorLite licensing
+# iPhone Air Mirror licensing
 
 Copyright (C) 2026 AirMirrorLite contributors.
 
-Original AirMirrorLite source and artwork are licensed under the GNU General
+Original iPhone Air Mirror (formerly AirMirrorLite) source and artwork are licensed under the GNU General
 Public License, version 3 only (GPL-3.0-only). See LICENSE.md. This grant does not
 replace the copyright notices or license choices of imported components.
 
-AirMirrorLite is provided without warranty, including implied warranties of
+iPhone Air Mirror is provided without warranty, including implied warranties of
 merchantability or fitness for a particular purpose.
 
 Source-complete candidate packages use the FFmpeg AAC backend, not FDK AAC. It contains the

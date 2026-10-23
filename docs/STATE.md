@@ -2,6 +2,26 @@
 
 Updated: 2026-10-23. Branch: codex/verified-pairing.
 
+## GitHub beta preparation
+
+Display name: iPhone Air Mirror; package version 0.1.0-beta.1. The user selected
+icon 1 and requested a descriptive iPhone/Air/Mirror name. The selected paired
+screen mark now has reproducible SVG/PNG and nine native ICO sizes. Human-facing
+UI, discovery, helpers and package names match. Existing internal Cargo/window/
+AppContainer identifiers stay stable; installed data has its own named folder.
+
+Release build, 141 Rust tests, strict Clippy, formatting, seven package-policy
+and seven metadata tests pass. Silent native artwork/control checks pass;
+startup/narrow layout with the longer name and icon-size renders were inspected.
+Source review findings (README encoding and legacy discovery-trace default) fixed.
+Evidence: local/release-branding/. No sound playback or Computer Use.
+
+A per-user installer is being prepared from the same source-complete portable
+payload, with preserved user data and explicit worker provisioning. Production
+install validation and new final artifact hashes are pending. Full media/phone
+audio acceptance remains separate; no default Windows audio output is available.
+No GitHub remote exists, no publication occurred and no signing key was used.
+
 ## Neutral phone interior
 
 Researched Windows color guidance and W3C contrast before the color-only change.

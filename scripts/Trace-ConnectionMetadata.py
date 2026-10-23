@@ -73,7 +73,7 @@ def parse_cli(argv=None):
     parser.add_argument("--phone", required=True, type=private_ipv4)
     parser.add_argument("--interface", required=True, type=npf_interface)
     parser.add_argument("--receiver-host", required=True, type=receiver_host)
-    parser.add_argument("--service-name", type=service_name, default="AirMirrorLite HAP")
+    parser.add_argument("--service-name", type=service_name, default="iPhone Air Mirror")
     parser.add_argument("--seconds", type=int, default=90)
     parser.add_argument("--packets", type=int, default=300)
     args = parser.parse_args(argv)

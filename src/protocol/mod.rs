@@ -53,9 +53,9 @@ fn wipe_setup_data(value: &mut Value) {
 pub const ROTATABLE_DISPLAY: bool = cfg!(feature = "rotation-advertisement-experiment");
 pub const HAP_ENABLED: bool = cfg!(feature = "hap-pairing-experiment");
 pub const RECEIVER_NAME: &str = if HAP_ENABLED {
-    "AirMirrorLite HAP"
+    "iPhone Air Mirror HAP"
 } else {
-    "AirMirrorLite"
+    "iPhone Air Mirror"
 };
 pub const FEATURES: u64 = (1 << 2)
     | (1 << 6)

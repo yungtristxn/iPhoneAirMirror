@@ -1,4 +1,4 @@
-AirMirrorLite release-candidate source
+iPhone Air Mirror beta source
 =====================================
 
 This source matches the FFmpeg profile identified in BUILD.json. It includes

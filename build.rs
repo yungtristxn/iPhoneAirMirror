@@ -168,7 +168,7 @@ fn main() {
     assert_eq!(
         std::env::var("TARGET").as_deref(),
         Ok("x86_64-pc-windows-msvc"),
-        "AirMirrorLite requires the x86_64-pc-windows-msvc target"
+        "iPhone Air Mirror requires the x86_64-pc-windows-msvc target"
     );
     println!("cargo:rerun-if-changed=native");
     println!("cargo:rerun-if-changed=vendor/playfair");

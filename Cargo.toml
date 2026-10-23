@@ -1,8 +1,9 @@
 [package]
 name = "airmirror-lite"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 edition = "2024"
 publish = false
+license = "GPL-3.0-only"
 description = "Minimal Windows AirPlay screen and audio receiver"
 build = "build.rs"
 
