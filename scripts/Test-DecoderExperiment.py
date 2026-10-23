@@ -449,11 +449,14 @@ def run_backend(executable: Path, output: Path, sessions: int, timeout: int) -> 
         try:
             returncode = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            process.kill()  # Only this test-created process; its worker job closes with it.
-            process.wait(timeout=10)
             raise RuntimeError("decoder experiment exceeded its process deadline")
+        finally:
+            if process.poll() is None:
+                process.kill()  # Only this test-created process; its worker job closes with it.
+                process.wait(timeout=10)
     execution = {"executable": str(executable), "executable_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
                  "exit_code": returncode, "wall_ms": (time.perf_counter() - began) * 1000}
+    require(returncode == 0, f"decoder process exited with {returncode}; inspect its saved output")
     require((output / "report.json").is_file(), "decoder process produced no report")
     return output / "report.json", execution
 
@@ -468,9 +471,12 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=300)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    run = args.reference is not None and args.candidate is not None
-    analyze = args.reference_report is not None and args.candidate_report is not None
-    require(run != analyze, "supply exactly one complete executable pair or report pair")
+    executables = (args.reference is not None, args.candidate is not None)
+    reports = (args.reference_report is not None, args.candidate_report is not None)
+    run = all(executables)
+    analyze = all(reports)
+    require((run and not any(reports)) or (analyze and not any(executables)),
+            "supply exactly one complete executable pair or report pair")
     require(1 <= args.sessions <= 50 and 10 <= args.timeout <= 1800, "sessions/timeout bounds")
     allowed = (ROOT / "local").resolve()
     output = (args.output or allowed / "decoder-experiment" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")).resolve()

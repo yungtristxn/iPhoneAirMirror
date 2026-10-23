@@ -268,9 +268,9 @@ impl Session {
             }
             response.insert("streams".into(), Value::Array(replies));
         }
-        self.shared.status(ReceiverStatus::Connecting(
-            "Connected — waiting for picture and sound",
-        ));
+        // Claim owns the connecting state and first presentation owns Streaming.
+        // A later audio SETUP must not put an already displayed session back in
+        // Connecting (including audio-only teardown/reconfiguration).
         plist::encode(&Value::Dictionary(response))
     }
     fn require_verified(&self) -> Result<()> {

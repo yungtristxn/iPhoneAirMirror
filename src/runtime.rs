@@ -1,20 +1,21 @@
 use crate::{native, protocol};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use ed25519_dalek::SigningKey;
 use rand::{RngCore, rngs::OsRng};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     net::{IpAddr, TcpListener, TcpStream},
     os::windows::io::AsRawSocket,
     path::Path,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc::{Receiver, SyncSender, sync_channel},
     },
     time::{Duration, Instant},
 };
+use zeroize::Zeroizing;
 pub enum Media {
     VideoConfig {
         epoch: u64,
@@ -124,7 +125,7 @@ fn audio_can_drain(owner: u64, failed_owner: u64, native_ready: bool) -> bool {
     // With no owner, drain canceled messages even if the device is unavailable.
     owner == 0 || (failed_owner != owner && native_ready)
 }
-fn send_bounded_audio(
+fn send_bounded_media(
     sender: &SyncSender<Media>,
     mut message: Media,
     canceled: impl Fn() -> bool,
@@ -145,7 +146,7 @@ fn send_bounded_audio(
             Err(std::sync::mpsc::TrySendError::Full(returned)) => {
                 ensure!(
                     started.elapsed() < limit,
-                    "audio consumer stalled; reconnect required"
+                    "media consumer stalled; reconnect required"
                 );
                 message = returned;
                 if !notified_full {
@@ -155,7 +156,7 @@ fn send_bounded_audio(
                 std::thread::sleep(Duration::from_millis(1));
             }
             Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                anyhow::bail!("audio consumer closed");
+                anyhow::bail!("media consumer closed");
             }
         }
     }
@@ -352,7 +353,6 @@ pub struct Shared {
     // Negotiation hint only; wire presentation timestamps are mapped unchanged.
     pub playout_ms: u32,
     pub next: AtomicU64,
-    pub connections: AtomicUsize,
     pub identity: SigningKey,
     pub device: String,
     pub pi: String,
@@ -612,32 +612,28 @@ impl Shared {
                 .collect(),
         ));
     }
-    pub fn send_video(&self, m: Media) -> Result<()> {
-        let start = Instant::now();
-        let mut message = m;
-        let generation = self.disconnect.load(Ordering::Acquire);
-        loop {
-            match self.video.try_send(message) {
-                Ok(()) => {
-                    self.wake.signal();
-                    return Ok(());
-                }
-                Err(std::sync::mpsc::TrySendError::Full(m)) => {
-                    ensure!(
-                        start.elapsed() < Duration::from_millis(500)
-                            && !self.shutdown.load(Ordering::Acquire)
-                            && self.disconnect.load(Ordering::Acquire) == generation,
-                        "video consumer stalled; session ended without discarding compressed dependencies"
-                    );
-                    message = m;
-                    self.wake.signal();
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                    anyhow::bail!("video consumer closed")
-                }
-            }
-        }
+    pub fn send_video(&self, m: Media, canceled: impl Fn() -> bool) -> Result<()> {
+        let epoch = match &m {
+            Media::Video { epoch, .. } | Media::VideoConfig { epoch, .. } => *epoch,
+            _ => anyhow::bail!("non-video message on video channel"),
+        };
+        let disconnect = self.disconnect.load(Ordering::Acquire);
+        // Compressed dependencies must remain intact while a session is live.
+        // Once its owner/transport is canceled, dropping the pending item is
+        // normal teardown and must not replace the UI with a stream failure.
+        send_bounded_media(
+            &self.video,
+            m,
+            || {
+                canceled()
+                    || self.shutdown.load(Ordering::Acquire)
+                    || self.disconnect.load(Ordering::Acquire) != disconnect
+                    || self.owner.load(Ordering::Acquire) != epoch
+            },
+            || self.wake.signal(),
+            Duration::from_millis(500),
+        )
+        .context("video delivery")
     }
     pub fn send_audio(&self, m: Media, canceled: impl Fn() -> bool) -> Result<()> {
         let (epoch, serial) = match &m {
@@ -645,7 +641,7 @@ impl Shared {
             _ => anyhow::bail!("non-audio message on audio channel"),
         };
         let disconnect = self.disconnect.load(Ordering::Acquire);
-        send_bounded_audio(
+        send_bounded_media(
             &self.audio,
             m,
             || {
@@ -660,6 +656,7 @@ impl Shared {
             || self.wake.signal(),
             Duration::from_millis(500),
         )
+        .context("audio delivery")
     }
 }
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
@@ -686,19 +683,19 @@ fn append_log_line(log: &mut (File, u64), line: &[u8]) -> io::Result<()> {
     }
     Ok(())
 }
-fn identity(path: &Path) -> Result<[u8; 32]> {
-    use zeroize::Zeroize;
+fn identity(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
     if path.exists() {
-        ensure!(fs::metadata(path)?.len() <= 4096, "identity file size");
-        let mut data = native::protect(&fs::read(path)?, true)?;
+        // Bound the read itself, including a file that grows after inspection.
+        let mut protected = Vec::new();
+        File::open(path)?.take(4097).read_to_end(&mut protected)?;
+        ensure!(protected.len() <= 4096, "identity file size");
+        let data = Zeroizing::new(native::protect(&protected, true)?);
         ensure!(data.len() == 32, "identity format");
-        let key = data.as_slice().try_into()?;
-        data.zeroize();
-        Ok(key)
+        Ok(Zeroizing::new(data.as_slice().try_into()?))
     } else {
-        let mut key = [0; 32];
-        OsRng.fill_bytes(&mut key);
-        let protected = native::protect(&key, false)?;
+        let mut key = Zeroizing::new([0; 32]);
+        OsRng.fill_bytes(key.as_mut());
+        let protected = native::protect(key.as_ref(), false)?;
         let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
         file.write_all(&protected)?;
         file.sync_all()?;
@@ -747,6 +744,7 @@ impl ReceiverApp {
         fs::create_dir_all(data)?;
         let key = identity(&data.join("identity.dpapi"))?;
         let identity = SigningKey::from_bytes(&key);
+        drop(key);
         let pubkey = identity.verifying_key().to_bytes();
         let mut mac: [u8; 6] = pubkey[..6].try_into()?;
         mac[0] = (mac[0] | 2) & !1;
@@ -796,7 +794,6 @@ impl ReceiverApp {
             owner_started: AtomicU64::new(0),
             playout_ms,
             next: AtomicU64::new(1),
-            connections: AtomicUsize::new(0),
             identity,
             video_profile,
             key_worker: Mutex::new(Some(key_worker)),
@@ -907,7 +904,7 @@ impl ReceiverApp {
     pub fn run(&mut self, app: &native::App, seconds: Option<u64>) -> Result<()> {
         let start = Instant::now();
         let mut active = 0;
-        let (mut got_video, mut got_audio, mut reported) = (false, false, false);
+        let mut got_video = false;
         let mut flush = self.shared.flush.load(Ordering::Acquire);
         let mut last_stats = Instant::now();
         let mut last_status = None;
@@ -950,8 +947,6 @@ impl ReceiverApp {
                 presented_base = app.presented();
                 first_picture = false;
                 got_video = false;
-                got_audio = false;
-                reported = false;
             }
             // Negotiated transport ownership decides synchronization. Muting,
             // volume and silence never move an audio session to interactive mode.
@@ -1027,8 +1022,6 @@ impl ReceiverApp {
                             self.shared.disconnect.fetch_add(1, Ordering::AcqRel);
                             audio_drain.block();
                             break;
-                        } else {
-                            got_audio = true;
                         }
                     }
                     Ok(message) => {
@@ -1153,10 +1146,6 @@ impl ReceiverApp {
                     Err(_) => break,
                 }
             }
-            if got_video && got_audio && first_picture && !reported {
-                self.shared.status(ReceiverStatus::Streaming);
-                reported = true;
-            }
             // Event notifications coalesce. A consumed whole drain budget can
             // leave messages queued after the last signal; check again without
             // sleeping. The next pass still respects native video backpressure.
@@ -1188,8 +1177,6 @@ impl ReceiverApp {
                     presented_base = app.presented();
                     first_picture = false;
                     got_video = false;
-                    got_audio = false;
-                    reported = false;
                 }
                 if boundary.serial != flush {
                     app.flush_audio();
@@ -1333,15 +1320,14 @@ fn server_loop(listener: TcpListener, shared: Arc<Shared>) {
 }
 fn connection(stream: TcpStream, shared: Arc<Shared>) {
     shared.log("control connection accepted");
-    shared.connections.fetch_add(1, Ordering::AcqRel);
     if let Err(e) = protocol::serve(stream, shared.clone()) {
         shared.log(&format!("control closed: {e}"));
     }
-    shared.connections.fetch_sub(1, Ordering::AcqRel);
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
     struct TestLogPath(std::path::PathBuf);
     impl TestLogPath {
         fn new() -> Self {
@@ -1351,6 +1337,21 @@ mod tests {
                 rand::random::<u64>()
             )))
         }
+    }
+    #[test]
+    fn identity_round_trip_and_invalid_storage_are_bounded() {
+        let path = TestLogPath::new();
+        let first = identity(&path.0).unwrap();
+        assert_eq!(first.as_ref(), identity(&path.0).unwrap().as_ref());
+
+        let invalid = native::protect(&[7; 31], false).unwrap();
+        fs::write(&path.0, &invalid).unwrap();
+        assert!(identity(&path.0).is_err());
+        assert_eq!(fs::read(&path.0).unwrap(), invalid);
+
+        fs::write(&path.0, [0; 4097]).unwrap();
+        let error = identity(&path.0).unwrap_err();
+        assert_eq!(error.to_string(), "identity file size");
     }
     impl Drop for TestLogPath {
         fn drop(&mut self) {
@@ -1824,7 +1825,7 @@ mod tests {
         let (sender, receiver) = sync_channel(32);
         let producer = std::thread::spawn(move || {
             for index in 0..96 {
-                send_bounded_audio(
+                send_bounded_media(
                     &sender,
                     synthetic_audio(index),
                     || false,
@@ -1883,7 +1884,7 @@ mod tests {
         let wake = Arc::new(AtomicUsize::new(0));
         let notification = wake.clone();
         let producer = std::thread::spawn(move || {
-            send_bounded_audio(
+            send_bounded_media(
                 &sender,
                 synthetic_audio(1),
                 || false,
@@ -1905,6 +1906,70 @@ mod tests {
         assert_eq!(wake.load(Ordering::Acquire), 2); // One full notification + insertion.
     }
     #[test]
+    fn video_backpressure_cancels_quietly_without_wake_flood_or_dependency_loss() {
+        let (sender, receiver) = sync_channel(1);
+        let config = || Media::VideoConfig {
+            epoch: 7,
+            codec: 265,
+            width: 994,
+            height: 2160,
+        };
+        assert!(sender.try_send(config()).is_ok());
+        let stop = Arc::new(AtomicBool::new(false));
+        let wake = Arc::new(AtomicUsize::new(0));
+        let (cancel, notification) = (stop.clone(), wake.clone());
+        let producer = std::thread::spawn(move || {
+            send_bounded_media(
+                &sender,
+                config(),
+                || cancel.load(Ordering::Acquire),
+                || {
+                    notification.fetch_add(1, Ordering::AcqRel);
+                },
+                Duration::from_secs(2),
+            )
+        });
+        let started = Instant::now();
+        while wake.load(Ordering::Acquire) == 0 {
+            assert!(started.elapsed() < Duration::from_secs(1));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(
+            !producer.is_finished(),
+            "live compressed data must not be dropped"
+        );
+        assert_eq!(wake.load(Ordering::Acquire), 1);
+        stop.store(true, Ordering::Release);
+        producer.join().unwrap().unwrap();
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            Media::VideoConfig { epoch: 7, .. }
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn canceled_delivery_never_enqueues_and_live_stalls_still_fail() {
+        let (sender, receiver) = sync_channel(1);
+        send_bounded_media(
+            &sender,
+            synthetic_audio(0),
+            || true,
+            || panic!("canceled delivery must not wake the consumer"),
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert!(receiver.try_recv().is_err());
+        assert!(sender.try_send(synthetic_audio(0)).is_ok());
+        assert!(
+            send_bounded_media(&sender, synthetic_audio(1), || false, || {}, Duration::ZERO,)
+                .is_err()
+        );
+        assert_synthetic_audio(receiver.recv().unwrap(), 0);
+        assert!(receiver.try_recv().is_err());
+    }
+    #[test]
     fn blocked_audio_producer_stops_on_transport_cancel_or_flush_without_ui_wake_flood() {
         for flush in [false, true] {
             let (sender, receiver) = sync_channel(1);
@@ -1914,7 +1979,7 @@ mod tests {
             let wake = Arc::new(AtomicUsize::new(0));
             let (cancel, generation, notification) = (stop.clone(), serial.clone(), wake.clone());
             let producer = std::thread::spawn(move || {
-                send_bounded_audio(
+                send_bounded_media(
                     &sender,
                     synthetic_audio(1),
                     || cancel.load(Ordering::Acquire) || generation.load(Ordering::Acquire) != 11,

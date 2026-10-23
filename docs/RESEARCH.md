@@ -1,283 +1,134 @@
-# Minimal Windows AirPlay receiver — research and recommended design
-Research date: 2026-10-21
+# Architecture and implementation references
 
-## Decision
-Build a Windows-only, local-network AirPlay Screen Mirroring receiver with one active iPhone session and a single native display window. Prioritize low steady-state CPU use, bounded memory, low latency and minimal installed components. This is a research/design recommendation, not a built or benchmarked application.
+Current design, consolidated 2026-10-23. Scope is in SPEC.md, evidence in
+VALIDATION.md/STATE.md and imported-source provenance in THIRD_PARTY.md.
+Superseded experiments remain in Git history.
 
-Recommended application stack: Rust with Microsoft's windows crate; Win32 windowing; native Windows DNS-SD registration; Media Foundation H.264 decoding; Direct3D 11/DXGI presentation. Use maintained cryptographic implementations and narrowly scoped compatibility code. Do not implement cryptographic primitives or video decoders from scratch.
+## Ownership and media path
 
-Current open-source implementations are interoperability references and potential sources of selected code, not trusted drop-in engines. Our earlier security findings apply to a particular uxplay-windows/libuxplay snapshot. A current upstream spot-check still shows relevant signed codec-length parsing patterns, so simply switching branch/version is not sufficient assurance.
+The Rust host owns bounded request/plist/codec-record parsing, pairing, discovery,
+the single sender and clocks. src/native.rs provides a narrow C ABI to a Windows
+SDK C++ bridge, the implemented alternative to Rust Windows bindings.
 
-## Product contract
-- Open the app, select its receiver name in iPhone Control Center > Screen Mirroring.
-- One receiver window, correct portrait/landscape aspect ratio, resize, fullscreen and disconnect.
-- Closing the window stops listening and exits all child processes.
-- One active sender; a second sender cannot silently replace it.
-- Local-network operation, ordinary user privileges during normal use, no account.
-- No recording, phone control, USB capture, DLNA, HLS URL playback, standalone music-player mode, Bluetooth discovery, autostart, background service or automatic updater.
-- Start with H.264 SDR. HEVC/HDR/4K add compatibility and testing scope without helping the initial minimal product.
-- Confirmed scope update: synchronized phone audio is REQUIRED. A video-only spike is only an intermediate milestone. Do not assume the stock Windows AAC decoder supports the negotiated format.
+Validated compressed video decodes through Media Foundation into D3D11 surfaces.
+DirectComposition/DXGI renders the rounded phone window with a separate rail.
+Reception performs no CPU readback or re-encoding. Tests can read generated
+marker/black surfaces, not phone pixels.
 
-Capability advertisements must accurately describe the implemented subset. Dropping user-visible features does not imply all corresponding AirPlay negotiation endpoints or discovery records can be removed.
+AAC and retained PlayFair C code run in the executable's restricted-worker mode.
+A zero-capability AppContainer and one-process/256 MiB kill-on-close job bound
+it. Private bounded IPC shares a two-second deadline across request/reply.
+Canceled overlapped I/O completes before buffers leave scope. Worker access is
+provisioned explicitly, never weakened or replaced by an unrestricted fallback.
 
-## Proposed data path
-iPhone -> native discovery -> bounded AirPlay session/protocol worker -> decrypted compressed H.264 -> Media Foundation -> D3D11 GPU surfaces -> native window.
+## Video and scheduling
 
-Discovery and UI live in the small host. The worker handles untrusted packet parsing, session state and any retained C compatibility code. A second process alone is not a sandbox: use an actual restricted worker/AppContainer boundary if the compatibility spike confirms the required LAN/IPC behavior. The same shipped executable can run host and worker roles. Transfer bounded compressed samples and validated metadata over private IPC; do not copy full decoded frames across that boundary.
+H.264 SDR is the compatibility profile; native HEVC Main 8-bit 4:2:0 SDR is
+capability-gated. Parsers bound coded/aligned dimensions, reference/decoded-picture
+requirements and rotation. Unsupported profiles, depth, chroma, reflections and
+metadata fail before submission.
 
-The initial spike must verify this isolation approach. It should not quietly fall back to a fully privileged worker if restrictions fail. Media Foundation and GPU driver code remain dependencies and are not made memory-safe by writing the host in Rust.
+Transforms are reused where reset permits; reference state, queues and owner
+generations are cleared. Configuration prepares types before payload arrival.
+Decoded queues preserve decoder-pool headroom. Successful presentation retains
+a private GPU copy in two bounded cache slots, allowing paused redraw without
+holding a decoder-owned surface. Ordinary format changes keep the old private
+frame's aperture/color/rotation until a fresh replacement presents. Suspension,
+owner reset and failure clear it.
 
-Microsoft documents both native service registration and creating AppContainer processes:
-- [DnsServiceRegister](https://learn.microsoft.com/en-us/windows/win32/api/windns/nf-windns-dnsserviceregister)
-- [Launching an AppContainer](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)
-- [Rust Media Foundation bindings](https://microsoft.github.io/windows-docs-rs/doc/windows/Win32/Media/MediaFoundation/index.html)
-
-## Components
-| Component | Proposed implementation | Reason |
-|---|---|---|
-| Discovery | DnsServiceRegister / DnsServiceDeRegister | Uses Windows' existing DNS-SD support; avoids installing Bonjour. Registration is tied to process lifetime. |
-| Network/session | Rust, bounded buffers and explicit per-connection state | Avoids copying the unsafe C input/state handling identified earlier. |
-| AirPlay interoperability | Current UxPlay code and observed real-device behavior as references; selected narrowly bounded compatibility routines | Reverse-engineered interoperability is the difficult part. Porting protocol behavior is more realistic than inventing it. |
-| Binary plist | An established parser with input/depth/allocation limits | Binary plist support is part of negotiation; JSON cannot replace it. |
-| Cryptography | Maintained libraries plus required FairPlay-compatible mirroring handshake code | Use verified implementations; keep native/FFI input contracts small and fixed-size where possible. |
-| Video | Windows H.264 Media Foundation transform with D3D11 device manager | Hardware decode and OS-provided fallback; no bundled general video framework required. |
-| Display | Win32 HWND + D3D11/DXGI | Small native UI and GPU color conversion/presentation. |
-| Required phone audio | Negotiated codec decoder + WASAPI | Native Windows AAC support does not document AAC-ELD; select only the necessary decoder after a real-device probe. |
-| Settings | One small per-user configuration file and receiver identity | No database; no environment-variable command configuration or arbitrary media-pipeline expressions. |
-
-UxPlay exposes separate video_process/audio_process callbacks, which demonstrates a useful boundary between AirPlay reception and media rendering. Replacing GStreamer still requires adaptation of initialization, DNS-SD, timing, shutdown and build dependencies.
-- [UxPlay callback interface](https://github.com/FDH2/UxPlay/blob/master/lib/raop.h)
-- [UxPlay build structure](https://github.com/FDH2/UxPlay/blob/master/CMakeLists.txt)
-
-## Video efficiency
-The important savings come from the media path, rather than choosing Rust instead of C++:
-
-1. Decode the received compressed stream once. Do not re-encode it for display.
-2. Enable hardware decoding when the actual device/driver supports it.
-3. Keep decoded NV12 surfaces on the GPU and perform scaling/color conversion there.
-4. Reuse decoder surfaces and render resources.
-5. Keep the presentation queue short; present the freshest decoded frame when display falls behind.
-6. Do not arbitrarily drop compressed interdependent frames: maintain decoder references or use a deliberate keyframe-resynchronization policy.
-7. Use event-driven networking and frame-ready wakeups. Avoid periodic idle rendering and polling.
-8. Enable low-latency codec/pipeline options, then measure behavior. They cannot remove capture or network delay on the iPhone.
-
-Microsoft's decoder expects Annex-B H.264 with start codes. The receiver must correctly normalize the received NAL representation and handle SPS/PPS and resolution changes.
-- [H.264 decoder requirements](https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-decoder)
-- [D3D11 / Media Foundation device sharing](https://learn.microsoft.com/en-us/windows/win32/medfound/supporting-direct3d-11-video-decoding-in-media-foundation)
-- [Codec low-latency setting](https://learn.microsoft.com/en-us/windows/win32/medfound/codecapi-avlowlatencymode)
-- [Media Foundation low-latency pipeline](https://learn.microsoft.com/en-us/windows/win32/medfound/mf-low-latency)
-
-Targets to validate, not performance promises: near-idle CPU while waiting, hardware-decode confirmation during motion, bounded working set over a long session, and a 1080p-class/60-fps capability target subject to the sender's actual negotiated stream. No credible CPU percentage, binary-size or end-to-end latency figure can be given before measurement on the user's GPU/network.
-
-## Audio caveat
-Current UxPlay explicitly handles AAC-ELD for mirroring and ALAC for other audio modes. Microsoft's AAC decoder documentation lists AAC-LC and HE-AAC, not AAC-ELD. Therefore a completely Windows-codec-only audio design is not established.
-
-Sound is required. Test the actual negotiated format first and add a small decoder-only build for that format; a restricted libavcodec/libavutil build is one practical candidate. Avoid adding a general media player, muxer, encoder, URL fetcher or complete GStreamer distribution solely to decode screen audio. Keep A/V timing and jitter buffers bounded; "no buffering" would create glitches.
-- [UxPlay audio formats](https://github.com/FDH2/UxPlay/blob/master/renderers/audio_renderer.c)
-- [Microsoft AAC decoder profiles](https://learn.microsoft.com/en-us/windows/win32/medfound/aac-decoder)
-
-## What existing projects establish
-- FDH2/UxPlay is the main compatibility reference. Its whole application includes more features and dependencies than this product needs. The code is GPLv3 at project level; component licenses must be retained and checked before distributing derived builds.
-- moieric11/AirPlay-Windows is a useful Windows integration reference: its current source uses native DnsServiceRegister, and its README documents D3D11 GPU-resident decoding/display. It still uses FFmpeg/SDL and includes recording/HLS/other scope, so copying the full app would miss the minimality goal. Its own local pipeline latency estimate explicitly excludes sender capture, network transit and display scan-out.
-- Old unofficial AirPlay protocol notes are useful background, but not a complete current iOS contract. Some project protocol documents are visibly stale relative to implementation. Current code and real iPhone acceptance tests must resolve disagreements.
+Only successful Present commits readiness, shape and composition attachment.
+Busy/occluded submissions retain the candidate. One-shot PTS timers, WASAPI,
+media wakeups and conditional swap-chain readiness avoid fixed polling/global
+timer changes. Advertised latency already appears in sender timestamps and is
+not added again locally. Configured audio/video follow one RTP/NTP mapping;
+screen-only mode can display fresh decoded frames promptly. Mute does not
+change synchronization policy.
 
 References:
-- [UxPlay](https://github.com/FDH2/UxPlay)
-- [Windows native DNS-SD implementation reference](https://github.com/moieric11/AirPlay-Windows/blob/main/src/mdns/mdns_service.cpp)
-- [AirPlay-Windows current architecture and limits](https://github.com/moieric11/AirPlay-Windows/blob/main/README.md)
-- [Unofficial protocol documentation](https://github.com/openairplay/airplay-spec)
+- [D3D11/MF decode](https://learn.microsoft.com/en-us/windows/win32/medfound/supporting-direct3d-11-video-decoding-in-media-foundation)
+- [H.264](https://learn.microsoft.com/en-us/windows/win32/medfound/h-264-video-decoder),
+  [HEVC](https://learn.microsoft.com/en-us/windows/win32/medfound/h-265---hevc-video-decoder)
+- [Low-latency API](https://learn.microsoft.com/en-us/windows/win32/medfound/codecapi-avlowlatencymode):
+  H.264 uses VT_UI4; HEVC uses VT_BOOL.
+- [Stream changes](https://learn.microsoft.com/en-us/windows/win32/medfound/handling-stream-changes)
+- [DXGI latency](https://learn.microsoft.com/en-us/windows/uwp/gaming/reduce-latency-with-dxgi-1-3-swap-chains)
+- [Waitable timers](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createwaitabletimerexw)
 
-## Required security work
-Reducing features and dependencies does not itself fix the AirPlay parser or pairing bugs:
-- Enforce message/frame/body limits before allocation or decoding; use checked arithmetic.
-- Enforce pairing stages and proof success; validate every cryptographic field length.
-- Reject invalid FairPlay indices before table access.
-- Associate stream connections with the negotiated session; do not accept an unrelated peer simply because it reaches a media port.
-- Use PIN/password admission only after its implementation has been validated. Authentication cannot protect code that must parse preauthentication requests.
-- Allow only intended private-network connectivity and restrict firewall rules to the executable and local subnet. Multicast discovery/interface details must be tested.
-- Generate a random persistent receiver identity; protect stored secrets with Windows facilities.
-- Add focused malformed-input, reconnect/shutdown and resource-limit tests, plus fuzzing/sanitizers for the remaining native boundary.
-- Keep logs bounded and avoid raw screen content, pairing secrets or credentials.
-- If distributing the app, sign and publish reproducible/traceable release artifacts. A personal build can still trigger reputation or antivirus checks; custom source does not guarantee Defender acceptance.
+## Audio
 
-## Build sequence
-1. Compatibility spike: native DNS-SD + minimal handshake + one real iPhone H.264 stream; verify hardware Media Foundation decode and portrait/landscape changes.
-2. Minimal app: single window, fullscreen, disconnect, correct exit, deterministic cleanup, one active sender.
-3. Hardening: replace/harden the known unsafe parser/state paths, enforce limits and worker isolation; validate negative cases.
-4. Required audio: add the actual negotiated screen-audio codec and WASAPI with synchronization; video-only is not accepted as the completed product.
-5. Acceptance: sustained session, repeated connect/disconnect, lock/unlock, rotation, network interruption, sleep/resume, no increasing memory/handle count, no leftover listeners/processes after close.
-6. Measure actual CPU, GPU decode activity, private working set, frame pacing and glass-to-glass latency separately. Local decoder timing is not end-to-end latency.
+FFmpeg supplies only native AAC and avcodec/avutil support. The worker returns
+exact stereo PCM counts, a generation and additional DSP delay. The host maps
+packet RTP minus that delay and trims only generation priming. DECODER_EXPERIMENT.md
+records the independently checked FDK/FFmpeg comparison and limits.
 
-No receiver implementation, installation, service creation or firewall modification was performed for this research. A separate project bootstrap has since been prepared.
+Bounded PCM queues retain timestamps/order during bursts. Producers cancel on
+stop, owner/FLUSH changes or failure; saturation has a bounded deadline. Native
+playback waits for endpoint capacity instead of failing temporary fullness.
+Event-driven shared WASAPI fills before Start. Device failures use bounded
+owner-thread recovery; failure leaves actionable status and disconnects without
+silently substituting another media path.
 
-## Native phone shell (2026-10-21)
+[WASAPI initialization](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize)
+and [RTP timestamps](https://www.rfc-editor.org/rfc/rfc3640#section-2.6).
 
-The UI uses DirectComposition with a GPU video child and a separately invalidated
-Direct2D/DirectWrite frame. The owned layered palette draws controls only, using Direct2D/DirectWrite.
-GDI+ is retained only for development PNG serialization.
-Microsoft API references:
-- [Composition swap chain](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/nf-dxgi1_2-idxgifactory2-createswapchainforcomposition)
-- [HWND composition target](https://learn.microsoft.com/en-us/windows/win32/api/dcomp/nf-dcomp-idcompositiondevice-createtargetforhwnd)
-- [Rounded composition clip](https://learn.microsoft.com/en-us/windows/win32/api/dcomp/nn-dcomp-idcompositionrectangleclip)
+## Discovery and pairing
 
-### Clarity and interaction refinement
-- [Microsoft icon guidance](https://learn.microsoft.com/en-us/windows/apps/design/iconography/segoe-fluent-icons-font): use system Segoe Fluent Icons at standard 20-DIP control / 16-DIP chevron sizes; fall back to installed Segoe MDL2 Assets on Windows 10. No font is copied or redistributed.
-- [Direct2D high-DPI guidance](https://learn.microsoft.com/en-us/windows/win32/direct2d/direct2d-and-high-dpi): separate physical video pixels from logical UI coordinates. Default video fit is capped at 1:1; native vector/text controls are rendered at monitor DPI, with panel strokes aligned to physical pixels.
-- [Hover timing and placement guidance](https://learn.microsoft.com/en-us/windows/win32/uxguide/ctrl-tooltips-and-infotips): use system hover timing to avoid accidental opening and keep the initiating control unobstructed. The requested interactive volume flyout uses a stable adjacent card, a traversable hover region, leave grace, Escape dismissal and keyboard alternatives; it is not an informational tooltip.
-- [Slider guidance](https://learn.microsoft.com/en-us/windows/apps/develop/ui/controls/slider): provide enough travel and immediate feedback. The horizontal slider has a 32-DIP vertical hit area, a separate percentage label and 1% keyboard steps.
+Native DNS-SD publishes AirPlay/RAOP on one eligible LAN interface using the
+machine's actual .local hostname. Arbitrary service-target registration does
+not establish its A/AAAA address record. Registration is asynchronous; callback
+contexts outlive completion/cancel. At most two remain process-owned if Windows
+fails to complete shutdown, avoiding a freed callback context.
 
-The observed iPhone portrait stream was 498x1080. Display fitting can avoid loss
-from unnecessary scaling but cannot reconstruct detail absent from the stream.
-Negotiated capture capabilities and decoder resource bounds remain unchanged.
+Default pairing is verified legacy. HAP is explicitly experimental and uses
+verified transient SRP/authenticated control, event and media records; it never
+downgrades on failure. Neither profile is a persistent admission allowlist.
+VERIFIED_PAIRING.md retains crypto pins/protocol boundaries; STARTUP_TRACE.md
+records the unresolved selection delay.
 
-## Actual high-resolution mirroring and native application icon (2026-10-21)
+- [DNS-SD](https://learn.microsoft.com/en-us/windows/win32/api/windns/nf-windns-dnsserviceregister),
+  [cancellation](https://learn.microsoft.com/en-us/windows/win32/api/windns/nf-windns-dnsserviceregistercancel)
+- [AppContainer](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)
+- [Pinned UxPlay reference](https://github.com/FDH2/UxPlay/tree/15a6b87172eca38b0df4e615fbf1bba108734dde)
 
-The previous 498x1080 portrait limit came from the 1920x1080 H.264 advertisement,
-not the window size. [UxPlay's maintained protocol reference](https://github.com/FDH2/UxPlay/blob/15a6b87172eca38b0df4e615fbf1bba108734dde/README.md)
-documents feature bit 42 (ScreenMultiCodec) and higher-height HEVC requests.
-The implementation independently parses bounded hvc1/hvcC configuration records;
-no upstream parser or renderer was imported. Short zero alignment tails are
-accepted outside hvcC, with nonzero/truncated boxes still rejected.
+## Photos, orientation and screen suspension
 
-[Windows HEVC decoder documentation](https://learn.microsoft.com/en-us/windows/win32/medfound/h-265---hevc-video-decoder)
-describes Annex-B input and D3D acceleration. MFTEnumEx activation, D3D11 awareness
-and a 3840x2160 NV12 hardware configuration gate advertisement. Validated SPS
-sizes are supplied to Media Foundation before output-type selection. Every output
-sample must expose a decoder-bound DXGI surface; no software decode fallback.
-Synthetic 4K landscape and 992x2160 portrait, then live iPhone 994x2160, passed on
-the local RTX 4070 SUPER. Windows HEVC Video Extension 2.5.33.0 was already installed.
+Configuration byte 4 is opcode; byte 5 is SymmetricTransform. Pure rotations
+0/3/4/7 map to CW0/180/90/270; reflections/unknown values fail. Each compressed
+input and decoded timestamp retains its angle. D3D11 swaps destination axes for
+quarter-turns while source aperture coordinates remain unchanged.
 
-The [Windows icon resource guidance](https://learn.microsoft.com/en-us/windows/win32/menurc/about-icons)
-informs the embedded multi-image ICO. The original design and generator are in
-assets/app-icon.svg and scripts/Generate-Icon.py. Windows SDK rc.exe embeds the
-icon/version resource, and the UI loads DPI-appropriate small/large icons.
-Native tests load 16, 32, 48 and 256-pixel resource variants and check dimensions.
-No third-party artwork, font, runtime library or icon installer was added.
+Display updates send complete reverse-RTSP updateDisplayInfo dictionaries only
+for presented screen shapes: 100 ms settling, 500 ms minimum send interval and
+one outstanding reply. The observed iPhone omits CSeq on this serialized channel;
+explicit mismatches fail. Unsupported commands disable updates while retaining
+the connection. No pixel guesses or cropping.
 
-## Connection startup and scheduling
+Photos can send an independent photo-only view. Missing phone UI cannot be
+reconstructed, and physical rotation cannot be inferred when the feed omits it.
+That remaining behavior is accepted. Exact opcode 1 options 0x56/0x5e suspend;
+0x16/0x1e resume. Unknown flags retain prior state. Visibility generations block
+old queued/decoded/paused frames; resume reveals only a fresh successful Present.
+Audio remains independent; still photos have no blackout timeout.
 
-[DnsServiceRegister](https://learn.microsoft.com/en-us/windows/win32/api/windns/nf-windns-dnsserviceregister)
-is asynchronous. Start the two registrations without serial waits, retain their
-request data, and allow the listener/media loop to run while registration
-completes. A manual-reset completion event remains observable across polls.
-[Cancellation](https://learn.microsoft.com/en-us/windows/win32/api/windns/nf-windns-dnsserviceregistercancel)
-keeps callback context alive until completion; on an OS timeout at shutdown, at
-most two contexts remain process-owned rather than risking a freed callback.
+Wire facts only; no proprietary implementation imported:
+- [Sender header writer](https://github.com/EthanArbuckle/iPhone18-3_26.1_23B85_Restore/blob/90aa0cfe59d9682b4265e1354c8b19ec3c7823ab/System/Library/PrivateFrameworks/AirPlaySender.framework/AirPlaySender/AirPlaySender_19.mm)
+- [Receiver commands](https://github.com/45clouds/WirelessCarPlay/blob/51145ef55f8dd9f1cbadd58353cacb5e0ca215e9/source/Sources/AirPlayReceiverSession.c)
+- [Event mapping](https://github.com/omarroth/doubletake/blob/5e2f1cbe3e1070bcefec8e549c7baf884727bc00/internal/airplay/event_channel.go)
+- [Suspend/resume](https://github.com/FDH2/UxPlay/blob/15a6b87172eca38b0df4e615fbf1bba108734dde/lib/raop_rtp_mirror.c#L580-L588)
+- [Apple external content](https://developer.apple.com/library/archive/documentation/WindowsViews/Conceptual/WindowAndScreenGuide/UsingExternalDisplay/UsingExternalDisplay.html)
 
-[Media Foundation stream messages](https://learn.microsoft.com/en-us/windows/win32/api/mftransform/nf-mftransform-imftransform-processmessage)
-permit flushing/ending a stream while retaining the transform object. Clear the
-media types and surfaces between sessions, reuse the initialized H.264/HEVC
-objects, and prepare types on the codec-configuration packet. Keep a fresh-object
-fallback if a transform refuses reset. Never retain sender reference frames.
+## Controls
 
-Receiver playout is now configurable at 60–250 ms, default 80 ms. NTP mapping,
-/info latency and RECORD audio-latency samples use the same target. Initial video
-waits briefly for a valid clock rather than failing a first-reply race. An idle
-video socket is not a partially received record: the ten-second deadline starts
-with the first byte and covers header plus payload; control/timing still own
-connection liveness.
+Physical picture pixels and logical DPI-scaled UI geometry are separate.
+DirectComposition clips and Direct2D/system fonts render controls. The shell
+fits monitor work areas and keeps the rail accessible. A software status panel
+survives D3D failure. UIA exposes names, roles, focus, invoke/toggle and volume
+through bounded cross-thread requests with safe detach.
 
-## Performance and lifecycle review
+[Composition swap chain](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/nf-dxgi1_2-idxgifactory2-createswapchainforcomposition),
+[DPI](https://learn.microsoft.com/en-us/windows/win32/direct2d/direct2d-and-high-dpi),
+[icons](https://learn.microsoft.com/en-us/windows/apps/design/iconography/segoe-fluent-icons-font),
+[hover guidance](https://learn.microsoft.com/en-us/windows/win32/uxguide/ctrl-tooltips-and-infotips).
 
-[Microsoft's DXGI latency guidance](https://learn.microsoft.com/en-us/windows/uwp/gaming/reduce-latency-with-dxgi-1-3-swap-chains)
-supports a per-swap-chain presentation budget of one. The receiver checks the
-waitable slot only when a frame/redraw is due and uses nonblocking Present,
-retaining the newest due decoded frame when the display is busy. It does not
-wait on a continuously ready display event while idle. Compressed dependencies
-are preserved; the existing decoded queue bounds remain in force.
-
-[IAudioClient::Initialize](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize)
-requires zero duration and periodicity for shared event-driven audio. The actual
-endpoint capacity and reported stream latency are logged rather than assumed.
-Changing the buffer contract still needs physical synchronization acceptance.
-
-Worker request writes and response reads now share one two-second deadline.
-Overlapped operations are cancelled and completed before their buffers leave
-scope. Fixed IPC scratch storage avoids repeated allocations; returned PCM
-still owns its bounded queue entry. None of these local changes establishes
-numeric phone-to-screen latency.
-
-### Frame-deadline scheduling
-
-[Windows high-resolution waitable timers](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createwaitabletimerexw)
-are available from Windows 10 version 1803. Use a per-instance one-shot timer
-for the next frame's PTS, alongside audio, media-arrival and UI wake events.
-The display-slot event is included only when useful; consuming it reserves that
-slot for the ensuing draw. Older systems can use a regular waitable timer.
-This avoids fixed polling and does not change global timer resolution.
-
-[The codec low-latency API](https://learn.microsoft.com/en-us/windows/win32/medfound/codecapi-avlowlatencymode)
-has an H.264 decoder exception: its VARIANT is VT_UI4; HEVC uses VT_BOOL.
-Read back the codec and MF attribute settings rather than equating a fast submit
-call with low pipeline latency. Track timestamp age at receipt, host queue time,
-output readiness and presentation submission lateness separately. These are
-receiver-stage measurements; they do not measure physical capture/display delay.
-
-### Presentation timestamps already include the sender's scheduling
-
-The [reverse-engineered stream format](https://openairplay.github.io/airplay-spec/screen_mirroring/stream_packets.html)
-identifies the video NTP field as a presentation timestamp. The pinned UxPlay
-implementation converts remote to local clock time and submits it directly to
-the synchronized renderer; audio uses its RTP/NTP anchor on the same clock.
-It does not add the advertised receiver latency a second time.
-
-The live 60 ms trial showed timestamps about 75–85 ms ahead of receipt, followed
-by another 60 ms of receiver delay. Removing that unconditional common offset
-from both audio and video preserves their relative timing while avoiding the
-duplicate wait. The --latency-ms option remains an advertisement to the sender;
-normal deadline scheduling and audio endpoint compensation remain. This corrects
-the earlier interpretation of the setting as an extra local playout buffer.
-
-### Photos scale: comparison with other receivers (2026-10-21)
-
-- [AirPlay-Windows renderer, af7a846](https://github.com/moieric11/AirPlay-Windows/blob/af7a84689b02bad56b55c5efd54f17cc3ebdd1c0/src/video/video_renderer.cpp#L391-L408)
-  fits the received frame with its aspect preserved. Its
-  [borderless window follows changing video dimensions](https://github.com/moieric11/AirPlay-Windows/blob/af7a84689b02bad56b55c5efd54f17cc3ebdd1c0/src/video/video_renderer.cpp#L893-L1011).
-  This does not reconstruct the phone UI when the sender provides a different view.
-- [uxplay-windows](https://github.com/leapbtw/uxplay-windows/blob/f76fe48400916449fd601b1c0444021aaf517082/src/mainwindow.cpp#L327-L364)
-  selects the GStreamer renderer. The pinned
-  [libuxplay pipeline](https://github.com/leapbtw/libuxplay/blob/79c620d0e3cd7c503418e1e39bf7b00a1cb16f24/renderers/video_renderer.c#L360-L388)
-  decodes, converts and scales the video; no Photos-specific crop was found there.
-  The [D3D11 sink](https://gstreamer.freedesktop.org/documentation/d3d11/d3d11videosink.html#d3d11videosink:force-aspect-ratio)
-  preserves aspect by default.
-- [Current UxPlay resolution documentation](https://github.com/FDH2/UxPlay/blob/dbb8a8f451597aa5f2e56c830ce41c4a655a8f98/README.md#L1390-L1398)
-  calls display dimensions advisory and describes height as controlling size,
-  with width adapting to the transmitted image. This is not proof of portrait locking.
-- [ApowerMirror's official iOS guide](https://www.apowersoft.com/faq/use-apowermirror-ios-app.html)
-  documents separate app-based Start Broadcast and AirPlay modes. Its
-  [FAQ](https://www.apowersoft.com/faq/common-issues-for-apowermirror.html)
-  documents AirPlay resolution controls, and its
-  [desktop guide](https://www.apowersoft.com/faq/how-to-use-apowermirror.html)
-  documents manual rotation and resizing. Those sources do not document a
-  Photos-specific AirPlay layout override; its proprietary implementation was not inspected.
-
-[Apple's external-display documentation](https://developer.apple.com/library/archive/documentation/WindowsViews/Conceptual/WindowAndScreenGuide/UsingExternalDisplay/UsingExternalDisplay.html)
-allows an iOS app to supply different external content instead of its device UI.
-That is consistent with the observed 994x2160-to-3840x2160 transition, but is not
-proof of Photos internals. Keeping the phone outline while fitting the entire
-wide feed explains the smaller photo; automatic cropping or zoom would not prove
-true-to-phone scale.
-
-The display experiment used --display-width 994 with the existing 2160 height,
-using the phone's observed screen dimensions as the display request. It left
-decoder caps, audio, timing and the normal default profile unchanged.
-
-The user subsequently confirmed that requesting 994x2160 made the full photo
-match the phone's scale. The live stream stayed 994x2160 instead of switching to
-3840x2160. This establishes the request on the tested phone, not every sender.
-It is persisted as a bounded local display aspect, independently of decoder caps.
-
-Photos still supplied timestamps up to about 320 ms ahead of arrival, including
-in the earlier wide-feed session. [UxPlay's documentation](https://github.com/FDH2/UxPlay/blob/dbb8a8f451597aa5f2e56c830ce41c4a655a8f98/README.md)
-recommends unsynchronized video for screen sharing without audio needing
-synchronization. AirMirrorLite
-uses negotiated audio ownership to make that decision automatically: screen-only
-sessions present fresh decoded frames; audio SETUP restores shared-clock video
-scheduling before PCM delivery. Audio teardown flushes old PCM before returning
-to interactive display. Muting and silence never trigger the change. A transition
-to synchronized playback can hold the current picture briefly while its deadline
-catches up; physical A/V acceptance remains separate from silent tests.
-On the final saved-aspect build, the user confirmed responsive, correctly sized
-Photos after the requested scrolling and rotation check. The live log also shows
-audio SETUP and teardown switching the presentation mode while retaining the
-screen session; it does not establish subjective sound quality or A/V sync.
+Implementation/source checks do not establish physical screen-reader behavior,
+device-loss recovery, sustained performance or end-to-end latency.

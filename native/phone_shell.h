@@ -52,6 +52,7 @@ private:
     bool controls_collapsed_=false,dock_right_=true;
     ULONGLONG hide_volume_deadline_=0;
     int hot_=-1, pressed_=-1, keyboard_focus_=-1, rail_x_=0, flyout_x_=0, palette_width_=96,arrow_x_=84;
+    int wheel_delta_=0;
     float aspect_=498.0f/1080.0f, last_nonzero_=1.0f;
     float session_shape_=0; // first presented format's orientation-independent aspect
     UINT_PTR source_generation_=1; // media-thread only

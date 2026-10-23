@@ -1,4 +1,4 @@
-AirMirrorLite - private Windows x64 test build
+AirMirrorLite - Windows x64 release candidate
 
 1. Extract the whole ZIP to a local folder you own, such as Documents.
    Run it from the extracted folder, not from inside the ZIP or a network share.
@@ -7,7 +7,7 @@ AirMirrorLite - private Windows x64 test build
    then opens the receiver. Repeating this step leaves a correct grant unchanged.
    This is needed after extraction because ZIP files do not preserve that grant.
 3. Put the PC and iPhone on the same trusted private Wi-Fi/LAN. On the iPhone,
-   open Control Center > Screen Mirroring > AirMirrorLite.
+   open Control Center > Screen Mirroring > @SERVICE_NAME@.
    The Windows network profile can stay Public, Private or Domain. If Windows
    asks for firewall access, allow AirMirrorLite on the connected network.
    Guest Wi-Fi or client isolation can prevent discovery. Run one receiver at a time.
@@ -31,9 +31,11 @@ Requirements
   selects H.264/1080 automatically. HEVC support and behavior vary by PC.
   No Bonjour service, codec DLL download or developer tools are required.
 
-This is the experimental FFmpeg AAC build with transport rotation and dynamic
-display updates enabled. It is for private testing; checks on the developer's PC
+@PROFILE_DESCRIPTION@.
+This candidate has not completed release acceptance. Build and synthetic checks
 do not establish compatibility, Photos behavior or audio sync on another machine.
+BUILD.json records the exact profile and source; source/docs/STATE.md records
+the separate automated, GPU and physical-device evidence and remaining checks.
 The included local/display-aspect.txt contains only the generic 994 2160 display
 hint used with the tested phone. A different phone ratio may need adjustment;
 delete that text file for the standard widescreen hint, then restart/reconnect.

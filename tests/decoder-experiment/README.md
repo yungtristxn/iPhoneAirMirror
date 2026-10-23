@@ -6,10 +6,10 @@ capture. Do not point it at the preserved `dist` executable. Neither tool builds
 or installs dependencies. Python analysis uses the existing development NumPy.
 
 Root-level builds provide two separately provisioned experimental executables.
-Use `--features decoder-lab` for the FDK control and `--features ffmpeg-aac,decoder-lab` for
+Use `--no-default-features --features decoder-lab` for the FDK control and `--no-default-features --features ffmpeg-aac,decoder-lab` for
 the candidate, with separate target directories. Both lab builds reject normal
 receiver startup, making the comparison independent of unrelated receiver code.
-The normal default build and preserved package remain FDK. See
+The normal default build uses FFmpeg; preserved FDK packages remain unchanged. See
 `docs/DECODER_EXPERIMENT.md` for the measured raw LC offset, timing policy and build commands.
 The runner is available on each with:
 

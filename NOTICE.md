@@ -9,7 +9,7 @@ replace the copyright notices or license choices of imported components.
 AirMirrorLite is provided without warranty, including implied warranties of
 merchantability or fitness for a particular purpose.
 
-The friend-test ZIP uses the FFmpeg AAC backend, not FDK AAC. It contains the
+Source-complete candidate packages use the FFmpeg AAC backend, not FDK AAC. It contains the
 application's matching source, pinned FFmpeg source, locked Rust dependency
 sources, build instructions and third-party notices. Keep those materials with
 the application when sharing it. No proprietary-code excerpt from protocol

@@ -65,7 +65,27 @@ HRESULT PhoneShell::test_on_ui_thread(const wchar_t* directory){
     palette_proc(palette_,WM_CAPTURECHANGED,0,0);UI_REQUIRE(popup_);
     palette_proc(palette_,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(slider.x,slider.y));UI_REQUIRE(dragging_slider_);
     palette_proc(palette_,WM_CAPTURECHANGED,0,0);UI_REQUIRE(!dragging_slider_&&pressed_==-1&&!popup_&&!hover_pending_);
+    // Dismissing a flyout during a drag also ends that interaction. Late pointer
+    // movement/release must neither adjust the hidden slider nor click a button.
+    for(bool cancel_message:{false,true}){
+        hover();slider={int((flyout_x_+106)*dpi_scale()),int(58*dpi_scale())};
+        palette_proc(palette_,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(slider.x,slider.y));UI_REQUIRE(dragging_slider_);
+        if(cancel_message)palette_proc(palette_,WM_CANCELMODE,0,0);else key(VK_ESCAPE);
+        UI_REQUIRE(!dragging_slider_&&pressed_==-1&&!popup_&&!disconnect);
+        const float canceled_volume=volume;
+        palette_proc(palette_,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(0,0));
+        palette_proc(palette_,WM_LBUTTONUP,0,point(0));
+        UI_REQUIRE(volume==canceled_volume&&!muted&&!quit);
+    }
+    // A wheel notch remains 5%, including fractional and reversed input.
+    set_volume(.5f);wheel_delta_=0;
+    auto wheel=[&](short delta){palette_proc(palette_,WM_MOUSEWHEEL,MAKEWPARAM(0,delta),0);};
+    wheel(0);wheel(30);wheel(30);wheel(30);UI_REQUIRE(volume==.5f);
+    wheel(30);UI_REQUIRE(std::abs(volume-.55f)<.001f&&wheel_delta_==0);
+    wheel(-60);wheel(60);UI_REQUIRE(std::abs(volume-.55f)<.001f&&wheel_delta_==0);
+    wheel(-240);UI_REQUIRE(std::abs(volume-.45f)<.001f&&wheel_delta_==0);
     hover();UI_REQUIRE(popup_);
+    slider={int((flyout_x_+106)*dpi_scale()),int(58*dpi_scale())};
     pointer_volume(slider.x);UI_REQUIRE(!muted&&std::abs(volume-.5f)<.02f);
     UI_REQUIRE(SUCCEEDED(save(L"volume.png")));UI_REQUIRE(SUCCEEDED(save(L"volume-125.png",1.25f)));UI_REQUIRE(SUCCEEDED(save(L"volume-200.png",2)));
     click(0);UI_REQUIRE(muted);UI_REQUIRE(SUCCEEDED(save(L"muted.png")));click(0);
@@ -94,6 +114,12 @@ HRESULT PhoneShell::test_on_ui_thread(const wchar_t* directory){
     click(2);UI_REQUIRE(fullscreen);GetWindowRect(window,&outer);MONITORINFO monitor{sizeof(monitor)};GetMonitorInfoW(MonitorFromWindow(window,MONITOR_DEFAULTTONEAREST),&monitor);UI_REQUIRE(EqualRect(&outer,&monitor.rcMonitor));main_proc(window,WM_FORMAT,1920,1080);key(VK_ESCAPE);
     UI_REQUIRE(!fullscreen&&std::abs(ratio()-1920.0f/1080)<.01f);
     UI_REQUIRE((GetWindowLongPtrW(window,GWL_STYLE)&WS_CAPTION)==0);
+    UI_REQUIRE(toggles_fullscreen(SC_MAXIMIZE,false,false));
+    UI_REQUIRE(toggles_fullscreen(SC_RESTORE,true,false));
+    UI_REQUIRE(!toggles_fullscreen(SC_RESTORE,true,true));
+    UI_REQUIRE(!toggles_fullscreen(SC_RESTORE,false,true));
+    click(2);UI_REQUIRE(fullscreen);main_proc(window,WM_SYSCOMMAND,SC_RESTORE,0);
+    UI_REQUIRE(!fullscreen&&!IsWindowVisible(window));
     // Rapid Photos-style format changes must restore the final portrait shape
     // without pressing Default size, including the user-sized/fullscreen paths.
     for(bool manual:{false,true}){

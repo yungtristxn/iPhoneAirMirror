@@ -70,6 +70,7 @@ unsafe extern "C" {
     fn am_worker_start() -> *mut c_void;
     fn am_worker_provision() -> i32;
     fn am_worker_close(worker: *mut c_void);
+    #[cfg(feature = "decoder-lab")]
     fn am_worker_metrics(worker: *mut c_void, private_bytes: *mut u64, cpu_ms: *mut f64) -> i32;
     fn am_worker_call(
         worker: *mut c_void,
@@ -531,9 +532,15 @@ impl Worker {
         ensure!(message[12] < 4, "invalid FairPlay key mode");
         let mut input = message.to_vec();
         input.extend_from_slice(key);
-        self.call(1, &input)?
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("invalid worker key reply"))
+        let result = self.call(1, &input).and_then(|reply| {
+            reply
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid worker key reply"))
+        });
+        // The next (shorter) worker reply need not overwrite the key's tail.
+        // Keep the returned owned key, but erase the transport copy immediately.
+        zeroize::Zeroize::zeroize(self.reply.as_mut());
+        result
     }
     pub fn configure(&mut self, codec: u8) -> Result<()> {
         self.generation = 0;
@@ -554,6 +561,7 @@ impl Worker {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+    #[cfg(feature = "decoder-lab")]
     fn metrics(&self) -> Result<(u64, f64)> {
         let (mut bytes, mut cpu) = (0, 0.0);
         ensure!(
@@ -562,17 +570,21 @@ impl Worker {
         );
         Ok((bytes, cpu))
     }
+    #[cfg(feature = "decoder-lab")]
     pub fn private_bytes(&self) -> Result<u64> {
         Ok(self.metrics()?.0)
     }
+    #[cfg(feature = "decoder-lab")]
     pub fn cpu_time_ms(&self) -> Result<f64> {
         Ok(self.metrics()?.1)
     }
+    #[cfg(feature = "decoder-lab")]
     pub fn decoder_error(&mut self) -> Result<String> {
         let reply = self.call(6, &[])?;
         ensure!(reply.len() <= 256, "decoder diagnostic budget");
         Ok(std::str::from_utf8(reply)?.to_owned())
     }
+    #[cfg(feature = "decoder-lab")]
     pub fn decoder_delay(&mut self) -> Result<Option<u32>> {
         let bytes: [u8; 4] = self
             .call(7, &[])?
@@ -629,7 +641,7 @@ pub fn worker_main() -> Result<()> {
     // The IPC contract has fixed maxima. Reuse storage instead of allocating and
     // clearing request/PCM response vectors for every 480-sample audio frame.
     let mut data = [0; 8192];
-    let mut reply = [0; 8204];
+    let mut reply = zeroize::Zeroizing::new([0; 8204]);
     let mut pcm = [0i16; 4096];
     loop {
         let mut h = [0; 8];
@@ -742,6 +754,9 @@ pub fn worker_main() -> Result<()> {
         };
         output.write_all(&(reply_len as u32).to_le_bytes())?;
         output.write_all(&reply[..reply_len])?;
+        if op == 1 {
+            zeroize::Zeroize::zeroize(&mut reply[..reply_len]);
+        }
         output.flush()?;
     }
 }
@@ -802,6 +817,10 @@ pub(crate) fn checked_worker() -> Result<Worker> {
     let vector = include_bytes!("../tests/fixtures/fairplay-known-answer.bin");
     let key = worker.decrypt_key(vector[..164].try_into()?, vector[164..236].try_into()?)?;
     ensure!(key == vector[236..], "FairPlay known-answer mismatch");
+    ensure!(
+        worker.reply.iter().all(|byte| *byte == 0),
+        "worker key reply retained"
+    );
     Ok(worker)
 }
 

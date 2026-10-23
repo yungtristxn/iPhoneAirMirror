@@ -17,6 +17,12 @@ constexpr int PALETTE_WIDTH=96, BODY_HEIGHT=196, BUTTON_STEP=44, FLYOUT_WIDTH=21
 constexpr UINT_PTR HIDE_VOLUME=1;
 constexpr int RAIL_GAP=4,WORK_MARGIN=12;
 int rail_clearance(float s){return int(std::ceil((PALETTE_WIDTH+RAIL_GAP+WORK_MARGIN)*s));}
+bool toggles_fullscreen(WPARAM command,bool fullscreen,bool minimized){
+    const WPARAM action=command&0xfff0;
+    // Taskbar restore must restore a minimized fullscreen window first; the
+    // ordinary fullscreen Restore command returns to the saved window bounds.
+    return action==SC_MAXIMIZE||(action==SC_RESTORE&&fullscreen&&!minimized);
+}
 struct StatusCardSize {int width,height;bool compact;};
 StatusCardSize status_card_size(RECT phone,RECT work,float scale){
     // Keep a narrow phone's status card clear of its external control rail.
@@ -220,13 +226,17 @@ void PhoneShell::invoke(int button){
     if(accessibility_&&button>=0&&button<=4)accessibility_->invoked(button+1);
 }
 void PhoneShell::toggle_controls(){
-    dismiss_volume();controls_collapsed_=!controls_collapsed_;hot_=-1;pressed_=-1;
+    dismiss_volume();controls_collapsed_=!controls_collapsed_;hot_=-1;
     if(keyboard_focus_>=0)keyboard_focus_=controls_collapsed_?4:0;
     place_palette();
 }
 void PhoneShell::dismiss_volume(){
+    // Escape, format changes and deactivation can all dismiss an active drag.
+    // Clear before releasing capture because WM_CAPTURECHANGED is synchronous.
+    dragging_slider_=false;pressed_=-1;
+    if(GetCapture()==palette_)ReleaseCapture();
     update_volume_timer(true);TRACKMOUSEEVENT cancel{sizeof(cancel),TME_CANCEL|TME_HOVER,palette_,0};TrackMouseEvent(&cancel);
-    hover_pending_=false;if(keyboard_focus_==5)keyboard_focus_=0;if(popup_){popup_=false;place_palette();}else update_tooltips();
+    hover_pending_=false;if(keyboard_focus_==5)keyboard_focus_=0;if(popup_){popup_=false;place_palette();}else paint_palette();
 }
 void PhoneShell::update_volume_timer(bool in_zone){
     if(!popup_||in_zone||dragging_slider_){
@@ -413,7 +423,7 @@ LRESULT CALLBACK PhoneShell::main_proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
     case WM_REFRESH:a->paint_palette();a->paint_status_panel();return 0;
     case WM_NCLBUTTONDBLCLK:if(wp==HTCAPTION){a->toggle_fullscreen();return 0;}break;
     case WM_LBUTTONDBLCLK:a->toggle_fullscreen();return 0;
-    case WM_SYSCOMMAND:if((wp&0xfff0)==SC_MAXIMIZE || ((wp&0xfff0)==SC_RESTORE && a->fullscreen)){a->toggle_fullscreen();return 0;}break;
+    case WM_SYSCOMMAND:if(toggles_fullscreen(wp,a->fullscreen,IsIconic(h)!=FALSE)){a->toggle_fullscreen();return 0;}break;
     case WM_NCRBUTTONUP:case WM_RBUTTONUP:{POINT p;GetCursorPos(&p);a->menu(p);return 0;}
     case WM_KEYDOWN:
         if(wp==VK_F11 && !(lp&(1LL<<30))){a->toggle_fullscreen();return 0;}
@@ -457,8 +467,14 @@ LRESULT CALLBACK PhoneShell::palette_proc(HWND h,UINT msg,WPARAM wp,LPARAM lp){
         a->dragging_slider_=a->slider_hit(p);if(a->pressed_>=0||a->dragging_slider_){if(!a->hidden_)SetCapture(h);}
         if(a->dragging_slider_)a->pointer_volume(p.x);a->paint_palette();return 0;}
     case WM_LBUTTONUP:{POINT p{GET_X_LPARAM(lp),GET_Y_LPARAM(lp)};int hit=a->button_at(p);bool slider=a->dragging_slider_;int pressed=a->pressed_;a->dragging_slider_=false;a->pressed_=-1;if(GetCapture()==h)ReleaseCapture();if(!slider&&hit==pressed&&hit>=0)a->invoke(hit);a->paint_palette();return 0;}
-    case WM_CAPTURECHANGED:if(a->dragging_slider_||a->pressed_>=0){a->dragging_slider_=false;a->pressed_=-1;a->dismiss_volume();a->paint_palette();}return 0;
-    case WM_MOUSEWHEEL:a->set_volume(a->volume+(GET_WHEEL_DELTA_WPARAM(wp)>0?.05f:-.05f));return 0;
+    case WM_CAPTURECHANGED:if(a->dragging_slider_||a->pressed_>=0)a->dismiss_volume();return 0;
+    case WM_CANCELMODE:a->dismiss_volume();return 0;
+    case WM_MOUSEWHEEL:{
+        // High-resolution wheels send fractions of WHEEL_DELTA. Accumulate them
+        // instead of treating every tiny (or zero) delta as a full volume step.
+        a->wheel_delta_+=GET_WHEEL_DELTA_WPARAM(wp);
+        const int steps=a->wheel_delta_/WHEEL_DELTA;a->wheel_delta_%=WHEEL_DELTA;
+        if(steps)a->set_volume(a->volume+steps*.05f);return 0;}
     case WM_CLOSE:a->quit=true;a->signal();return 0;
     }
     return DefWindowProcW(h,msg,wp,lp);

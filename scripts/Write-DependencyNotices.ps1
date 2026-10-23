@@ -1,5 +1,11 @@
-param([Parameter(Mandatory=$true)]$Metadata,[Parameter(Mandatory=$true)][string]$Destination)
+param(
+    [Parameter(Mandatory=$true,ParameterSetName='Object')]$Metadata,
+    [Parameter(Mandatory=$true,ParameterSetName='File')][string]$MetadataFile,
+    [Parameter(Mandatory=$true)][string]$Destination
+)
 $ErrorActionPreference = 'Stop'
+if ($PSCmdlet.ParameterSetName -eq 'File') { $Metadata = Get-Content -Raw -LiteralPath $MetadataFile | ConvertFrom-Json }
+if (-not $Metadata.resolve.root) { throw 'Cargo metadata must identify a root package' }
 $nodes=@{}; foreach($node in $Metadata.resolve.nodes){$nodes[$node.id]=$node}
 $packages=@{}; foreach($package in $Metadata.packages){$packages[$package.id]=$package}
 $selected=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)

@@ -1,13 +1,13 @@
-AirMirrorLite friend-test source
-===============================
+AirMirrorLite release-candidate source
+=====================================
 
-This source matches the FFmpeg candidate identified in BUILD.json. It includes
-the transport-rotation and display-update experiment. It does not build or link
-FDK AAC. Original project code/artwork is GPL-3.0-only; imported code retains its
+This source matches the FFmpeg profile identified in BUILD.json. It includes
+transport rotation and display updates. It does not build or link FDK AAC.
+Original project code/artwork is GPL-3.0-only; imported code retains its
 own notices. The complete source and license materials accompany the executable.
 
 Requirements to rebuild (not required just to run the app):
-* Windows x64; Rust MSVC toolchain with Cargo (the original used Rust 1.95.0).
+* Windows x64; Rust MSVC toolchain with Cargo (see build-info/rust-toolchain.txt).
 * Visual Studio C++ x64 build tools and Windows SDK.
 * PowerShell 7, Git for Windows and 7-Zip in their default locations.
 * Python 3 only for optional validation/packaging scripts.
@@ -17,7 +17,7 @@ Build from this source directory in PowerShell 7:
   New-Item -ItemType Directory -Force work/ffmpeg-deps | Out-Null
   Copy-Item vendor/ffmpeg/* work/ffmpeg-deps/
   ./scripts/Build-FFmpeg.ps1 -Fetch
-  cargo build --release --locked --offline --features ffmpeg-aac,display-update-experiment
+  cargo build --release --locked --offline --no-default-features --features @FEATURES@
   ./scripts/Initialize-Worker.ps1 -Executable target/release/airmirror-lite.exe
 
 Build-FFmpeg verifies the included source archive/signature and pinned hashes.
@@ -29,13 +29,14 @@ there, so resolving the locked application dependencies needs no network.
 
 Build scripts may select a newer installed SDK/MSVC version. BUILD.json records
 the original toolchain. This is a source-rebuild recipe, not a claim of identical
-binary hashes across toolsets or installation paths. Do not run Package.ps1 to
-replace a working FDK fallback: it is the separate legacy packaging path.
+binary hashes across toolsets or installation paths. This source snapshot does
+not include Git history; release packaging requires the development repository.
 
 Optional silent checks:
-  cargo test --locked --offline --features ffmpeg-aac,display-update-experiment
+  cargo test --locked --offline --no-default-features --features @FEATURES@
   ./scripts/Test-Media.ps1 -Executable target/release/airmirror-lite.exe
 
 Do not use --self-test or Test-Media.ps1 -Audio: those modes play sound.
-The fixture generators and native-sanitizer harness targeting FDK are historical
-development tools; FDK source is intentionally absent from this share archive.
+The FDK fixture generators/reference harnesses need the separately retained FDK
+development source, intentionally absent from this FFmpeg package. Decoder-lab
+experiments require the additional decoder-lab feature and disable reception.

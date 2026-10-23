@@ -130,7 +130,7 @@ def main():
     require(re.fullmatch(r"[A-Za-z0-9._-]{1,64}", args.label), "Invalid result label")
     require(1 <= args.trials <= 10 and 1 <= args.sessions <= 5, "Bounded trial/session counts required")
     output = ROOT / "local" / ("connection-" + args.label)
-    output.mkdir(exist_ok=False)
+    output.mkdir(parents=True, exist_ok=False)
     exe = args.exe.resolve(strict=True)
     subprocess.run([str(exe), "--provision-worker"], check=True, timeout=10,
                    stdin=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)

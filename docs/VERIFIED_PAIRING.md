@@ -29,7 +29,7 @@ protocol and do not advance the screen nonce. Audio uses an explicitly supplied
 SSRC are AAD, with transmitted8-byte nonce. Retransmission wrappers are removed
 before authentication. Existing bounded queues, AAC worker, NTP clock and native
 GPU/WASAPI playback remain the media path. Never choose a different cipher after
-an authentication failure. Actual iPhone SETUP/media compatibility remains pending.
+an authentication failure. Real iPhone screen compatibility is established below; encrypted audio remains unverified.
 
 ## Crypto and source provenance
 
@@ -74,8 +74,8 @@ Independent wire checks and silent native checks pass the hardened candidate:
 SHA-256 2FF3927A51B69C9D91875AF1D654352FB1EF1734F7B36A05CABCA0960E9C70A0.
 Wire evidence: local/hap-pairing/20261022T202500438422Z/result.json; native
 evidence: local/hap-verification/media-result.json (190 GPU surfaces,192 validated
-access units, zero submitted audio). These separate checks do not yet establish
-a real phone's encrypted media negotiation or faster phone tap-to-picture time.
+access units, zero submitted audio). These synthetic checks alone do not establish real phone media or faster startup;
+the distinct screen check is recorded below, while physical audio remains unverified.
 The expanded independent checker also passes encrypted AAC-ELD and AAC-LC SETUP,
 explicit32-byte and derived stream-key selection, actual isolated codec-worker
 readiness, partial audio teardown/reconfiguration and invalid/missing key rejection.
@@ -89,13 +89,12 @@ following packet remains eligible. Request bodies, parser compaction buffers and
 the authenticated SETUP plist's byte fields are also wiped when no longer needed;
 this does not claim erasure of every allocator/library/register copy.
 
-## Runnable phone trial
+## Recorded phone trial
 
-Implementation commit6438855 is deployed separately at
-dist/AirMirrorLite-hap-candidate/AirMirrorLite.exe. It is open with --mute;
-listener/discovery and muted=1 are verified. A bounded DNS-SD query resolves
-AirMirrorLite HAP to the expected host and selected LAN IPv4. Launch evidence and
-candidate manifest are in local/hap-verification/.
+The phone-checked implementation6438855 and subsequent attachment fix remain
+preserved separately. Exact paths/hashes are in STATE.md. The receiver is not
+opened by this document or by the release-preparation checks. Quiet trial evidence
+and the original manifests remain under local/hap-verification/.
 
 First real iPhone check: the user reports picture appears with a similar wait.
 The exact2FF3927... log verifies HAP M1 at40030.144, verified M4 and control

@@ -7,12 +7,14 @@ description = "Minimal Windows AirPlay screen and audio receiver"
 build = "build.rs"
 
 [features]
-default = []
-# The accepted receiver and default build continue using FDK. The explicit
-# FFmpeg candidate is separate; add decoder-lab to forbid receiver startup.
+default = ["ffmpeg-aac", "display-update-experiment"]
+# Release candidates use FFmpeg with the validated Photos/display behavior.
+# --no-default-features retains FDK only as a local reference, never for sharing.
+# decoder-lab adds the offline comparison harness and forbids receiver startup.
 decoder-lab = []
 ffmpeg-aac = []
-# Controlled local interoperability test; not enabled in packaged candidates.
+# Display updates retain the explicit gate for reference builds. HAP pairing
+# remains an opt-in experiment and is never selected by the release profile.
 rotation-advertisement-experiment = []
 display-update-experiment = ["rotation-advertisement-experiment"]
 hap-pairing-experiment = ["display-update-experiment"]

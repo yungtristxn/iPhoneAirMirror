@@ -36,9 +36,10 @@ executable_hash = hashlib.sha256(executable.read_bytes()).hexdigest().upper()
 samples = []
 for trial in range(3):
     with (folder / f"{trial}-out.txt").open("w") as out, (folder / f"{trial}-err.txt").open("w") as err:
-        command = [str(executable), "--hidden", "--seconds", "2", "--port", "17005", "--data-dir", str(folder)]
+        command = [str(executable), "--hidden", "--seconds", "2", "--port", "17005",
+                   "--bind", args.address, "--data-dir", str(folder)]
         if not args.discovery:
-            command += ["--no-discovery", "--bind", "127.0.0.1"]
+            command += ["--no-discovery"]
         address = args.address
         started = time.perf_counter()
         process = subprocess.Popen(command, stdout=out, stderr=err, stdin=subprocess.DEVNULL,

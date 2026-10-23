@@ -2,7 +2,7 @@
 //!
 //! The opcode is byte 4, not the combined u16 at 4..6. Byte 5 is the
 //! sender's SymmetricTransform parameter. Independent protocol research and
-//! local observations are recorded in docs/ROTATION_REGRESSION.md.
+//! local observations are recorded in docs/RESEARCH.md.
 use anyhow::{Result, bail, ensure};
 
 /// Explicit screen suspension from a complete AirPlay codec-config header.

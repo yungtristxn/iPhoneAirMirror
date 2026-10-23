@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod audio_timing;
+#[cfg(feature = "decoder-lab")]
 mod decoder_experiment;
 mod native;
 mod protocol;
@@ -35,7 +36,10 @@ fn run() -> Result<()> {
         .first()
         .is_some_and(|arg| arg == "--decoder-experiment")
     {
+        #[cfg(feature = "decoder-lab")]
         return decoder_experiment::run(&args[1..]);
+        #[cfg(not(feature = "decoder-lab"))]
+        bail!("Decoder comparison requires a separate decoder-lab build.");
     }
     if args == ["--provision-worker"] {
         native::provision_worker()

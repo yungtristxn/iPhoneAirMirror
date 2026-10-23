@@ -120,8 +120,10 @@ impl Streams {
         let epoch = self.epoch;
         self.threads.push(thread::spawn(move || {
             if let Err(e) = job(stop.clone(), clock, shared.clone(), epoch) {
-                shared.log(&format!("{name}: {e}"));
-                shared.failure(&format!("{name} stream stopped. Reconnect mirroring. {e}"));
+                shared.log(&format!("{name}: {e:#}"));
+                shared.failure(&format!(
+                    "{name} stream stopped. Reconnect mirroring. {e:#}"
+                ));
                 stop.store(true, Ordering::Release);
             }
         }));
@@ -179,8 +181,8 @@ impl Streams {
                 shared.clone(),
                 epoch,
             ) {
-                shared.log(&format!("audio: {e}"));
-                shared.failure(&format!("Audio stream stopped. Reconnect mirroring. {e}"));
+                shared.log(&format!("audio: {e:#}"));
+                shared.failure(&format!("Audio stream stopped. Reconnect mirroring. {e:#}"));
                 stop.store(true, Ordering::Release);
             }
         }));
@@ -511,18 +513,21 @@ fn video_loop(
                     ));
                     first_frame = false;
                 }
-                shared.send_video(Media::Video {
-                    epoch,
-                    codec: active_codec,
-                    width: dimensions.0,
-                    height: dimensions.1,
-                    data: payload,
-                    pts,
-                    payload_received_at,
-                    ready_at,
-                    rotation_cw_degrees,
-                    visibility_serial,
-                })?;
+                shared.send_video(
+                    Media::Video {
+                        epoch,
+                        codec: active_codec,
+                        width: dimensions.0,
+                        height: dimensions.1,
+                        data: payload,
+                        pts,
+                        payload_received_at,
+                        ready_at,
+                        rotation_cw_degrees,
+                        visibility_serial,
+                    },
+                    || stop.load(Ordering::Acquire),
+                )?;
             }
             1 => {
                 let suspended = super::orientation::configuration_suspended(&header)?;
@@ -590,12 +595,15 @@ fn video_loop(
                         else {format!("{offset}:unrecognized")}
                     }).collect::<Vec<_>>().join(","),
                 ));
-                shared.send_video(Media::VideoConfig {
-                    epoch,
-                    codec: next,
-                    width: dimensions.0,
-                    height: dimensions.1,
-                })?;
+                shared.send_video(
+                    Media::VideoConfig {
+                        epoch,
+                        codec: next,
+                        width: dimensions.0,
+                        height: dimensions.1,
+                    },
+                    || stop.load(Ordering::Acquire),
+                )?;
             }
             2 | 5 => {
                 ensure!(len <= 65536, "mirror status budget");

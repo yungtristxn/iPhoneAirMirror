@@ -38,13 +38,24 @@ pub fn parse_header(data: &[u8]) -> Result<(Request, usize)> {
     );
     let text = std::str::from_utf8(data)?;
     let mut lines = text.split("\r\n");
-    let parts: Vec<_> = lines.next().unwrap_or("").split(' ').collect();
+    let (method, rest) = lines
+        .next()
+        .unwrap_or("")
+        .split_once(' ')
+        .ok_or_else(|| anyhow::anyhow!("request line"))?;
+    let (target, version) = rest
+        .split_once(' ')
+        .ok_or_else(|| anyhow::anyhow!("request line"))?;
+    ensure!(matches!(version, "RTSP/1.0" | "HTTP/1.1"), "request line");
     ensure!(
-        parts.len() == 3 && matches!(parts[2], "RTSP/1.0" | "HTTP/1.1"),
-        "request line"
-    );
-    ensure!(
-        parts[0].len() <= 32 && parts[1].len() <= 1024 && !parts[1].bytes().any(|b| b < 32),
+        !method.is_empty()
+            && method.len() <= 32
+            && method
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+            && !target.is_empty()
+            && target.len() <= 1024
+            && !target.bytes().any(|b| b < 32 || b == 127),
         "request fields"
     );
     let mut headers = BTreeMap::new();
@@ -63,7 +74,10 @@ pub fn parse_header(data: &[u8]) -> Result<(Request, usize)> {
             !k.is_empty() && k.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'),
             "header name"
         );
-        ensure!(!v.bytes().any(|c| c < 32 && c != b'\t'), "header value");
+        ensure!(
+            !v.bytes().any(|c| (c < 32 && c != b'\t') || c == 127),
+            "header value"
+        );
         ensure!(
             headers
                 .insert(k.to_ascii_lowercase(), v.trim().to_string())
@@ -87,15 +101,15 @@ pub fn parse_header(data: &[u8]) -> Result<(Request, usize)> {
     ensure!(len <= MAX_BODY, "body too large");
     if let Some(cseq) = headers.get("cseq") {
         ensure!(
-            cseq.len() <= 10 && cseq.bytes().all(|b| b.is_ascii_digit()),
+            !cseq.is_empty() && cseq.len() <= 10 && cseq.bytes().all(|b| b.is_ascii_digit()),
             "CSeq syntax"
         );
     }
     Ok((
         Request {
-            method: parts[0].into(),
-            target: parts[1].into(),
-            version: parts[2].into(),
+            method: method.into(),
+            target: target.into(),
+            version: version.into(),
             headers,
             body: Vec::new(),
         },
@@ -234,6 +248,31 @@ mod tests {
                 .1,
             164
         );
+    }
+
+    #[test]
+    fn rejects_empty_fields_controls_and_overlong_sequences() {
+        for line in [
+            " /info RTSP/1.0",
+            "POST  RTSP/1.0",
+            "PO\tST /info RTSP/1.0",
+            "POST /in\u{7f}fo RTSP/1.0",
+            "POST /info RTSP/1.0 extra",
+        ] {
+            assert!(parse_header(format!("{line}\r\n\r\n").as_bytes()).is_err());
+        }
+        for field in ["CSeq:", "CSeq: 10000000000", "CSeq: -1", "X-Test: a\u{7f}b"] {
+            assert!(
+                parse_header(format!("POST /info RTSP/1.0\r\n{field}\r\n\r\n").as_bytes()).is_err()
+            );
+        }
+        let (request, length) = parse_header(
+            b"SET_PARAMETER rtsp://127.0.0.1/session RTSP/1.0\r\nCSeq: 9999999999\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(request.method, "SET_PARAMETER");
+        assert_eq!(request.target, "rtsp://127.0.0.1/session");
+        assert_eq!(length, 0);
     }
 
     #[test]

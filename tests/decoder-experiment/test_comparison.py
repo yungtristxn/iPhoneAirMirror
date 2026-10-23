@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -301,6 +301,40 @@ class FileControls(unittest.TestCase):
         path.write_text(json.dumps(report), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "hashes"):
             comparison.load_report(path)
+
+    def test_crashed_decoder_cannot_pass_even_when_it_writes_a_report(self):
+        executable = self.directory / "fake-lab.exe"
+        executable.write_bytes(b"test-only")
+        output = self.directory / "crashed"
+        output.mkdir()
+        (output / "report.json").write_text('{"success": true}', encoding="utf-8")
+        process = Mock()
+        process.wait.return_value = 1
+        process.poll.return_value = 1
+        with patch.object(comparison.subprocess, "run", return_value=Mock(returncode=0)), \
+                patch.object(comparison.subprocess, "Popen", return_value=process):
+            with self.assertRaisesRegex(ValueError, "exited with 1"):
+                comparison.run_backend(executable, output, 1, 10)
+
+    def test_interrupted_decoder_is_stopped_before_leaving_the_test(self):
+        executable = self.directory / "fake-lab.exe"
+        executable.write_bytes(b"test-only")
+        process = Mock()
+        process.wait.side_effect = [KeyboardInterrupt(), -1]
+        process.poll.return_value = None
+        with patch.object(comparison.subprocess, "run", return_value=Mock(returncode=0)), \
+                patch.object(comparison.subprocess, "Popen", return_value=process):
+            with self.assertRaises(KeyboardInterrupt):
+                comparison.run_backend(executable, self.directory / "interrupted", 1, 10)
+        process.kill.assert_called_once()
+
+    def test_cli_rejects_incomplete_and_mixed_input_pairs_before_launch(self):
+        for arguments in [["--reference", "x"], ["--reference-report", "x"],
+                          ["--reference", "x", "--candidate", "y", "--reference-report", "z"],
+                          ["--reference-report", "x", "--candidate-report", "y", "--candidate", "z"]]:
+            with patch.object(comparison.sys, "argv", ["comparison", *arguments]):
+                with self.assertRaisesRegex(ValueError, "exactly one complete"):
+                    comparison.main()
 
 
 if __name__ == "__main__":

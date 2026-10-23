@@ -204,7 +204,7 @@ struct App {
     ComPtr<ID3D11Texture2D> paused_texture,spare_paused_texture;
     ComPtr<IMFSample> spare_paused_sample;
     uint64_t decoder_instances=0;
-    uint64_t decoded = 0, presented = 0, gpu_frames = 0, decoder_surfaces = 0, late_frames = 0, audio_frames = 0, underruns = 0;
+    uint64_t decoded = 0, presented = 0, gpu_frames = 0, decoder_surfaces = 0, late_frames = 0, audio_frames = 0;
     size_t video_high_water=0,audio_high_water=0;
     uint64_t video_waits=0,present_busy=0,submit_calls=0,interactive_skips=0,minimized_skips=0;
     double submit_seconds=0,submit_max_seconds=0,present_seconds=0,present_max_seconds=0;
@@ -760,7 +760,6 @@ void am_show_error(const char* message) { auto s=wide(message);MessageBoxW(nullp
 double am_now() { return now_seconds(); }
 void* am_open(int hidden) { auto a = std::make_unique<App>(); HRESULT hr = a->init(hidden != 0); if (FAILED(hr)) { error_hr("Windows initialization", hr); return nullptr; } return a.release(); }
 void am_close(void* p) { delete static_cast<App*>(p); }
-void am_wake(void* p) { SetEvent(static_cast<App*>(p)->wake.h); }
 void* am_wake_handle(void* p) {
     HANDLE handle=nullptr;
     if (!DuplicateHandle(GetCurrentProcess(), static_cast<App*>(p)->wake.h, GetCurrentProcess(), &handle, EVENT_MODIFY_STATE, FALSE, 0)) return nullptr;

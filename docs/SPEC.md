@@ -66,7 +66,7 @@ Confirmed 2026-10-21: the user wants their own minimal, efficient Windows AirPla
 Exclude recording, remote phone input, USB capture, DLNA, direct URL/HLS playback, standalone music-player features, BLE discovery, startup service, autostart and automatic updating. Necessary AirPlay negotiation/audio transport is still in scope.
 
 ## Preferred design
-Rust and Microsoft's windows bindings. Native DnsServiceRegister for discovery; Media Foundation H.264 decoder with D3D11/DXGI presentation. Keep decoded frames GPU-resident. Use a narrowly scoped screen-audio decoder if the negotiated format requires one; Media Foundation AAC-ELD support must not be assumed.
+Rust host with a narrow Windows SDK C++ bridge. Native DnsServiceRegister for discovery; Media Foundation H.264/HEVC decoding with D3D11/DXGI presentation. Keep decoded frames GPU-resident. Use a narrowly scoped screen-audio decoder if the negotiated format requires one; Media Foundation AAC-ELD support must not be assumed.
 
 Use bounded protocol/session code and an actual restricted worker for retained risky native parsing if feasible. One executable may provide host and worker roles. Prototype OS/codec/isolation compatibility before committing to large abstractions. Document an evidence-backed deviation, rather than silently dropping sound, hardware decoding or protection.
 
@@ -89,12 +89,5 @@ transition boundary. Active-audio requests without a usable cutoff are rejected
 with a reconnect instruction rather than admitting canceled in-flight audio;
 real-phone pause/seek compatibility on the revised build remains a separate check.
 
-## Implementation order
-1. Verify toolchain and minimal Windows discovery/decoder/audio feasibility; establish module boundaries.
-2. Deliver a real vertical slice: iPhone discovery -> negotiation -> decoded picture -> sound.
-3. Complete lifecycle, A/V timing, one-sender behavior and display controls.
-4. Harden input/state/native boundaries, then run focused negative tests and real-device acceptance.
-5. Measure and optimize observed bottlenecks; do not expand product scope.
-
 ## Dependency policy
-Record source URL, pinned revision/version, purpose and license for each imported component. Existing UxPlay-family code is an interoperability reference and may contain the previously identified unsafe paths. A different branch or wrapper is not evidence those paths are fixed. Project distribution licensing remains to be selected when actual dependencies are chosen.
+Record source URL, pinned revision/version, purpose and license for each imported component. Existing UxPlay-family code is an interoperability reference and may contain the previously identified unsafe paths. A different branch or wrapper is not evidence those paths are fixed. Original code is GPL-3.0-only; release-candidate packaging selects FFmpeg and includes matching source/notices. The FDK reference is not release packaged. See THIRD_PARTY.md.

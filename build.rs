@@ -63,6 +63,10 @@ fn ffmpeg_codec() -> String {
         .expect("run scripts/Build-FFmpeg.ps1 before enabling ffmpeg-aac");
     // MSVC's include search does not accept Rust's extended-length path prefix.
     let prefix = std::path::PathBuf::from(prefix.to_string_lossy().trim_start_matches(r"\\?\"));
+    println!(
+        "cargo:rerun-if-changed={}",
+        prefix.join("include").display()
+    );
     println!("cargo:rerun-if-changed=scripts/Verify-FFmpeg.ps1");
     println!("cargo:rerun-if-changed=scripts/ffmpeg-pins.json");
     let verified = std::process::Command::new("pwsh.exe")
@@ -154,7 +158,7 @@ fn ffmpeg_codec() -> String {
     println!("cargo:rustc-link-lib=static=avcodec");
     println!("cargo:rustc-link-lib=static=avutil");
     format!(
-        "{{\"backend\":\"ffmpeg-native-aac-experiment\",\"bridge\":{},\"upstream\":{}}}",
+        "{{\"backend\":\"ffmpeg-native-aac\",\"bridge\":{},\"upstream\":{}}}",
         compiler_provenance(&codec),
         manifest.trim_start_matches('\u{feff}').trim()
     )
@@ -167,7 +171,7 @@ fn main() {
         "AirMirrorLite requires the x86_64-pc-windows-msvc target"
     );
     println!("cargo:rerun-if-changed=native");
-    println!("cargo:rerun-if-changed=vendor");
+    println!("cargo:rerun-if-changed=vendor/playfair");
     println!("cargo:rerun-if-changed=assets/app-icon.ico");
     // Use the installed SDK resource compiler; no new build/runtime dependency.
     let sdk = std::env::var_os("ProgramFiles(x86)").expect("Windows SDK location");
@@ -201,6 +205,7 @@ fn main() {
     let aac_provenance = if std::env::var_os("CARGO_FEATURE_FFMPEG_AAC").is_some() {
         ffmpeg_codec()
     } else {
+        println!("cargo:rerun-if-changed=vendor/fdk-aac");
         let parts = [
             "libAACdec",
             "libSBRdec",

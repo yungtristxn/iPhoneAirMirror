@@ -11,7 +11,6 @@ pub struct Clock {
     reference: Option<(u64, f64)>,
     audio: Option<(u32, u64)>,
     best_rtt: f64,
-    pub updates: u64,
 }
 impl Default for Clock {
     fn default() -> Self {
@@ -31,7 +30,6 @@ impl Clock {
             reference: None,
             audio: None,
             best_rtt: 0.0,
-            updates: 0,
         })
     }
     pub fn observe(&mut self, remote: u64, local: f64, rtt: f64) -> Result<()> {
@@ -51,7 +49,6 @@ impl Clock {
             self.reference = Some((remote, local));
             self.best_rtt = rtt;
         }
-        self.updates += 1;
         Ok(())
     }
     pub fn map(&self, remote: u64) -> Option<f64> {
@@ -124,7 +121,6 @@ mod tests {
         let prior_audio = c.audio(123 + 4410).unwrap();
         let rewound = NTP_EPOCH.wrapping_add(ntp(990.0));
         assert!(c.observe(rewound, 21.0, 0.002).is_err());
-        assert_eq!(c.updates, 1);
         assert_eq!(c.video(ntp(1000.1)), Some(prior_video));
         assert_eq!(c.audio(123 + 4410), Some(prior_audio));
         c.observe(remote.wrapping_add(ntp(1.0)), 21.0, 0.002)
