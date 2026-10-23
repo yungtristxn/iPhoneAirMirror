@@ -69,11 +69,9 @@ once. Normal launches only check the grant and never use an unrestricted fallbac
 ## Controls and picture
 
 A rounded titanium edge and inset glass lip frame the picture. The light control
-rail docks near the phone's upper edge (centered on short landscape windows),
-with evenly sized vector icons, a collapse tab aligned to the sound button and
-a hover volume card. Reset uses a circular arrow; fullscreen uses corner marks.
-Artwork follows monitor DPI; fullscreen removes the bezel. The idle view shows
-a status header and two connection steps, with simpler compact-window layouts.
+rail uses standard Windows icons, stable 44-DIP action targets and a separate
+hide/show control. The idle screen has one waiting message and concise connection
+instructions. Artwork follows monitor DPI; fullscreen removes the bezel.
 
 - Drag the picture to move; bottom-right grip resizes. Double-click/F11 toggles
   fullscreen; `0` restores default size.
@@ -128,3 +126,9 @@ Tests default to silent synthetic fixtures. `--self-test` / `Test-Media.ps1 -Aud
 require an explicit request for sound. `--ui-test-dir` renders generated control
 art only; it cannot export phone frames. The comparison harness is compiled only
 with `decoder-lab`, whose executable cannot start a receiver.
+
+For visual work without an audio output device, use
+`AirMirrorLite.exe --ui-artwork <output-directory>`. This creates a fresh hidden
+scene, checks native controls and exports generated artwork only. It opens no
+receiver, audio endpoint or media session and is not a substitute for the full
+silent media test. Normal receiver startup still requires an audio output.

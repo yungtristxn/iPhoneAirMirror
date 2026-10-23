@@ -2,37 +2,32 @@
 
 Updated: 2026-10-23. Branch: codex/verified-pairing.
 
-## Native interface refinement
+## Researched UI correction
 
-The supplied screenshot showed a tab between rows and icons with differing
-optical sizes. The tab now aligns with sound; the gray connector is removed;
-reset uses a circular arrow distinct from fullscreen. Shared native layout
-metrics keep painting, mouse hit testing, tooltips and UIA rectangles aligned.
-Idle content now includes a status header, device illustration, two connection
-steps and responsive portrait/landscape/compact layouts. No animation timer,
-new dependency or change to the GPU media path. Video/suspension/error states
-still suppress idle artwork.
+The user rejected the illustrated idle screen and explicitly retained the light
+toolbar. Microsoft icon/type guidance, Apple toolbar grouping and Reflector's
+optional interface visibility were researched before edits; references and
+screenshot-specific findings are in RESEARCH.md. Removed the decorative scene,
+navy gradient, badges, cards and duplicated instructions. Standard installed
+Windows glyphs replace hand-drawn command symbols. A separate centered hide
+control cannot be mistaken for a volume dropdown. The waiting view uses concise
+20/14-DIP text; the phone frame, actions and media path remain.
 
-Silent native checks pass 190 GPU surfaces/192 parser-validated units, four
-format handoffs and 480 isolated AAC fixture frames, with zero audio output.
-New checks verify UIA and pointer targets agree and the former middle tab area
-is inactive. Existing hover/drag/cancel, keyboard, collapse, resize, rotation,
-fullscreen, screen-off and no-idle-repaint checks pass. Generated startup-size,
-portrait, landscape, narrow/compact and connecting images were inspected;
-control renders include 100/125/200% DPI. No desktop or phone capture.
-Evidence: local/visual-refinement/final/ and local/visual-refinement-native-final.log.
+Build, 141 Rust tests, strict Clippy and formatting pass. Windows currently has
+no default render endpoint (only a microphone), so the full media test stops at
+GetDefaultAudioEndpoint/0x80070490 before rendering. This is not marked passed.
+A new isolated --ui-artwork route validates hidden native controls, UIA, resize,
+fullscreen, collapse/hover/volume and idle repaint behavior, and exports the real
+idle/control artwork without opening audio or reception. Extra receiver flags
+are rejected; ordinary startup still requires audio. Independent source review
+found no receiver bypass or capture path. No audio/settings changes or Computer Use.
+Generated startup-size/portrait/landscape/compact/narrow and 100/125/200% control
+renders were inspected against the user-supplied image.
+Evidence: local/researched-ui/, local/researched-ui-{rust,clippy,artwork.stdout}.
 
-Source d9e0ec6 is packaged separately at dist/AirMirrorLite-interface-candidate/
-and dist/AirMirrorLite-Windows-x64-interface-2026-10-23.zip with matching source.
-EXE SHA256: F081E412632DB0B92CA42E06F0CDD3FA994BF0543DF20C2CC412E0C8C998C7D4.
-ZIP SHA256: 3B909FF7A4B20E2276726EAA44ADCD492F3D690F83363554A95126143C954656.
-All 4095 ZIP entries pass CRC/SHA256 validation. The exact packaged EXE passes
-the silent native suite; current generated renders are in
-local/visual-refinement/packaged/. The previous visual receiver was closed
-gracefully, and this candidate is open muted with listener/discovery ready.
-Evidence: local/visual-refinement/result.json and packaged-native log.
-Earlier visual FEC663A8..., release 5A11F441... and FFmpeg F928294B... hashes match.
-Physical phone/audio acceptance is unchanged; no Computer Use was used.
+A separately packaged researched candidate is pending; previous interface,
+visual, release and original working fallback executables remain preserved.
+Normal receiver launch needs the user's audio output to be available again.
 
 ## Release-preparation review
 

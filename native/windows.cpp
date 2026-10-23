@@ -227,7 +227,10 @@ struct App {
         if(!DuplicateHandle(GetCurrentProcess(),wake.h,GetCurrentProcess(),&endpoint_notice->wake.h,EVENT_MODIFY_STATE,FALSE,0))return HRESULT_FROM_WIN32(GetLastError());
         CHECK(audio_enumerator->RegisterEndpointNotificationCallback(endpoint_notice.Get()));endpoint_registered=true;return S_OK;
     }
-    HRESULT init(bool hidden) {
+    HRESULT init(bool hidden,bool require_audio=true) {
+        // Only the isolated, hidden artwork exporter may omit endpoint setup.
+        // am_open (normal receiver and media tests) always keeps audio required.
+        if(!require_audio&&!hidden)return E_INVALIDARG;
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         CHECK(CoInitializeEx(nullptr, COINIT_MULTITHREADED)); com = true;
         CHECK(MFStartup(MF_VERSION, MFSTARTUP_FULL)); mf = true;
@@ -239,7 +242,8 @@ struct App {
         if(!presentation_timer.h)presentation_timer.h=CreateWaitableTimerW(nullptr,FALSE,nullptr);
         if(!presentation_timer.h)return HRESULT_FROM_WIN32(GetLastError());
         CHECK(shell.create(wake.h,hidden));window=shell.window;
-        CHECK(init_graphics());CHECK(init_audio_notifications());CHECK(init_audio());
+        CHECK(init_graphics());
+        if(require_audio){CHECK(init_audio_notifications());CHECK(init_audio());}
         if (!hidden) shell.show();
         return S_OK;
     }

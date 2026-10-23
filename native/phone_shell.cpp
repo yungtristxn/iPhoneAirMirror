@@ -47,7 +47,7 @@ PalettePlacement palette_placement(RECT phone,RECT work,float s,bool collapsed,b
     int offset=popup&&!extend_right?FLYOUT_SPACE:0,width=int((base+(popup?FLYOUT_SPACE:0))*s);
     int panel_x=std::clamp<LONG>(x-int(offset*s),work.left,std::max(work.left,work.right-width));
     // Only the neither-side-fits fallback may move the rail when opening a flyout.
-    return {panel_x,y,width,height,offset+(right?0:20),offset+(collapsed?18:right?84:12),extend_right?PALETTE_WIDTH+2:10,right,popup};
+    return {panel_x,y,width,height,offset+(right?0:PALETTE_WIDTH-76),offset+(collapsed?18:right?84:PALETTE_WIDTH-84),extend_right?PALETTE_WIDTH+2:10,right,popup};
 }
 constexpr wchar_t const* labels[]={L"Mute / unmute (M) — hover for volume",L"Restore default size (0)",L"Fullscreen (F11)",L"Close AirMirrorLite (Alt+F4)",L"Hide controls (C)"};
 RECT work_area(HWND hwnd){MONITORINFO mi{sizeof(mi)};GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&mi);return mi.rcWork;}

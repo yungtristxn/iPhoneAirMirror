@@ -17,6 +17,7 @@ fn main() {
                 "--hidden"
                     | "--self-test"
                     | "--ui-test"
+                    | "--ui-artwork"
                     | "--codec-worker"
                     | "--provision-worker"
                     | "--decoder-experiment"
@@ -57,13 +58,26 @@ fn run() -> Result<()> {
             return Ok(());
         }
         println!(
-            "AirMirrorLite\n  --provision-worker provision restricted worker access for this EXE, then exit\n  --ui-test           silent native UI and GPU tests\n  --self-test         full media tests, including an audible test tone\n  --ui-test-dir PATH  with --ui-test or --self-test, render idle/control artwork diagnostics\n  --ui-preview        synthetic video preview; no discovery or network\n  --no-discovery      run without DNS-SD (local integration tests)\n  --fps N            request 30 or 60 fps (default: 60)\n  --latency-ms N     advertised output latency, 60..250 ms (default: 80)\n  --resolution N     request 1080, 1440 or 2160 lines (default: highest native support)\n  --display-width N  display width hint override, even pixels\n  --bind IP           bind a specific local IPv4 address (default: 0.0.0.0)\n  --port PORT         control port (default: 7000)\n  --seconds N         stop after N seconds (validation)\n  --data-dir PATH     receiver data (default: writable EXE/local, otherwise LOCALAPPDATA/AirMirrorLite)\n  --mute              start receiver muted (M or speaker toggles sound)\n  --hidden            hide window during automated validation\n\nWindow: drag to move; bottom-right resize; 0 default size; C hide/show controls; M mute; Up/Down volume; F11 fullscreen; D disconnect; Escape leaves fullscreen/disconnects; close exits."
+            "AirMirrorLite\n  --provision-worker provision restricted worker access for this EXE, then exit\n  --ui-test           silent native UI and GPU tests\n  --ui-artwork PATH   export generated UI only; no audio endpoint or receiver\n  --self-test         full media tests, including an audible test tone\n  --ui-test-dir PATH  with --ui-test or --self-test, render idle/control artwork diagnostics\n  --ui-preview        synthetic video preview; no discovery or network\n  --no-discovery      run without DNS-SD (local integration tests)\n  --fps N            request 30 or 60 fps (default: 60)\n  --latency-ms N     advertised output latency, 60..250 ms (default: 80)\n  --resolution N     request 1080, 1440 or 2160 lines (default: highest native support)\n  --display-width N  display width hint override, even pixels\n  --bind IP           bind a specific local IPv4 address (default: 0.0.0.0)\n  --port PORT         control port (default: 7000)\n  --seconds N         stop after N seconds (validation)\n  --data-dir PATH     receiver data (default: writable EXE/local, otherwise LOCALAPPDATA/AirMirrorLite)\n  --mute              start receiver muted (M or speaker toggles sound)\n  --hidden            hide window during automated validation\n\nWindow: drag to move; bottom-right resize; 0 default size; C hide/show controls; M mute; Up/Down volume; F11 fullscreen; D disconnect; Escape leaves fullscreen/disconnects; close exits."
         );
         return Ok(());
     }
     // Decode-only builds remain incapable of opening a receiver. A separately
     // packaged FFmpeg candidate requires its own physical acceptance evidence.
     ensure_experimental_launch_allowed()?;
+    if args.first().is_some_and(|arg| arg == "--ui-artwork") {
+        anyhow::ensure!(
+            args.len() == 2,
+            "--ui-artwork requires exactly one output directory"
+        );
+        let directory = PathBuf::from(&args[1]);
+        std::fs::create_dir_all(&directory)?;
+        native::render_artwork(&directory.to_string_lossy())?;
+        println!(
+            "PASS: generated native UI artwork and control checks; no audio endpoint, receiver or media session opened."
+        );
+        return Ok(());
+    }
     let mut bind: IpAddr = "0.0.0.0".parse()?;
     let mut port = 7000;
     let mut resolution = None;

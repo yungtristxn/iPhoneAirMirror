@@ -19,6 +19,7 @@ unsafe extern "C" {
     fn am_video_probe(app: *mut c_void, validate: extern "C" fn(*const u8, u32, u32) -> i32)
     -> i32;
     fn am_ui_probe(app: *mut c_void, directory: *const c_char) -> i32;
+    fn am_render_artwork(directory: *const c_char) -> i32;
     fn am_close(app: *mut c_void);
     fn am_wake_handle(app: *mut c_void) -> *mut c_void;
     fn am_signal(handle: *mut c_void);
@@ -109,6 +110,16 @@ pub fn show_error(message: &str) {
 }
 pub fn now() -> f64 {
     unsafe { am_now() }
+}
+
+/// Creates its own hidden native scene and exports generated artwork only.
+/// It cannot access an existing receiver, open audio, or receive phone media.
+pub fn render_artwork(directory: &str) -> Result<()> {
+    let directory = CString::new(directory)?;
+    if unsafe { am_render_artwork(directory.as_ptr()) } == 0 {
+        return Err(error());
+    }
+    Ok(())
 }
 
 /// Wait without taking ownership; the caller must keep the socket open and

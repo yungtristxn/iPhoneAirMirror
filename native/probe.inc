@@ -712,6 +712,47 @@ static HRESULT probe_idle_status_pixels(App* app){
     }
     app->shell.set_status(6,L"");return S_OK;
 }
+static int probe_ui_artwork(App* app,const char* directory) {
+    auto path=wide(directory);HRESULT hr=app->shell.self_test(path.c_str());
+    if(FAILED(hr)){error_hr("native UI regression (line encoded in HRESULT)",hr);return 0;}
+    app->shell.reset_video();
+    app->shell.set_status(1,L"Waiting for picture and sound");
+    if(app->shell.status!=1){error_hr("negotiated session waiting state",E_FAIL);return 0;}
+    app->shell.set_status(0,L"");
+    hr=probe_idle_status_pixels(app);if(FAILED(hr)){error_hr("idle status pixel regression",hr);return 0;}
+    auto file=path+L"/idle.png";hr=app->chrome.layout(app->shell,path.empty()?nullptr:file.c_str());
+    if(FAILED(hr)){error_hr("idle artwork diagnostic",hr);return 0;}
+    if(!path.empty()){
+        app->shell.set_status(1,L"");file=path+L"/connecting.png";hr=app->chrome.layout(app->shell,file.c_str());
+        if(FAILED(hr))return 0;
+        app->shell.set_status(0,L"");
+        SetWindowPos(app->window,nullptr,0,0,364,774,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+        file=path+L"/startup-idle.png";hr=app->chrome.layout(app->shell,file.c_str());if(FAILED(hr))return 0;
+        SetWindowPos(app->window,nullptr,0,0,176,360,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+        file=path+L"/narrow-idle.png";hr=app->chrome.layout(app->shell,file.c_str());if(FAILED(hr))return 0;
+        SendMessageW(app->window,PhoneShell::WM_FORMAT,1920,1080);
+        SendMessageW(app->window,WM_KEYDOWN,'0',0);
+        file=path+L"/landscape-idle.png";hr=app->chrome.layout(app->shell,file.c_str());if(FAILED(hr))return 0;
+        SetWindowPos(app->window,nullptr,0,0,328,188,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+        file=path+L"/compact-idle.png";hr=app->chrome.layout(app->shell,file.c_str());if(FAILED(hr))return 0;
+        SendMessageW(app->window,PhoneShell::WM_FORMAT,498,1080);SendMessageW(app->window,WM_KEYDOWN,'0',0);
+        hr=app->chrome.layout(app->shell);if(FAILED(hr))return 0;
+    }
+    const auto redraws=app->chrome.redraws;
+    for(int i=0;i<20;++i){hr=app->tick();if(FAILED(hr)){error_hr("idle tick regression",hr);return 0;}}
+    if(app->chrome.redraws!=redraws){error_hr("idle chrome repainted without invalidation",E_FAIL);return 0;}
+    return 1;
+}
+extern "C" int am_render_artwork(const char* directory) {
+    if(!directory||!*directory){error_hr("artwork output directory",E_INVALIDARG);return 0;}
+    auto app=std::make_unique<App>();HRESULT hr=app->init(true,false);
+    if(FAILED(hr)){error_hr("artwork initialization",hr);return 0;}
+    const int result=probe_ui_artwork(app.get(),directory);
+    if(app->audio||app->render||app->audio_enumerator||app->endpoint_registered||app->audio_running||app->audio_frames){
+        error_hr("artwork exporter opened audio",E_UNEXPECTED);return 0;
+    }
+    return result;
+}
 extern "C" int am_ui_probe(void* p,const char* directory) {
     // Readiness polling must not consume an asynchronous completion signal.
     {Discovery d;if(!d.done.h)return 0;Discovery::callback(ERROR_SUCCESS,&d,nullptr);
@@ -757,33 +798,5 @@ extern "C" int am_ui_probe(void* p,const char* directory) {
         if(!app->audio_capacity||!std::isfinite(app->audio_latency)||app->audio_latency<0)return 0;
         last_error.clear();
     }
-    auto path=wide(directory);HRESULT hr=app->shell.self_test(path.c_str());
-    if(FAILED(hr)){error_hr("native UI regression (line encoded in HRESULT)",hr);return 0;}
-    app->shell.reset_video();
-    app->shell.set_status(1,L"Waiting for picture and sound");
-    if(app->shell.status!=1){error_hr("negotiated session waiting state",E_FAIL);return 0;}
-    app->shell.set_status(0,L"");
-    hr=probe_idle_status_pixels(app);if(FAILED(hr)){error_hr("idle status pixel regression",hr);return 0;}
-    auto file=path+L"/idle.png";hr=app->chrome.layout(app->shell,path.empty()?nullptr:file.c_str());
-    if(FAILED(hr)){error_hr("idle artwork diagnostic",hr);return 0;}
-    if(!path.empty()){
-        app->shell.set_status(1,L"");file=path+L"/connecting.png";hr=app->chrome.layout(app->shell,file.c_str());
-        if(FAILED(hr))return 0;
-        app->shell.set_status(0,L"");
-        SetWindowPos(app->window,nullptr,0,0,364,774,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
-        file=path+L"/startup-idle.png";hr=app->chrome.layout(app->shell,file.c_str());if(FAILED(hr))return 0;
-        SetWindowPos(app->window,nullptr,0,0,176,360,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
-        file=path+L"/narrow-idle.png";hr=app->chrome.layout(app->shell,file.c_str());if(FAILED(hr))return 0;
-        SendMessageW(app->window,PhoneShell::WM_FORMAT,1920,1080);
-        SendMessageW(app->window,WM_KEYDOWN,'0',0);
-        file=path+L"/landscape-idle.png";hr=app->chrome.layout(app->shell,file.c_str());if(FAILED(hr))return 0;
-        SetWindowPos(app->window,nullptr,0,0,328,188,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
-        file=path+L"/compact-idle.png";hr=app->chrome.layout(app->shell,file.c_str());if(FAILED(hr))return 0;
-        SendMessageW(app->window,PhoneShell::WM_FORMAT,498,1080);SendMessageW(app->window,WM_KEYDOWN,'0',0);
-        hr=app->chrome.layout(app->shell);if(FAILED(hr))return 0;
-    }
-    const auto redraws=app->chrome.redraws;
-    for(int i=0;i<20;++i){hr=app->tick();if(FAILED(hr)){error_hr("idle tick regression",hr);return 0;}}
-    if(app->chrome.redraws!=redraws){error_hr("idle chrome repainted without invalidation",E_FAIL);return 0;}
-    return 1;
+    return probe_ui_artwork(app,directory);
 }

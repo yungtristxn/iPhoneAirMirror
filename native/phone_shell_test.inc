@@ -96,14 +96,14 @@ HRESULT PhoneShell::test_on_ui_thread(const wchar_t* directory){
     UI_REQUIRE(SUCCEEDED(save(L"controls.png")));UI_REQUIRE(SUCCEEDED(save(L"controls-125.png",1.25f)));UI_REQUIRE(SUCCEEDED(save(L"controls-200.png",2)));
     hot_=3;UI_REQUIRE(SUCCEEDED(save(L"close-hover.png")));
     hot_=-1;keyboard_focus_=2;UI_REQUIRE(SUCCEEDED(save(L"keyboard-focus.png")));keyboard_focus_=-1;
-    // Accessibility and mouse input agree after the side tab moved to row one.
+    // Accessibility and mouse input agree for the independent rail disclosure control.
     AccessibilityRequest control_snapshot;accessibility_request(control_snapshot);
     UI_REQUIRE(SUCCEEDED(control_snapshot.result));RECT rail_bounds;GetWindowRect(palette_,&rail_bounds);
     for(int id=1;id<=5;++id){const RECT b=control_snapshot.snapshot.bounds[id];
         POINT center{(b.left+b.right)/2-rail_bounds.left,(b.top+b.bottom)/2-rail_bounds.top};
         UI_REQUIRE(button_at(center)==id-1);
     }
-    UI_REQUIRE(button_at({int(arrow_x_*dpi_scale()),int(108*dpi_scale())})==-1);
+    UI_REQUIRE(button_at({int(arrow_x_*dpi_scale()),int(40*dpi_scale())})==-1);
     click(4);UI_REQUIRE(controls_collapsed_&&!popup_);UI_REQUIRE(SUCCEEDED(save(L"collapsed-idle.png")));
     palette_proc(palette_,WM_MOUSEMOVE,0,point(4));UI_REQUIRE(hot_==4&&!hover_pending_);UI_REQUIRE(SUCCEEDED(save(L"collapsed-hover.png")));
     key(VK_TAB);UI_REQUIRE(keyboard_focus_==4);key(VK_RETURN);UI_REQUIRE(!controls_collapsed_);keyboard_focus_=-1;

@@ -51,6 +51,16 @@ are in DECODER_EXPERIMENT.md.
 `--ui-test-dir` renders generated idle/control artwork, never phone pixels.
 `--self-test` / `Test-Media.ps1 -Audio` are audible and need a new explicit request.
 
+## Artwork without an audio endpoint
+
+`<exe> --ui-artwork <directory>` owns a fresh hidden App scene, invokes the same
+native control/geometry/UIA checks and idle renderer, and exits before receiver
+setup. Its explicit initializer omits endpoint setup; the normal am_open path
+still requires audio. The exporter asserts no audio client, endpoint enumerator,
+playback or submitted samples exist. Sender pixels cannot enter this scene.
+It rejects extra receiver flags and remains disabled in decoder-lab builds.
+This verifies UI/control artwork only, not media decode, playback or phone use.
+
 ## Evidence boundaries
 
 | Check | Establishes | Does not establish |

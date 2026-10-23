@@ -120,18 +120,15 @@ Wire facts only; no proprietary implementation imported:
 ## Controls
 
 Physical picture pixels and logical DPI-scaled UI geometry are separate.
-DirectComposition clips and a narrow gradient bezel frame the video. Direct2D
-paths draw the control icons, while DirectWrite handles labels; icon-font lookup
-is no longer required. The light rail is shoulder-docked with the collapse tab
-aligned to its first row. A shared control_layout.h grid supplies action centers,
-hit targets, tooltip regions and UIA bounds. Reset and fullscreen have distinct
-silhouettes; 44-DIP action targets and keyboard behavior remain. The shell
-fits monitor work areas and keeps the rail accessible. A software status panel
-survives D3D failure. UIA exposes names, roles, focus, invoke/toggle and volume
-through bounded cross-thread requests with safe detach. Idle artwork is isolated
-in idle_artwork.h, adapts to portrait/landscape/compact widths, and is skipped
-for video, screen suspension and error cards. Its gradients and device diagram
-are static native vectors: no new idle timer, bitmap or runtime dependency.
+DirectComposition clips and a narrow gradient bezel frame the video. DirectWrite
+renders installed Segoe Fluent Icons at recommended sizes, with Segoe MDL2 Assets
+fallback on Windows10; fonts are not bundled. Direct2D paints functional control
+surfaces. The light rail has a separate whole-rail disclosure button, not a sound
+submenu. Shared control_layout.h metrics supply action centers, hit targets,
+tooltips and UIA bounds. The shell fits work areas and preserves keyboard access.
+A software status panel survives D3D failure. UIA uses bounded cross-thread
+requests and safe detach. Idle artwork is a compact neutral waiting state and is
+skipped during video, suspension and error display. It has no animation timer.
 
 [Composition swap chain](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/nf-dxgi1_2-idxgifactory2-createswapchainforcomposition),
 [DPI](https://learn.microsoft.com/en-us/windows/win32/direct2d/direct2d-and-high-dpi),
@@ -139,3 +136,36 @@ are static native vectors: no new idle timer, bitmap or runtime dependency.
 
 Implementation/source checks do not establish physical screen-reader behavior,
 device-loss recovery, sustained performance or end-to-end latency.
+
+## UI correction researched before implementation (2026-10-23)
+
+The user's supplied screenshot is evidence for this bounded visual review, not a
+live usability/accessibility audit. No Computer Use or app capture was performed.
+1. Idle view: oversized decorative devices, duplicate readiness information,
+   promotional copy and a tutorial card compete with the receiver's simple task.
+   Correct with one quiet waiting state and concise connection instructions.
+2. Commands: bespoke symbols vary optically; attaching disclosure to sound makes
+   it resemble a volume dropdown. Use installed Windows symbols and a separate
+   whole-rail disclosure control. Keep hit targets, tooltips and UIA in one grid.
+
+The user explicitly chose to keep the light toolbar. Palette preference is not
+prescribed by platform guidelines. The phone frame and media behavior are retained.
+
+Primary references reviewed before any source edit:
+- [Microsoft icons](https://learn.microsoft.com/en-us/windows/apps/develop/ui/controls/icons):
+  recognizable, simple symbols that harmonize with the interface.
+- [Segoe Fluent Icons](https://learn.microsoft.com/en-us/windows/apps/design/iconography/segoe-fluent-icons-font):
+  standard 16/20/24/32-DIP sizes; Windows11 supplies the font. Use the installed
+  Segoe MDL2 Assets fallback on Windows10, without redistributing fonts.
+- [Windows typography](https://learn.microsoft.com/en-us/windows/apps/design/signature-experiences/typography):
+  use a restrained type hierarchy; this view uses 20/28 subtitle and 14/20 body.
+- [Apple toolbar guidance](https://developer.apple.com/design/human-interface-guidelines/toolbars?changes=_2):
+  deliberate commands, stable grouping, and reliably restorable hidden controls.
+  These are interaction principles, not an instruction to copy Apple materials.
+- [Reflector's name/control visibility](https://help.airsquirrels.com/reflector/232-show-or-hide-the-device-name-and-record-button-in-the-reflector-window):
+  secondary interface information may be hidden or revealed on hover. This is
+  documented behavior, not evidence from a live review of that product.
+
+Keyboard behavior, contrast over arbitrary desktop backgrounds and physical
+screen-reader use cannot be established from the supplied screenshot alone.
+Native intrinsic regressions and generated artwork are checked separately.

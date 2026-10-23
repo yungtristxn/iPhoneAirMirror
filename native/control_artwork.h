@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
-#include <initializer_list>
+#include "ui_icons.h"
 #include "control_layout.h"
 using Microsoft::WRL::ComPtr;
 
@@ -21,37 +21,16 @@ struct ControlArtwork {
 };
 
 // Only the small control surface is CPU-backed. Video remains on the GPU.
-// The same vector geometry is used at every DPI, independent of installed icon fonts.
+// Standard Windows glyphs use recommended 20/16-DIP sizes and one common grid.
 class ControlPainter {
     ComPtr<ID2D1Factory> factory;
     ComPtr<ID2D1DCRenderTarget> canvas;
     ComPtr<ID2D1SolidColorBrush> brush;
-    ComPtr<ID2D1StrokeStyle> stroke;
     ComPtr<IDWriteFactory> writing;
-    ComPtr<IDWriteTextFormat> text;
+    ComPtr<IDWriteTextFormat> text,icons,chevrons;
     static constexpr UINT INK=0x303640,SECONDARY=0x626b78,ACCENT=0x2868d8,SURFACE=0xf6f7f9;
 
     void color(UINT rgb,float alpha=1) { brush->SetColor(D2D1::ColorF(rgb,alpha)); }
-    HRESULT line(std::initializer_list<D2D1_POINT_2F> points,bool closed=false,float width=control_layout::icon_stroke) {
-        ComPtr<ID2D1PathGeometry> geometry;
-        HRESULT hr=factory->CreatePathGeometry(&geometry);if(FAILED(hr))return hr;
-        ComPtr<ID2D1GeometrySink> sink;hr=geometry->Open(&sink);if(FAILED(hr))return hr;
-        auto p=points.begin();sink->BeginFigure(*p++,D2D1_FIGURE_BEGIN_HOLLOW);
-        sink->AddLines(p,UINT32(points.size()-1));
-        sink->EndFigure(closed?D2D1_FIGURE_END_CLOSED:D2D1_FIGURE_END_OPEN);
-        hr=sink->Close();if(FAILED(hr))return hr;
-        canvas->DrawGeometry(geometry.Get(),brush.Get(),width,stroke.Get());return S_OK;
-    }
-    HRESULT wave(float x,float y,float height,float depth) {
-        ComPtr<ID2D1PathGeometry> geometry;
-        HRESULT hr=factory->CreatePathGeometry(&geometry);if(FAILED(hr))return hr;
-        ComPtr<ID2D1GeometrySink> sink;hr=geometry->Open(&sink);if(FAILED(hr))return hr;
-        sink->BeginFigure(D2D1::Point2F(x,y-height),D2D1_FIGURE_BEGIN_HOLLOW);
-        sink->AddBezier(D2D1::BezierSegment(D2D1::Point2F(x+depth,y-height*.55f),
-            D2D1::Point2F(x+depth,y+height*.55f),D2D1::Point2F(x,y+height)));
-        sink->EndFigure(D2D1_FIGURE_END_OPEN);hr=sink->Close();if(FAILED(hr))return hr;
-        canvas->DrawGeometry(geometry.Get(),brush.Get(),control_layout::icon_stroke,stroke.Get());return S_OK;
-    }
     void panel(D2D1_RECT_F rect,float radius,float scale) {
         for(int i=4;i>0;--i){
             color(0x111820,.035f);
@@ -66,43 +45,12 @@ class ControlPainter {
             D2D1::RectF(rect.left+inset,rect.top+inset,rect.right-inset,rect.bottom-inset),
             radius-inset,radius-inset),brush.Get(),1/scale);
     }
-    HRESULT icon(int index,float x,float y,bool muted,bool fullscreen) {
-        HRESULT hr=S_OK;
-        if(index==0){
-            hr=line({{x-9,y-3.5f},{x-5,y-3.5f},{x,y-8},{x,y+8},{x-5,y+3.5f},{x-9,y+3.5f}},true);
-            if(FAILED(hr))return hr;
-            if(muted){
-                hr=line({{x+4,y-4},{x+11,y+4}});if(FAILED(hr))return hr;
-                return line({{x+11,y-4},{x+4,y+4}});
-            }
-            hr=wave(x+4,y,3.5f,3);if(FAILED(hr))return hr;
-            return wave(x+7,y,6.5f,5);
-        }
-        if(index==3){
-            hr=line({{x-7,y-7},{x+7,y+7}});if(FAILED(hr))return hr;
-            return line({{x+7,y-7},{x-7,y+7}});
-        }
-        if(index==1){
-            // Reset and fullscreen have distinct silhouettes at small sizes.
-            ComPtr<ID2D1PathGeometry> geometry;hr=factory->CreatePathGeometry(&geometry);if(FAILED(hr))return hr;
-            ComPtr<ID2D1GeometrySink> sink;hr=geometry->Open(&sink);if(FAILED(hr))return hr;
-            sink->BeginFigure(D2D1::Point2F(x-7,y-5),D2D1_FIGURE_BEGIN_HOLLOW);
-            sink->AddBezier(D2D1::BezierSegment({x-1,y-12},{x+9,y-7},{x+9,y+1}));
-            sink->AddBezier(D2D1::BezierSegment({x+9,y+10},{x-5,y+13},{x-9,y+4}));
-            sink->EndFigure(D2D1_FIGURE_END_OPEN);hr=sink->Close();if(FAILED(hr))return hr;
-            canvas->DrawGeometry(geometry.Get(),brush.Get(),control_layout::icon_stroke,stroke.Get());
-            return line({{x-7,y-10},{x-7,y-5},{x-2,y-5}});
-        }
-        const float extent=9.0f,length=5.0f;
-        for(float sx:{-1.0f,1.0f})for(float sy:{-1.0f,1.0f}){
-            const float cx=x+sx*extent,cy=y+sy*extent;
-            if(index==2&&fullscreen)
-                hr=line({{cx,cy-sy*length},{cx-sx*length,cy-sy*length},{cx-sx*length,cy}});
-            else hr=line({{cx-sx*length,cy},{cx,cy},{cx,cy-sy*length}});
-            if(FAILED(hr))return hr;
-        }
-        return S_OK;
+    void icon(int index,float x,float y,bool muted,bool fullscreen) {
+        const wchar_t glyph=index==0?(muted?L'\xe74f':L'\xe767'):index==1?L'\xe9a6':
+            index==2?(fullscreen?L'\xe73f':L'\xe740'):L'\xe711';
+        canvas->DrawText(&glyph,1,icons.Get(),D2D1::RectF(x-12,y-12,x+12,y+12),brush.Get());
     }
+
 public:
     HRESULT draw(HDC dc,const ControlArtwork& a) {
 #define PAINT_TRY(call) do{HRESULT result=(call);if(FAILED(result))return result;}while(0)
@@ -114,11 +62,8 @@ public:
             text->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             text->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         }
-        if(!stroke){
-            auto properties=D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND,D2D1_CAP_STYLE_ROUND,
-                D2D1_CAP_STYLE_ROUND,D2D1_LINE_JOIN_ROUND);
-            PAINT_TRY(factory->CreateStrokeStyle(properties,nullptr,0,&stroke));
-        }
+        if(!icons)PAINT_TRY(create_ui_icon_format(writing.Get(),20,&icons));
+        if(!chevrons)PAINT_TRY(create_ui_icon_format(writing.Get(),16,&chevrons));
         if(!canvas){
             auto properties=D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
                 D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED),96,96);
@@ -129,7 +74,6 @@ public:
         canvas->BeginDraw();canvas->SetTransform(D2D1::Matrix3x2F::Scale(a.scale,a.scale));
         canvas->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
         canvas->Clear(D2D1::ColorF(0,0));
-        HRESULT artwork=S_OK;
         if(a.collapsed){
             // Invisible hover target is retained after the rail collapses.
             color(0,1.0f/255);canvas->FillRectangle(D2D1::RectF(a.arrow_x-12,10,a.arrow_x+12,206),brush.Get());
@@ -142,13 +86,14 @@ public:
         }
         const bool show_arrow=!a.collapsed||a.hot==4||a.focus==4;
         if(show_arrow){
-            const float left=a.collapsed?a.arrow_x-12:a.arrow_x-(a.arrow_left?22:9);
-            const float right=a.collapsed?a.arrow_x+12:a.arrow_x+(a.arrow_left?9:22);
-            panel(D2D1::RectF(left,float(control_layout::arrow_top),right,float(control_layout::arrow_bottom)),11,a.scale);
+            // This acts on the whole rail; do not attach it to the sound button.
+            // A visible gap keeps it distinct from the volume flyout affordance.
+            panel(D2D1::RectF(a.arrow_x-11,float(control_layout::arrow_top+2),
+                a.arrow_x+11,float(control_layout::arrow_bottom-2)),10,a.scale);
         }
         if(!a.collapsed){
             panel(D2D1::RectF(a.rail_x+10,10,a.rail_x+66,206),18,a.scale);
-            for(int i=0;i<4&&SUCCEEDED(artwork);++i){
+            for(int i=0;i<4;++i){
                 const float y=float(control_layout::row_center(i));
                 const bool selected=i==0&&(a.popup||a.muted||a.volume<=0);
                 const auto cell=D2D1::RoundedRect(D2D1::RectF(a.rail_x+control_layout::button_left,y-20,a.rail_x+control_layout::button_right,y+20),12,12);
@@ -158,7 +103,7 @@ public:
                 }
                 if(a.focus==i){color(ACCENT);canvas->DrawRoundedRectangle(cell,brush.Get(),1.5f);}
                 color(i==3&&(a.hot==3||a.focus==3)?0xb82d40:selected?ACCENT:INK);
-                artwork=icon(i,a.rail_x+control_layout::row_x,y,a.muted||a.volume<=0,a.fullscreen);
+                icon(i,a.rail_x+control_layout::row_x,y,a.muted||a.volume<=0,a.fullscreen);
             }
             color(0xd8dde5);canvas->DrawLine(D2D1::Point2F(a.rail_x+24,150.5f),D2D1::Point2F(a.rail_x+52,150.5f),brush.Get(),1/a.scale);
             if(a.popup){
@@ -177,16 +122,15 @@ public:
                 if(a.focus==5){color(ACCENT);canvas->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(left-14,42,right+14,74),8,8),brush.Get(),1.5f);}
             }
         }
-        if(show_arrow&&SUCCEEDED(artwork)){
+        if(show_arrow){
             const float y=float(control_layout::arrow_y);
             if(a.focus==4){color(ACCENT);canvas->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(a.arrow_x-10,y-16,a.arrow_x+10,y+16),9,9),brush.Get(),1.5f);}
             color(a.hot==4||a.focus==4?ACCENT:SECONDARY);
-            const float direction=a.arrow_left?-1.0f:1.0f;
-            artwork=line({{a.arrow_x-direction*2,y-4},{a.arrow_x+direction*2,y},{a.arrow_x-direction*2,y+4}},false,1.6f);
+            const wchar_t glyph=a.arrow_left?L'\xe76b':L'\xe76c';
+            canvas->DrawText(&glyph,1,chevrons.Get(),D2D1::RectF(a.arrow_x-10,y-10,a.arrow_x+10,y+10),brush.Get());
         }
         HRESULT result=canvas->EndDraw();
         if(result==D2DERR_RECREATE_TARGET){brush.Reset();canvas.Reset();}
-        if(FAILED(artwork))return artwork;
         return result;
 #undef PAINT_TRY
     }
