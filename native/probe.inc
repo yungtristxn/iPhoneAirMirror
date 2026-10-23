@@ -706,7 +706,8 @@ static HRESULT probe_idle_status_pixels(App* app){
         bool plain=true;
         for(UINT y=desc.Height/8;y<desc.Height*7/8&&plain;++y)for(UINT x=desc.Width/4;x<desc.Width*3/4;++x){
             const auto pixel=static_cast<const uint8_t*>(mapped.pData)+size_t(y)*mapped.RowPitch+size_t(x)*4;
-            if(pixel[0]!=24||pixel[1]!=19||pixel[2]!=17||pixel[3]!=255){plain=false;break;}
+            if(pixel[0]!=(idle_colors::background&255)||pixel[1]!=((idle_colors::background>>8)&255)||
+               pixel[2]!=((idle_colors::background>>16)&255)||pixel[3]!=255){plain=false;break;}
         }
         app->context->Unmap(readback.Get(),0);if(!plain){error_hr("status idle base contains duplicate artwork",E_FAIL);return E_FAIL;}
     }

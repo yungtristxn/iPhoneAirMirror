@@ -6,6 +6,10 @@
 #include <cwchar>
 #include "ui_icons.h"
 
+namespace idle_colors {
+constexpr UINT background=0x080808,primary=0xe6e6e6,secondary=0xa3a3a3,symbol=0x8c8c8c;
+}
+
 // A quiet waiting state, not an onboarding page. The mirrored image always
 // replaces it completely. There is no animation timer or idle polling.
 inline HRESULT draw_idle_artwork(ID2D1RenderTarget* canvas,IDWriteFactory* writing,
@@ -15,7 +19,7 @@ inline HRESULT draw_idle_artwork(ID2D1RenderTarget* canvas,IDWriteFactory* writi
     const bool narrow=w<240*scale,tiny=w<160*scale,short_window=h<260*scale;
     const bool connecting=state==1;
     ComPtr<ID2D1SolidColorBrush> brush;
-    HRESULT hr=canvas->CreateSolidColorBrush(D2D1::ColorF(0x111318),&brush);
+    HRESULT hr=canvas->CreateSolidColorBrush(D2D1::ColorF(idle_colors::background),&brush);
     if(FAILED(hr))return hr;
     canvas->FillRoundedRectangle(D2D1::RoundedRect(viewport,corner,corner),brush.Get());
     canvas->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
@@ -25,7 +29,7 @@ inline HRESULT draw_idle_artwork(ID2D1RenderTarget* canvas,IDWriteFactory* writi
         hr=create_ui_icon_format(writing,tiny?16*scale:narrow?24*scale:32*scale,&symbol);
         if(FAILED(hr))return hr;
         const wchar_t connect=L'\xe703';
-        brush->SetColor(D2D1::ColorF(0xa9b4c2));
+        brush->SetColor(D2D1::ColorF(idle_colors::symbol));
         canvas->DrawText(&connect,1,symbol.Get(),{cx-24*scale,cy-88*scale,cx+24*scale,cy-40*scale},brush.Get());
     }
     const float pad=(tiny?12.0f:18.0f)*scale;
@@ -48,10 +52,10 @@ inline HRESULT draw_idle_artwork(ID2D1RenderTarget* canvas,IDWriteFactory* writi
     const wchar_t* title=connecting?L"Connecting…":tiny?L"Ready":narrow?L"Ready to\nmirror":L"Ready to mirror";
     const float title_top=cy-(short_window?40:24)*scale;
     const float title_bottom=title_top+(narrow&&!tiny?56:28)*scale;
-    hr=label(title,tiny?16.0f:20.0f,28,21,title_top,title_bottom,0xf1f3f6,DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    hr=label(title,tiny?16.0f:20.0f,28,21,title_top,title_bottom,idle_colors::primary,DWRITE_FONT_WEIGHT_SEMI_BOLD);
     if(FAILED(hr))return hr;
     const wchar_t* hint=connecting?L"Your screen will appear here.":tiny?L"Connect\nfrom iPhone":
         narrow?L"Screen Mirroring\nAirMirrorLite":L"Open Screen Mirroring\nand choose AirMirrorLite.";
     const float hint_top=title_bottom+12*scale;
-    return label(hint,tiny?12.0f:14.0f,20,15,hint_top,hint_top+44*scale,0xaab0bb,DWRITE_FONT_WEIGHT_NORMAL);
+    return label(hint,tiny?12.0f:14.0f,20,15,hint_top,hint_top+44*scale,idle_colors::secondary,DWRITE_FONT_WEIGHT_NORMAL);
 }

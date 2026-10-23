@@ -169,3 +169,18 @@ Primary references reviewed before any source edit:
 Keyboard behavior, contrast over arbitrary desktop backgrounds and physical
 screen-reader use cannot be established from the supplied screenshot alone.
 Native intrinsic regressions and generated artwork are checked separately.
+
+The subsequent interior-color correction removes the residual blue cast from
+the idle canvas, text and glass lip. Microsoft recommends neutral surfaces and
+sparing accent color; its Windows best-practices guidance favors softened dark
+and light tones over pure black/white UI. For this phone-shaped media surface,
+the chosen fixed idle palette is #080808, #E6E6E6 primary, #A3A3A3 secondary and
+#8C8C8C icon. These exact shades are a design choice, not prescribed platform
+tokens. The light toolbar retains its chosen colors. Media pixels and the true
+black suspension surface are unaffected.
+[Windows color](https://learn.microsoft.com/en-us/windows/apps/design/signature-experiences/color),
+[Windows visual style](https://learn.microsoft.com/en-us/windows/apps/get-started/best-practices).
+Primary/secondary text contrast is 16.05:1 / 7.94:1 against the idle background,
+using the [W3C contrast calculation](https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum.html).
+This is a palette measurement, not full accessibility or physical-display
+certification. Generated native artwork verifies neutral interior RGB values.

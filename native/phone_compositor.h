@@ -136,7 +136,7 @@ struct PhoneCompositor {
             brush->SetColor(D2D1::ColorF(0xffffff,.38f));canvas->DrawRoundedRectangle(outer,brush.Get(),1.0f);
             const float lip=2.5f*s;
             auto glass=D2D1::RoundedRect(D2D1::RectF(lip,lip,float(w)-lip,float(h)-lip),radius-lip,radius-lip);
-            brush->SetColor(D2D1::ColorF(0x080a0e));canvas->FillRoundedRectangle(glass,brush.Get());
+            brush->SetColor(D2D1::ColorF(0x050505));canvas->FillRoundedRectangle(glass,brush.Get());
             brush->SetColor(D2D1::ColorF(0x000000,.75f));canvas->DrawRoundedRectangle(glass,brush.Get(),1.0f);
         }
         if(!shell.fullscreen){
@@ -149,7 +149,7 @@ struct PhoneCompositor {
             }
         }
         if(!shell.has_video){
-            brush->SetColor(D2D1::ColorF(0x111318));
+            brush->SetColor(D2D1::ColorF(idle_colors::background));
             auto screen=D2D1::RoundedRect(D2D1::RectF(rim,rim,float(w)-rim,float(h)-rim),cr,cr);
             canvas->FillRoundedRectangle(screen,brush.Get());
             // The graphics-independent error card owns recovery/failure text.

@@ -2,40 +2,29 @@
 
 Updated: 2026-10-23. Branch: codex/verified-pairing.
 
-## Researched UI correction
+## Neutral phone interior
 
-The user rejected the illustrated idle screen and explicitly retained the light
-toolbar. Microsoft icon/type guidance, Apple toolbar grouping and Reflector's
-optional interface visibility were researched before edits; references and
-screenshot-specific findings are in RESEARCH.md. Removed the decorative scene,
-navy gradient, badges, cards and duplicated instructions. Standard installed
-Windows glyphs replace hand-drawn command symbols. A separate centered hide
-control cannot be mistaken for a volume dropdown. The waiting view uses concise
-20/14-DIP text; the phone frame, actions and media path remain.
+Researched Windows color guidance and W3C contrast before the color-only change.
+The idle screen now uses neutral near-black #080808, soft white #E6E6E6 and gray
+#A3A3A3 text, replacing the blue-tinted charcoal. The inner glass lip is neutral
+too. The requested light toolbar and compact waiting layout are retained.
+Research, rationale and source links: RESEARCH.md.
 
-Build, 141 Rust tests, strict Clippy and formatting pass. Windows currently has
-no default render endpoint (only a microphone), so the full media test stops at
-GetDefaultAudioEndpoint/0x80070490 before rendering. This is not marked passed.
-A new isolated --ui-artwork route validates hidden native controls, UIA, resize,
-fullscreen, collapse/hover/volume and idle repaint behavior, and exports the real
-idle/control artwork without opening audio or reception. Extra receiver flags
-are rejected; ordinary startup still requires audio. Independent source review
-found no receiver bypass or capture path. No audio/settings changes or Computer Use.
-Generated startup-size/portrait/landscape/compact/narrow and 100/125/200% control
-renders were inspected against the user-supplied image.
-Evidence: local/researched-ui/, local/researched-ui-{rust,clippy,artwork.stdout}.
+Release build and existing silent --ui-artwork checks pass: native controls,
+UIA, resize/fullscreen, collapse/hover/volume, status backgrounds and idle repaint.
+Six idle renders changed; all eleven control renders match the previous build.
+Compared before/after startup, connecting and narrow layouts; the rendered
+interior has equal RGB channels. Measured text contrast: primary 16.05:1,
+secondary 7.94:1. These are palette/artwork checks, not full accessibility or
+physical iPhone/media acceptance. Evidence: local/neutral-interior/result.json,
+local/neutral-interior/{build.log,before/,after/}.
 
-Packaged from clean source 10754c9; the exact packaged EXE passes the isolated
-artwork/control checks and all 17 generated PNGs match the inspected build.
-Candidate: dist/AirMirrorLite-researched-ui-candidate/AirMirrorLite.exe
-SHA256: 4920568F2BEC1D597C2046BBC507874D4F0BEB0534C6848DAC9FF6619CF24955.
-Source-complete ZIP: dist/AirMirrorLite-Windows-x64-researched-ui-2026-10-23.zip
-SHA256: 104CC25F8C6EB9BDD635C27EFEA5CFBC701DD3FC2211E9BA2239AB53E313ED3B.
-All 4096 ZIP entries verified; source provenance is in BUILD.json. Eight previous
-interface/release/working fallback EXEs retain their hashes. Receipt:
-local/researched-ui/result.json; renders: local/researched-ui/packaged/.
-No receiver is running. Next: when an output device is available, run silent
-media validation and reopen muted. No new physical iPhone/audio evidence claimed.
+Windows still exposes only a microphone and no render endpoint. Full media
+validation remains unavailable (previous GetDefaultAudioEndpoint/0x80070490);
+normal receiver startup still requires audio. No sound, Computer Use, Windows
+settings changes or receiver launch. A fresh source-complete package is pending.
+Previous researched/UI/release and working fallbacks are preserved. Next: when
+an output device is available, run silent media validation and reopen muted.
 
 ## Release-preparation review
 
