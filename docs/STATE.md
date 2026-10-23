@@ -17,18 +17,39 @@ Source review findings (README encoding and legacy discovery-trace default) fixe
 Evidence: local/release-branding/. No sound playback or Computer Use.
 
 A per-user installer wraps the same source-complete portable payload, preserving
-user data. Eight installer policy tests pass. A missing-DLL native fixture now
-fails preflight before app/data writes; post-copy preparation failure returns
-exit 20 with repair guidance and a working uninstaller instead of false success.
-The bounded, hidden process helper is reviewed against the pinned Inno 6.7.1
-i386 ABI. Test installers enforce exact workspace paths, reject links and refuse
-unowned destinations. Initial real-payload install/upgrade/uninstall checks
-preserved data and an unrelated file; final artifact regeneration is pending.
-Evidence: local/installer-missing-runtime-evidence/,
-local/installer-post-copy-failure-evidence/, local/installer-negative-a8226fb0fc/.
-Full media/phone audio acceptance remains separate; no default Windows audio
-output is available. No GitHub remote exists, no publication occurred and no
-signing key was used.
+user data. Eight installer policy tests pass. Missing-DLL preflight fails before
+app/data writes; a post-copy preparation failure returns exit 20 with repair
+guidance and a working uninstaller. The bounded hidden helper is reviewed against
+pinned Inno 6.7.1/i386. Path override, junction, denied-listing and ownership
+fixtures pass. Final workspace install/upgrade/uninstall validates 4105 files,
+the worker ACL and retention of changed settings/data and an unrelated file.
+The production installer was compiled/structurally verified; only the separate
+workspace variant was installed (no production shortcuts or Apps registration).
+
+The audio outputs subsequently returned. The exact final receiver now passes
+silent native/GPU/codec checks: 190 hardware surfaces, 192 validated access units,
+four retained-frame handoffs and 480 AAC-ELD/LC fixture frames; zero audio samples
+submitted. Loopback control, three ownership cycles, listener shutdown and
+owned-copy worker deployment also pass. No physical phone/audio acceptance is
+inferred. Ten earlier fallback executable hashes remain unchanged.
+
+Built from clean source 45b397a. Final local beta assets:
+- dist/iPhoneAirMirror-0.1.0-beta.1-windows-x64-portable.zip (4100 verified entries)
+  SHA256: 8D167D597DF96E4E0F09C439C82BEE539E6C9909971D734CDCAD8D7A730155D3.
+- dist/iPhoneAirMirror-0.1.0-beta.1-windows-x64-setup.exe
+  SHA256: 5936C82E315B3773980E0D3F4CEF672A8788ECC5610F92588307E6F7AF62F19E.
+- Both use receiver SHA256:
+  2708C3D9508A71CFC3AE118FBB1E3C8DC8F25E140D7AD8AE3FB4B9AE43BB0AD2.
+Adjacent versioned SHA256SUMS/release-notes files are ready. Actual executable
+and installer signing status: NotSigned. Earlier unpublished drafts are preserved
+under work/release-draft-*; working fallback folders were not moved.
+
+Final receipt: local/release-branding/final-result.json. Installer evidence:
+local/installer-final-lifecycle-evidence-20261023/result.json and the missing-
+runtime/post-copy-failure/negative fixture folders. Native/control evidence:
+local/release-branding/final-{native-result.json,media.log,control.log,worker.log}.
+No GitHub remote exists and nothing was uploaded. Next: select the target repo
+and review the local beta assets/notes before any GitHub draft or publication.
 
 ## Neutral phone interior
 
@@ -47,10 +68,10 @@ secondary 7.94:1. These are palette/artwork checks, not full accessibility or
 physical iPhone/media acceptance. Evidence: local/neutral-interior/result.json,
 local/neutral-interior/{build.log,before/,after/}.
 
-Windows still exposes only a microphone and no render endpoint. Full media
-validation remains unavailable (previous GetDefaultAudioEndpoint/0x80070490);
-normal receiver startup still requires audio. No sound, Computer Use, Windows
-settings changes or receiver launch.
+At this earlier color checkpoint Windows exposed only a microphone and no render
+endpoint, blocking full media validation (GetDefaultAudioEndpoint/0x80070490).
+The later beta check above supersedes that environmental limitation. No sound,
+Computer Use, Windows settings changes or interactive receiver launch occurred.
 
 Packaged clean source e681e95. Exact packaged EXE passes the silent UI checks;
 all 17 PNGs match the inspected build. All 4096 ZIP entries verified.
