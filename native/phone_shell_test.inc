@@ -94,6 +94,8 @@ HRESULT PhoneShell::test_on_ui_thread(const wchar_t* directory){
     for(int i=0;i<25;++i)key(VK_UP);UI_REQUIRE(volume==1);
     hot_=-1;keyboard_focus_=-1;place_palette();
     UI_REQUIRE(SUCCEEDED(save(L"controls.png")));UI_REQUIRE(SUCCEEDED(save(L"controls-125.png",1.25f)));UI_REQUIRE(SUCCEEDED(save(L"controls-200.png",2)));
+    hot_=3;UI_REQUIRE(SUCCEEDED(save(L"close-hover.png")));
+    hot_=-1;keyboard_focus_=2;UI_REQUIRE(SUCCEEDED(save(L"keyboard-focus.png")));keyboard_focus_=-1;
     click(4);UI_REQUIRE(controls_collapsed_&&!popup_);UI_REQUIRE(SUCCEEDED(save(L"collapsed-idle.png")));
     palette_proc(palette_,WM_MOUSEMOVE,0,point(4));UI_REQUIRE(hot_==4&&!hover_pending_);UI_REQUIRE(SUCCEEDED(save(L"collapsed-hover.png")));
     key(VK_TAB);UI_REQUIRE(keyboard_focus_==4);key(VK_RETURN);UI_REQUIRE(!controls_collapsed_);keyboard_focus_=-1;

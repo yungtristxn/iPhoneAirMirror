@@ -2,6 +2,28 @@
 
 Updated: 2026-10-23. Branch: codex/verified-pairing.
 
+## Native visual polish
+
+The supplied ApowerMirror image informed a restrained titanium bezel, deeper
+rounded corners, an inset black glass lip and a more visible corner resize grip.
+A light shoulder-docked rail uses consistent native vector icons, a connected
+collapse tab, blue volume state and a matching hover flyout. Existing controls,
+keyboard/UIA behavior and native GPU video path are retained; fullscreen has no
+bezel. No extra media features or bitmap/UI framework dependencies were added.
+
+Silent native validation passes 190 GPU surfaces/192 parser-validated units,
+four format handoffs and 480 isolated AAC fixture decodes with zero audio output.
+Intrinsic checks cover resize/rotation/fullscreen, collapse/expand, hover/drag/
+cancel/mute, keyboard/UIA, monitor edges and no idle repaint/allocation churn.
+Generated artwork at 100/125/200% DPI and portrait/landscape/compact sizes was
+visually inspected. These are idle/control renders, not desktop or phone capture.
+Evidence: local/visual-polish/final/ and local/visual-polish-native-final.log.
+
+A new visual candidate will be packaged separately; the previous release
+candidate and all existing fallback executables remain preserved. No phone or
+sound acceptance is claimed for this visual change. Tests remain silent and no
+Computer Use is used.
+
 ## Release-preparation review
 
 Four scoped reviews plus an independent integration check completed. Fixed normal

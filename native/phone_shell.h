@@ -38,7 +38,7 @@ public:
     bool idle_artwork_visible() const {return !screen_blank.load()&&!has_video.load()&&status.load()<3;}
     float gain() const {return muted.load()?0.0f:volume.load();}
     float dpi_scale() const;
-    static int rim_pixels(float scale){return std::max(2,int(3*scale+.5f));}
+    static int rim_pixels(float scale){return std::max(5,int(7*scale+.5f));}
     static float corner_radius(UINT width,UINT height,float scale);
     static constexpr UINT WM_SHUTDOWN=WM_APP+1, WM_FORMAT=WM_APP+2, WM_REFRESH=WM_APP+3, WM_SHOW=WM_APP+4, WM_TEST=WM_APP+5,
         WM_SOURCE_FORMAT=WM_APP+6, WM_SOURCE_RESET=WM_APP+7, WM_ACCESSIBILITY=WM_APP+8;

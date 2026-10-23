@@ -15,7 +15,7 @@ namespace {
 constexpr DWORD WINDOW_STYLE=WS_POPUP|WS_THICKFRAME|WS_SYSMENU|WS_MINIMIZEBOX;
 constexpr int PALETTE_WIDTH=96, BODY_HEIGHT=196, BUTTON_STEP=44, FLYOUT_WIDTH=212, FLYOUT_SPACE=224;
 constexpr UINT_PTR HIDE_VOLUME=1;
-constexpr int RAIL_GAP=4,WORK_MARGIN=12;
+constexpr int RAIL_GAP=0,WORK_MARGIN=12;
 int rail_clearance(float s){return int(std::ceil((PALETTE_WIDTH+RAIL_GAP+WORK_MARGIN)*s));}
 bool toggles_fullscreen(WPARAM command,bool fullscreen,bool minimized){
     const WPARAM action=command&0xfff0;
@@ -38,7 +38,10 @@ PalettePlacement palette_placement(RECT phone,RECT work,float s,bool collapsed,b
     bool right=fullscreen||right_space>=expanded||(left_space<expanded&&right_space>=left_space);
     int x=fullscreen?phone.right-base_px-int(WORK_MARGIN*s):right?phone.right+gap:phone.left-base_px-gap;
     x=std::clamp<LONG>(x,work.left,std::max(work.left,work.right-base_px));
-    int height=int((BODY_HEIGHT+20)*s),y=std::clamp<LONG>(phone.top+(phone.bottom-phone.top-height)/2,work.top,std::max(work.top,work.bottom-height));
+    const int height=int((BODY_HEIGHT+20)*s);
+    // Anchor near the phone's shoulder; short landscape windows stay centered.
+    const int inset=std::min(int(80*s),int(phone.bottom-phone.top-height)/2);
+    const int y=std::clamp<LONG>(phone.top+inset,work.top,std::max(work.top,work.bottom-height));
     popup=popup&&int((base+FLYOUT_SPACE)*s)<=work.right-work.left;
     bool extend_right=x+int((base+FLYOUT_SPACE)*s)<=work.right;
     int offset=popup&&!extend_right?FLYOUT_SPACE:0,width=int((base+(popup?FLYOUT_SPACE:0))*s);
@@ -85,7 +88,7 @@ public:
 };
 PhoneShell::PhoneShell()=default;
 PhoneShell::~PhoneShell(){shutdown();}
-float PhoneShell::corner_radius(UINT width,UINT height,float s){return std::clamp(float(std::min(width,height))*.105f,20*s,36*s);}
+float PhoneShell::corner_radius(UINT width,UINT height,float s){return std::clamp(float(std::min(width,height))*.135f,24*s,58*s);}
 float PhoneShell::dpi_scale() const {return window?GetDpiForWindow(window)/96.0f:1.0f;}
 void PhoneShell::signal(){redraw=true;chrome_dirty=true;if(wake_)SetEvent(wake_);}
 HRESULT PhoneShell::create(HANDLE wake,bool hidden){

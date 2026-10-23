@@ -68,6 +68,11 @@ once. Normal launches only check the grant and never use an unrestricted fallbac
 
 ## Controls and picture
 
+A rounded titanium edge and inset glass lip frame the picture. The light control
+rail docks near the phone's upper edge (centered on short landscape windows),
+with consistent vector icons, a connected collapse tab and a hover volume card.
+Artwork follows monitor DPI; fullscreen removes the bezel.
+
 - Drag the picture to move; bottom-right grip resizes. Double-click/F11 toggles
   fullscreen; `0` restores default size.
 - Speaker/M toggles mute; hover opens the volume slider. Up/Down changes volume.

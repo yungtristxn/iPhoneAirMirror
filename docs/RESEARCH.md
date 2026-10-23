@@ -120,14 +120,16 @@ Wire facts only; no proprietary implementation imported:
 ## Controls
 
 Physical picture pixels and logical DPI-scaled UI geometry are separate.
-DirectComposition clips and Direct2D/system fonts render controls. The shell
+DirectComposition clips and a narrow gradient bezel frame the video. Direct2D
+paths draw the control icons, while DirectWrite handles labels; icon-font lookup
+is no longer required. The light rail is shoulder-docked with a connected hide
+tab, 44-DIP action targets and unchanged keyboard/accessibility semantics. The shell
 fits monitor work areas and keeps the rail accessible. A software status panel
 survives D3D failure. UIA exposes names, roles, focus, invoke/toggle and volume
 through bounded cross-thread requests with safe detach.
 
 [Composition swap chain](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/nf-dxgi1_2-idxgifactory2-createswapchainforcomposition),
 [DPI](https://learn.microsoft.com/en-us/windows/win32/direct2d/direct2d-and-high-dpi),
-[icons](https://learn.microsoft.com/en-us/windows/apps/design/iconography/segoe-fluent-icons-font),
 [hover guidance](https://learn.microsoft.com/en-us/windows/win32/uxguide/ctrl-tooltips-and-infotips).
 
 Implementation/source checks do not establish physical screen-reader behavior,

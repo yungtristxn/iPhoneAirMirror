@@ -116,15 +116,34 @@ struct PhoneCompositor {
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED),96,96);
         ComPtr<ID2D1RenderTarget> canvas;CHECK(drawing->CreateDxgiSurfaceRenderTarget(surface.Get(),&properties,&canvas));
         ComPtr<ID2D1SolidColorBrush> brush;CHECK(canvas->CreateSolidColorBrush(D2D1::ColorF(0x22242a),&brush));
+        const D2D1_GRADIENT_STOP metal_stops[]={
+            {0,D2D1::ColorF(0xb9bec6)},{.24f,D2D1::ColorF(0x727883)},
+            {.52f,D2D1::ColorF(0xa5aab3)},{.78f,D2D1::ColorF(0x5c626d)},
+            {1,D2D1::ColorF(0x969da7)}};
+        ComPtr<ID2D1GradientStopCollection> metal_colors;
+        CHECK(canvas->CreateGradientStopCollection(metal_stops,ARRAYSIZE(metal_stops),&metal_colors));
+        ComPtr<ID2D1LinearGradientBrush> metal;
+        CHECK(canvas->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(
+            D2D1::Point2F(0,0),D2D1::Point2F(float(w),float(h))),metal_colors.Get(),&metal));
         canvas->BeginDraw();canvas->Clear(D2D1::ColorF(0,0));
         auto outer=D2D1::RoundedRect(D2D1::RectF(.5f,.5f,float(w)-.5f,float(h)-.5f),radius,radius);
-        canvas->FillRoundedRectangle(outer,brush.Get());brush->SetColor(D2D1::ColorF(0x888d98,.28f));canvas->DrawRoundedRectangle(outer,brush.Get(),1.0f);
+        // A narrow titanium edge and an inset glass lip add depth outside the
+        // video rectangle. All resize/aspect math uses the same rim inset.
+        canvas->FillRoundedRectangle(outer,shell.fullscreen?static_cast<ID2D1Brush*>(brush.Get()):metal.Get());
         if(!shell.fullscreen){
-            // A subtle curved grip sits in the rim, outside the video content.
-            brush->SetColor(D2D1::ColorF(0xabb3c0,.55f));float grip=radius-1.5f*s;
-            for(int degrees=35;degrees<60;degrees+=5){
+            brush->SetColor(D2D1::ColorF(0xffffff,.38f));canvas->DrawRoundedRectangle(outer,brush.Get(),1.0f);
+            const float lip=2.5f*s;
+            auto glass=D2D1::RoundedRect(D2D1::RectF(lip,lip,float(w)-lip,float(h)-lip),radius-lip,radius-lip);
+            brush->SetColor(D2D1::ColorF(0x080a0e));canvas->FillRoundedRectangle(glass,brush.Get());
+            brush->SetColor(D2D1::ColorF(0x000000,.75f));canvas->DrawRoundedRectangle(glass,brush.Get(),1.0f);
+        }
+        if(!shell.fullscreen){
+            // Two short curved marks remain inside the draggable bezel.
+            brush->SetColor(D2D1::ColorF(0xe4e8ee,.8f));
+            for(float inset:{1.3f,3.6f})for(int degrees=35;degrees<60;degrees+=5){
+                const float grip=radius-inset*s;
                 float a=degrees*3.14159265f/180,b=(degrees+5)*3.14159265f/180;
-                canvas->DrawLine(D2D1::Point2F(w-radius+grip*std::cos(a),h-radius+grip*std::sin(a)),D2D1::Point2F(w-radius+grip*std::cos(b),h-radius+grip*std::sin(b)),brush.Get(),std::max(1.0f,s));
+                canvas->DrawLine(D2D1::Point2F(w-radius+grip*std::cos(a),h-radius+grip*std::sin(a)),D2D1::Point2F(w-radius+grip*std::cos(b),h-radius+grip*std::sin(b)),brush.Get(),std::max(1.0f,.9f*s));
             }
         }
         if(!shell.has_video){
@@ -135,22 +154,29 @@ struct PhoneCompositor {
             // Error/recovery text belongs solely to the graphics-independent
             // status card. Idle labels must not bleed out from underneath it.
             if(shell.idle_artwork_visible()){
-            brush->SetColor(D2D1::ColorF(0x8f9baa));
             const bool compact=h<340*s;
-            if(!compact){auto phone=D2D1::RoundedRect(D2D1::RectF(cx-17*scale,cy-111*scale,cx+17*scale,cy-53*scale),7*scale,7*scale);
-            canvas->DrawRoundedRectangle(phone,brush.Get(),1.7f*scale);
-            canvas->DrawLine(D2D1::Point2F(cx-5*scale,cy-60*scale),D2D1::Point2F(cx+5*scale,cy-60*scale),brush.Get(),1.5f*scale);}
+            if(!compact){
+                auto tile=D2D1::RoundedRect(D2D1::RectF(cx-34*scale,cy-126*scale,cx+34*scale,cy-58*scale),19*scale,19*scale);
+                brush->SetColor(D2D1::ColorF(0x1c2a3f));canvas->FillRoundedRectangle(tile,brush.Get());
+                brush->SetColor(D2D1::ColorF(0x4d709f,.4f));canvas->DrawRoundedRectangle(tile,brush.Get(),scale);
+                brush->SetColor(D2D1::ColorF(0x8ebaff));
+                canvas->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(cx-1*scale,cy-108*scale,cx+20*scale,cy-78*scale),4*scale,4*scale),brush.Get(),1.8f*scale);
+                auto phone=D2D1::RoundedRect(D2D1::RectF(cx-19*scale,cy-114*scale,cx+3*scale,cy-70*scale),6*scale,6*scale);
+                brush->SetColor(D2D1::ColorF(0x1c2a3f));canvas->FillRoundedRectangle(phone,brush.Get());
+                brush->SetColor(D2D1::ColorF(0xe8f0ff));canvas->DrawRoundedRectangle(phone,brush.Get(),1.8f*scale);
+                canvas->DrawLine(D2D1::Point2F(cx-12*scale,cy-76*scale),D2D1::Point2F(cx-4*scale,cy-76*scale),brush.Get(),1.5f*scale);
+            }
             auto label=[&](const wchar_t* text,float font,float y,float box_h,UINT color,DWRITE_FONT_WEIGHT weight){
                 ComPtr<IDWriteTextFormat> format;
                 if(FAILED(writing->CreateTextFormat(L"Segoe UI",nullptr,weight,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,font*scale,L"en-us",&format)))return;
                 format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 brush->SetColor(D2D1::ColorF(color));canvas->DrawText(text,UINT32(wcslen(text)),format.Get(),D2D1::RectF(18*scale,y,float(w)-18*scale,y+box_h*scale),brush.Get());
             };
-            label(L"AirMirrorLite",11,cy-(compact?63:33)*scale,24,0x9299a6,DWRITE_FONT_WEIGHT_MEDIUM);
+            label(L"AirMirrorLite",12,cy-(compact?63:35)*scale,24,0xa8b2c1,DWRITE_FONT_WEIGHT_MEDIUM);
             const int state=shell.status;
-            label(state==1?L"Connecting…":L"Ready to mirror",23,cy-(compact?35:2)*scale,35,0xf1f2f6,DWRITE_FONT_WEIGHT_SEMI_BOLD);
-            label(state==1?L"Your screen will appear here":L"Open Screen Mirroring\non your iPhone",12,cy+(compact?8:44)*scale,42,0x939aa7,DWRITE_FONT_WEIGHT_NORMAL);
-            if(!compact)label(L"Drag to move  ·  Resize from the corner",10,float(h)-66*scale,24,0x666e7b,DWRITE_FONT_WEIGHT_NORMAL);
+            label(state==1?L"Connecting…":L"Ready to mirror",24,cy-(compact?35:2)*scale,35,0xf5f7fb,DWRITE_FONT_WEIGHT_SEMI_BOLD);
+            label(state==1?L"Your screen will appear here":L"Open Screen Mirroring\non your iPhone",13,cy+(compact?8:44)*scale,44,0x9aa6b7,DWRITE_FONT_WEIGHT_NORMAL);
+            if(!compact)label(L"Drag to move  ·  Corner to resize",11,float(h)-66*scale,24,0x7e8999,DWRITE_FONT_WEIGHT_NORMAL);
             }
         }
         CHECK(canvas->EndDraw());if(diagnostic_path){CHECK(save_idle_artwork(surface.Get(),diagnostic_path));}
