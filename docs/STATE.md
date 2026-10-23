@@ -22,9 +22,17 @@ local/neutral-interior/{build.log,before/,after/}.
 Windows still exposes only a microphone and no render endpoint. Full media
 validation remains unavailable (previous GetDefaultAudioEndpoint/0x80070490);
 normal receiver startup still requires audio. No sound, Computer Use, Windows
-settings changes or receiver launch. A fresh source-complete package is pending.
-Previous researched/UI/release and working fallbacks are preserved. Next: when
-an output device is available, run silent media validation and reopen muted.
+settings changes or receiver launch.
+
+Packaged clean source e681e95. Exact packaged EXE passes the silent UI checks;
+all 17 PNGs match the inspected build. All 4096 ZIP entries verified.
+Candidate: dist/AirMirrorLite-neutral-interior-candidate/AirMirrorLite.exe
+SHA256: A83487B668FE2CCC29534CF71E70FB6ACB5A148C8EB21F9ABF028C8FF36C81FE.
+ZIP: dist/AirMirrorLite-Windows-x64-neutral-interior-2026-10-23.zip
+SHA256: A26E24B80439E2FE9D81F9CAAB9581EB3C3E6CC6F22E3B60704ED2A5672FFCE0.
+Nine prior researched/UI/release/working fallback EXEs retain their hashes.
+Next: when an output device is available, run silent media validation and reopen
+muted. No new physical iPhone/audio acceptance is claimed.
 
 ## Release-preparation review
 
