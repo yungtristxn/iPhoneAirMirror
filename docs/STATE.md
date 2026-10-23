@@ -31,7 +31,7 @@ Silent verification:
   8B7F1EB3DA3F279C50FF3AC99D6E226FA000679378403C996A4C5C8FC15D531A.
 - FFmpeg C-ABI guards/canaries pass for ELD and LC; 7 packaging-policy,
   7 metadata and 20 decoder-analyzer tests pass. Not whole-FFmpeg ASan coverage.
-- Initial restricted test-host socket attempts returned10013. The same suites
+- Initial restricted test-host socket attempts returned 10013. The same suites
   passed with ordinary desktop permissions; no protection setting was changed.
 
 Evidence: local/release-review/; local/media-test/result.json;
@@ -46,10 +46,29 @@ architecture, validation, decoder and state guides. Removed two obsolete scripts
 and 13 verified duplicate staging/reference directories (653,524,646 bytes).
 Original fallback packages, private evidence and the local review ZIP remain.
 
-Prepared package destinations: dist/AirMirrorLite-release-candidate/ and
-AirMirrorLite-Windows-x64-release-candidate-2026-10-23.zip under dist/.
-Their BUILD.json and adjacent verification report are the artifact authorities;
-releaseQualified remains false until the physical gates below are completed.
+## Verified release-candidate artifacts
+
+Source commit 365ea7f (clean snapshot) produced:
+- dist/AirMirrorLite-release-candidate/AirMirrorLite.exe
+- dist/AirMirrorLite-Windows-x64-release-candidate-2026-10-23.zip (23,925,636 bytes)
+- EXE SHA256: 5A11F441353BDD2AE59F163890E458FF0EA44F19930946936531D9973FE3A9A8
+- ZIP SHA256: 56B4DF0F35D55BFD1D616D03367444838DB8B29868AC570B7F21CB24DD8B51DB
+
+The exact packaged EXE passes the silent native/GPU/480-frame AAC suite, real
+loopback control and three ownership/reconnect cycles. All 4093 ZIP entries pass
+CRC and SHA256 checks; no package files changed during tests and local/ contains
+only the generated display preset. Extracted launcher --prepare-only succeeds.
+Full extracted source builds locked/offline with an empty Cargo home and vendored
+Rust, using the already verified FFmpeg library prefix. This is not a fresh
+FFmpeg-toolchain rebuild or a byte-identical rebuild claim.
+
+Evidence: local/release-review/final-result.json, source-rebuild.log and
+native/control/lifecycle-packaged.log; the adjacent ZIP verification report.
+Documentation was reduced from 17 files/181,026 bytes to 10/about 66 KiB including
+README, with valid relative links. All six preserved executable hashes match.
+No receiver processes remain. releaseQualified remains false pending the physical
+gates below. No app launch, phone action, sound playback, Computer Use or upload
+is requested by this checkpoint.
 
 ## Accepted behavior and limits
 
