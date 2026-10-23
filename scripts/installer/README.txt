@@ -2,6 +2,10 @@ iPhone Air Mirror - installed beta
 
 Open iPhone Air Mirror from the Start menu. Installation itself does not launch
 the receiver, play sound, change firewall rules or install system components.
+Setup checks the same executable in a temporary directory before changing app
+files, then prepares the exact installed copy. If permissions fail after copying,
+setup reports that repair is needed and returns exit code 20. It retains an
+uninstaller and user data; this later failure does not promise automatic rollback.
 
 Identity, preferences and bounded logs use:
   %LOCALAPPDATA%\iPhone Air Mirror

@@ -142,6 +142,17 @@ imports [SetProcessDpiAwarenessContext](https://learn.microsoft.com/en-us/window
 This version gate prevents loader failure on earlier Windows 10 builds; it is
 not physical validation across every Windows version admitted by the installer.
 
+The per-user installer uses Inno Setup 6.7.1. Its file callbacks catch script
+exceptions, so raising from AfterInstall is not a rollback/failure contract.
+Preflight extracts the same EXE to temporary storage and prepares it before
+application writes. A later installed-file preparation failure sets a nonzero
+custom exit code and repair state. Inno Exec resets child error mode; a small
+bounded CreateProcessW bridge preserves the mode needed for silent loader errors.
+The compiler engine and loader must be i386 to match its reviewed record layouts.
+[Inno events](https://jrsoftware.org/ishelp/topic_scriptevents.htm),
+[pinned callback implementation](https://github.com/jrsoftware/issrc/blob/7d30127fdb2ca8b7c0617e8d616e8625bf6ecd99/Projects/Src/Setup.MainFunc.pas),
+[error mode inheritance](https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-seterrormode).
+
 ## UI correction researched before implementation (2026-10-23)
 
 The user's supplied screenshot is evidence for this bounded visual review, not a

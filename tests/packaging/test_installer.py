@@ -124,15 +124,31 @@ class InstallerPolicy(unittest.TestCase):
             installer.test_root(target)
         self.assertNotEqual(installer.APP_ID, installer.TEST_APP_ID)
 
+    def test_setup_engine_architecture_must_match_native_process_record_layout(self):
+        path = self.root / "engine.exe"
+        header = bytearray(70)
+        header[:2] = b"MZ"
+        struct.pack_into("<I", header, 0x3c, 64)
+        header[64:] = b"PE\0\0\x4c\x01"
+        path.write_bytes(header)
+        installer.verify_setup_machine(path)
+        header[68:] = b"\x64\x86"
+        path.write_bytes(header)
+        with self.assertRaisesRegex(RuntimeError, "i386"):
+            installer.verify_setup_machine(path)
+
     def test_template_has_no_automatic_launch_or_recursive_deletion(self):
         source = (ROOT / "scripts/installer/iPhoneAirMirror.iss").read_text(encoding="utf-8")
         for section in ("[Run]", "[UninstallRun]", "[InstallDelete]", "[UninstallDelete]", "[Registry]"):
             self.assertNotIn("\n" + section + "\n", source)
         for setting in ("PrivilegesRequired=lowest", "MinVersion=10.0.15063", "CloseApplications=no", "RestartApplications=no",
                         "CreateUninstallRegKey=no", 'Parameters: "--data-dir ""{localappdata}\\iPhone Air Mirror"""',
-                        "SetErrorMode($8003)", "TestInstallDirectoryPascal", "SafeAncestors", "DLLGetLastError"):
+                        "SetErrorMode($8003)", "TestInstallDirectoryPascal", "SafeAncestors", "DLLGetLastError",
+                        "ExtractTemporaryFile('iPhoneAirMirror-preflight.exe')", "Check: WorkerIsReady",
+                        "GetCustomSetupExitCode", "Result := 20", "needs repair"):
             self.assertIn(setting, source)
         self.assertNotIn("DirectoryHasFiles", source)
+        self.assertNotIn("RaiseException(", source)
 
 
 if __name__ == "__main__":

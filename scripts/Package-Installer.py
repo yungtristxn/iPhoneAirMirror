@@ -15,6 +15,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import struct
 import subprocess
 import tomllib
 import uuid
@@ -48,6 +49,17 @@ def read_json(path):
     value = json.loads(data.decode("utf-8-sig"))
     require(isinstance(value, dict), f"Expected an object in {path.name}")
     return value
+
+
+def verify_setup_machine(path):
+    """The installer script's native process records deliberately use Win32 ABI."""
+    with path.open("rb") as stream:
+        header = stream.read(64)
+        require(len(header) == 64 and header[:2] == b"MZ", "Missing Setup PE header")
+        offset = struct.unpack_from("<I", header, 0x3c)[0]
+        require(64 <= offset <= path.stat().st_size - 6, "Invalid Setup PE offset")
+        stream.seek(offset)
+        require(stream.read(6) == b"PE\0\0\x4c\x01", "Setup engine must be i386 for the reviewed process ABI")
 
 
 def verify_package(directory):
@@ -173,7 +185,8 @@ def compiler_files(payload, scratch, record, isolated_root):
     write(scratch / "package-config.iss", "\n".join(f'#define {key} "{value}"' for key, value in config.items())
           + f"\n#define TestOnly {1 if isolated_root else 0}\n")
     files = sorted(portable.package_files(payload), key=lambda path: (path.name != EXECUTABLE, str(path)))
-    entries = []
+    executable = payload / EXECUTABLE
+    entries = [f'Source: "{executable}"; DestName: "iPhoneAirMirror-preflight.exe"; Flags: dontcopy noencryption; Hash: "{sha(executable)}"']
     for path in files:
         relative = path.relative_to(payload)
         parent = str(relative.parent)
@@ -206,7 +219,10 @@ def main():
     output = fresh_output(args.output, isolated is not None)
     directory, record, hashes = verify_package(args.portable)
     reject_links(args.iscc)
-    require(args.iscc.is_file(), "Install Inno Setup 6.7.1 or newer before compiling")
+    require(args.iscc.is_file(), "Install the reviewed Inno Setup 6.7.1 compiler before compiling")
+    setup_engine = args.iscc.parent / "Setup.e32"
+    reject_links(setup_engine)
+    verify_setup_machine(setup_engine)
     scratch = ROOT / "work" / ("installer-package-" + uuid.uuid4().hex[:12])
     reject_links(scratch)
     scratch.mkdir(parents=True, exist_ok=False)
@@ -218,6 +234,7 @@ def main():
                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     write(scratch / "compiler.log", result.stdout + result.stderr)
     require(result.returncode == 0 and compiled.is_file(), f"Installer compilation failed; see {scratch / 'compiler.log'}")
+    verify_setup_machine(compiled)
     _, after_record, after_hashes = verify_package(directory)
     require(after_record == record and after_hashes == hashes, "Portable input changed during compilation")
     signature = signature_status(compiled, scratch)
@@ -230,6 +247,7 @@ def main():
                "portableExecutableSha256": hashes[EXECUTABLE], "portableManifestSha256": hashes["BUILD.json"],
                "portableSourceCommit": record["sourceBaseCommit"], "portableSourceTreeSha256": record["sourceTreeSha256"],
                "compilerSha256": sha(args.iscc), "installedFilesManifestSha256": sha(payload / "installed-SHA256SUMS.txt"),
+               "setupEngineSha256": sha(setup_engine), "setupPeMachine": "i386; installs AMD64 application on x64 OS only",
                "installerScriptSha256": sha(ROOT / "scripts/installer/iPhoneAirMirror.iss"),
                "checks": ["exhaustive portable checksums", "clean committed source snapshot", "x64 FFmpeg legacy beta identity",
                           "same executable bytes", "Inno per-file compile hashes", "unchanged portable input", "actual Authenticode status"],

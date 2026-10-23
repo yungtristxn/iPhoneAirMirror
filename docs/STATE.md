@@ -16,11 +16,19 @@ startup/narrow layout with the longer name and icon-size renders were inspected.
 Source review findings (README encoding and legacy discovery-trace default) fixed.
 Evidence: local/release-branding/. No sound playback or Computer Use.
 
-A per-user installer is being prepared from the same source-complete portable
-payload, with preserved user data and explicit worker provisioning. Production
-install validation and new final artifact hashes are pending. Full media/phone
-audio acceptance remains separate; no default Windows audio output is available.
-No GitHub remote exists, no publication occurred and no signing key was used.
+A per-user installer wraps the same source-complete portable payload, preserving
+user data. Eight installer policy tests pass. A missing-DLL native fixture now
+fails preflight before app/data writes; post-copy preparation failure returns
+exit 20 with repair guidance and a working uninstaller instead of false success.
+The bounded, hidden process helper is reviewed against the pinned Inno 6.7.1
+i386 ABI. Test installers enforce exact workspace paths, reject links and refuse
+unowned destinations. Initial real-payload install/upgrade/uninstall checks
+preserved data and an unrelated file; final artifact regeneration is pending.
+Evidence: local/installer-missing-runtime-evidence/,
+local/installer-post-copy-failure-evidence/, local/installer-negative-a8226fb0fc/.
+Full media/phone audio acceptance remains separate; no default Windows audio
+output is available. No GitHub remote exists, no publication occurred and no
+signing key was used.
 
 ## Neutral phone interior
 

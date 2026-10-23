@@ -107,6 +107,24 @@ Private evidence stays under ignored local/; never package identity, media or lo
 
 ## Remaining release acceptance
 
+The beta installer is compiled with `scripts/Package-Installer.py` from a verified,
+clean, source-complete portable directory. It hashes every input and preserves
+the exact receiver EXE. It does not install anything while compiling. Example:
+
+```powershell
+python -B scripts/Package-Installer.py --portable dist/iPhoneAirMirror-0.1.0-beta.1 --output dist/iPhoneAirMirror-0.1.0-beta.1-windows-x64-setup.exe
+python -B tests/packaging/test_installer.py
+```
+
+An explicit `--test-install-root local/<fresh-name>` requires a separate output
+under `work/` whose name includes `test-only`. That build has a different AppId,
+fixed workspace app/data paths, no shortcuts and no uninstall registry entry.
+Its install/upgrade/uninstall and negative-path results are separate from
+production shortcut, Windows Apps registration and real per-user installation
+acceptance. Production setup and receiver binaries are unsigned. The API version
+floor is Windows 10 1703, not proof of testing across all admitted Windows/GPU
+combinations. No installer test launches the receiver or plays audio.
+
 Physical FFmpeg AAC-ELD/LC sound quality and A/V sync, pause/seek/FLUSH compatibility,
 extended drift and adverse network/endpoint recovery remain open. HAP needs
 its own encrypted-audio/A/V checks. Numeric latency requires actual phone-to-PC
