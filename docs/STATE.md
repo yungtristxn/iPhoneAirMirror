@@ -2,6 +2,20 @@
 
 Updated: 2026-10-23. Branch: codex/verified-pairing.
 
+## Public beta publication
+
+After the muted beta launch, the user reported "works great" and explicitly
+requested repository creation, source push and publication. This is a positive
+user report, not a measured audio/sync or sustained acceptance result.
+Target: yungtristxn/iPhoneAirMirror; both exact-name searches and the account's
+repository API found no existing match. The README is now user-facing and short,
+with generated native waiting-window/control images and installation/use steps.
+Build instructions remain in VALIDATION.md. No phone content is published.
+
+The tested installer/portable hashes below are retained. The release tag targets
+their build source 45b397a; main also includes the later documentation updates.
+Publication verification is pending. No runnable code or release bytes changed.
+
 ## GitHub beta preparation
 
 Display name: iPhone Air Mirror; package version 0.1.0-beta.1. The user selected

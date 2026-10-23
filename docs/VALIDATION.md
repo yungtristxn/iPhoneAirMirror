@@ -4,6 +4,23 @@ Build, parser/simulated-sender, GPU, physical iPhone picture, audible A/V and
 performance evidence are separate. An earlier pass does not qualify a new binary.
 Current results and artifact identity are in STATE.md.
 
+## Building
+
+Requires Windows x64, Rust, Visual Studio C++ x64 tools/Windows SDK, PowerShell 7
+and Python 3. FFmpeg's pinned tools and source are described in
+[DECODER_EXPERIMENT.md](DECODER_EXPERIMENT.md). First build:
+
+```powershell
+./scripts/Build-FFmpeg.ps1 -Fetch
+./scripts/Build.ps1 -Fetch -Test
+./scripts/Package.ps1
+```
+
+Default builds use FFmpeg AAC, legacy pairing and display updates. `-Profile Hap`
+is experimental; `-Profile FdkReference` is local-only and never release packaged.
+Use fresh package destinations to preserve fallback builds. The source-complete
+portable archive includes an offline REBUILD.txt recipe and dependency notices.
+
 ## Silent local checks
 
 From PowerShell 7 at the repository root:
